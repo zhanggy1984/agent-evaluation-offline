@@ -1,0 +1,74 @@
+"""应用配置：pydantic-settings 读 env（仅密钥类，业务参数一律落 system_config 表）。
+
+启动强校验（遗留清单 #31）：
+- jwt_secret 非空且 ≥256bit（32 字节）
+- fernet_keys 非空（逗号分隔多代）
+- db_password 非空
+测试环境（APP_ENV=test）跳过强校验（用 sqlite 内存）。
+"""
+from functools import lru_cache
+
+from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # ---- 运行 ----
+    app_env: str = "dev"
+    app_host: str = "0.0.0.0"
+    app_port: int = 8000
+    workers: int = 1  # 单进程部署约束（方案决策）
+
+    # ---- MySQL ----
+    db_host: str = "localhost"
+    db_port: int = 3306
+    db_user: str = "evaluation"
+    db_name: str = "ai_evaluation"
+    db_password: str = ""
+
+    # ---- 密钥（强校验） ----
+    jwt_secret: str = ""
+    fernet_keys: str = ""
+    jwt_access_minutes: int = 30
+    jwt_refresh_days: int = 7
+
+    # ---- LLM profile 密钥（judge 用，OpenAI 兼容端点） ----
+    judge_api_key: str = ""
+    review_api_key: str = ""
+    # 6.5 用例骨架生成独立 LLM（llm.* 配置在 system_config；密钥只走 env，不落盘）
+    llm_api_key: str = ""
+    # 6.6 邮件告警 SMTP 密码（smtp.* 配置在 system_config；密钥只走 env，不落盘）
+    smtp_password: str = ""
+
+    @model_validator(mode="after")
+    def _validate_secrets(self) -> "Settings":
+        if self.app_env == "test":
+            return self
+        if not self.jwt_secret or len(self.jwt_secret.encode("utf-8")) < 32:
+            raise ValueError("jwt_secret 必须 ≥256bit（32 字节 UTF-8），禁止启动（#31）")
+        if not self.fernet_keys.strip():
+            raise ValueError("fernet_keys 为空，禁止启动（MultiFernet 多密钥，逗号分隔）")
+        if not self.db_password:
+            raise ValueError("db_password 为空，禁止启动")
+        return self
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        return (
+            f"mysql+aiomysql://{self.db_user}:{self.db_password}@"
+            f"{self.db_host}:{self.db_port}/{self.db_name}?charset=utf8mb4"
+        )
+
+    @property
+    def fernet_key_list(self) -> list[str]:
+        return [k.strip() for k in self.fernet_keys.split(",") if k.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

@@ -1,0 +1,84 @@
+# AI Agent 评测系统 docker-compose（前置阶段 A）
+# 7.6 C 多 worker 化：默认 --workers=1 保持现状；置 BACKEND_WORKERS=2 可验证多 worker 互斥。
+# 跨进程已 DB 化：run 互斥（agent 行 FOR UPDATE）、reset(seed) 锁、熔断（agent_circuit）、
+# scanner 单例（GET_LOCK）。限流信号量/登录滑动窗口保持进程内（soft limit，DB 硬防线兜底）。
+# 宿主机 4 个 agent 通过 host.docker.internal 访问（extra_hosts 已配 host-gateway）
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ai-eval-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root_please_change}
+      MYSQL_DATABASE: ${DB_NAME:-ai_evaluation}
+      MYSQL_USER: ${DB_USER:-evaluation}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-change_me}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD:-root_please_change}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    networks: [app]
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: ai-eval-backend
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${DB_USER:-evaluation}
+      DB_NAME: ${DB_NAME:-ai_evaluation}
+      DB_PASSWORD: ${DB_PASSWORD:?db_password 必须设置}
+      JWT_SECRET: ${JWT_SECRET:?jwt_secret 必须设置（≥256bit）}
+      FERNET_KEYS: ${FERNET_KEYS:?fernet_keys 必须设置（逗号分隔多代）}
+      JUDGE_API_KEY: ${JUDGE_API_KEY:-}
+      REVIEW_API_KEY: ${REVIEW_API_KEY:-}
+      # 6.5 骨架生成 LLM 密钥（不落库；llm.* 配置在 system_config）
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # 6.6 邮件告警 SMTP 密码（不落库；smtp.* 配置在 system_config）
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # 空库重建 admin 初始密码（seed 优先取此值；首登仍强制改密）
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    ports:
+      - "${APP_HOST_PORT:-8100}:8000"
+    # 7.6 C5 多 worker：默认 1 保持现状；置 BACKEND_WORKERS=2 可验证多 worker 互斥
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${BACKEND_WORKERS:-1}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    extra_hosts:
+      # 宿主机 agent 访问（Linux host-gateway；Windows/Mac Docker Desktop 原生支持）
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # 开发期热挂载：改代码后 restart 即生效（无需 rebuild）；生产部署移除本段
+      - ./backend:/app
+      # 文件型用例自存文件（决策 #12）：宿主 ./uploads ↔ 容器 /app/uploads
+      - ./uploads:/app/uploads
+    networks: [app]
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: ai-eval-frontend
+    ports:
+      - "${FRONT_HOST_PORT:-8180}:80"
+    depends_on:
+      - backend
+    networks: [app]
+    restart: unless-stopped
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+  mysql-data:

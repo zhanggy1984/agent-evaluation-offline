@@ -1,0 +1,113 @@
+"""7.1 安全基座单测（app/core/security.py）。
+
+JWT(HS256 硬编码) / MultiFernet / bcrypt。宿主跑依赖 conftest 兜底注入
+JWT_SECRET / FERNET_KEYS / DB_PASSWORD（Settings #31 强校验，见 conftest.py）。
+"""
+import jwt as pyjwt
+import pytest
+
+from app.core import security
+from app.core.errors import ApiError
+
+
+# ---------------- 密码 ----------------
+def test_password_hash_verify_roundtrip():
+    h = security.hash_password("Eval#2026")
+    assert h != "Eval#2026"
+    assert security.verify_password("Eval#2026", h) is True
+    assert security.verify_password("wrong", h) is False
+
+
+def test_verify_password_bad_hash():
+    # 非法 bcrypt 串 → ValueError → 兜底返回 False（不抛出）
+    assert security.verify_password("x", "not-a-bcrypt-hash") is False
+
+
+# ---------------- Fernet ----------------
+def test_fernet_roundtrip():
+    raw = b"secret-token-bytes"
+    tok = security.fernet_encrypt(raw)
+    assert tok != raw
+    assert security.fernet_decrypt(tok) == raw
+
+
+def test_fernet_tampered_token_rejected():
+    raw = security.fernet_encrypt(b"data")
+    bad = raw[:-1] + bytes([raw[-1] ^ 0xFF])  # 篡改末字节 → InvalidToken → ApiError
+    with pytest.raises(ApiError):
+        security.fernet_decrypt(bad)
+
+
+# ---------------- JWT（HS256） ----------------
+def test_jwt_roundtrip():
+    token = security.create_access_token(user_id=7, role="evaluator")
+    payload = security.decode_access_token(token)
+    assert payload["sub"] == "7"
+    assert payload["role"] == "evaluator"
+    assert payload["type"] == "access"
+
+
+def test_jwt_expired(monkeypatch):
+    monkeypatch.setattr(security.settings, "jwt_access_minutes", -1)  # 签发即过期
+    token = security.create_access_token(user_id=1, role="admin")
+    with pytest.raises(ApiError):
+        security.decode_access_token(token)
+
+
+def test_jwt_wrong_secret():
+    token = pyjwt.encode({"sub": "1", "type": "access"},
+                         "another-secret-key-00000000000000000000000000000000",
+                         algorithm="HS256")
+    with pytest.raises(ApiError):
+        security.decode_access_token(token)
+
+
+def test_jwt_wrong_type():
+    # 载荷 type 非 access → 拒绝（refresh 不能当 access 用）
+    token = pyjwt.encode({"sub": "1", "role": "admin", "type": "refresh"},
+                         security.settings.jwt_secret, algorithm="HS256")
+    with pytest.raises(ApiError):
+        security.decode_access_token(token)
+
+
+def test_alg_none_rejected():
+    # 无签名 token：algorithms=["HS256"] 显式拒绝 alg=none
+    token = pyjwt.encode({"sub": "1", "type": "access", "exp": 9999999999},
+                         None, algorithm="none",
+                         headers={"alg": "none", "typ": "JWT"})
+    with pytest.raises(ApiError):
+        security.decode_access_token(token)
+
+
+# ---------------- 随机值 ----------------
+def test_random_ids():
+    assert len(security.new_family_id()) == 32  # 32 hex 字符
+    assert len(security.new_token_value()) >= 32  # urlsafe 48 bytes（refresh token 原文）
+
+
+# ---------------- SSRF（7.6 A4：build_networks 拒全放行 / 169.254 移出白名单） ----------------
+from app.core.http import DEFAULT_AGENT_CIDRS, build_networks
+
+
+def test_build_networks_rejects_any_any():
+    # 0.0.0.0/0、::/0 全地址放行 → 直接拒绝
+    with pytest.raises(ApiError):
+        build_networks(["0.0.0.0/0"])
+    with pytest.raises(ApiError):
+        build_networks(["::/0"])
+
+
+def test_build_networks_mixed_still_rejects():
+    # 白名单里混入 0/0 也要整体拒绝（不允许"借道"）
+    with pytest.raises(ApiError):
+        build_networks(["10.0.0.0/8", "0.0.0.0/0"])
+
+
+def test_build_networks_normal_cidrs_ok():
+    nets = build_networks(["10.0.0.0/8", "192.168.1.5"])
+    assert len(nets) == 2
+
+
+def test_default_cidrs_exclude_cloud_metadata():
+    # 169.254.0.0/16（云元数据段 metadata 169.254.169.254）不得在默认白名单
+    assert "169.254.0.0/16" not in DEFAULT_AGENT_CIDRS

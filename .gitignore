@@ -1,0 +1,37 @@
+# ---- 密钥与环境变量 ----
+# 真实环境变量（含 DB/JWT/FERNET/LLM/SMTP 密钥），严禁提交
+.env
+
+# ---- 构建产物与依赖 ----
+node_modules/
+dist/
+frontend/dist/
+
+# ---- 运行时数据与导出（报告/测试附件，体积大）----
+uploads/
+backend/uploads/
+backend/exports/
+backend/backups/
+backend/*.pdf
+
+# ---- Python 缓存 ----
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ---- 本地工具痕迹 ----
+.claude/
+
+# ---- 内部验收产物：逐 issue 一次性脚本（含测试凭据），不进仓库 ----
+backend/verify_*.py
+backend/run_*.py
+backend/trigger_*.py
+backend/expand_*.py
+backend/fix_*.py
+backend/gen_*.py
+backend/gold_*.py
+backend/heldout_*.py
+backend/monitor_run.py
+verify_probe*.py
+acceptance-*.md
+agent-baseline.md
