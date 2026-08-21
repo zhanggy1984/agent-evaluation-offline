@@ -1,7 +1,6 @@
 """6.4 数据清理：按 (agent_id, suite_id) 保留 N 次，分批删最老 run。
 
-- 排除：pinned（关键版本，不删）、被 issue 引用的 run（created_run_id/last_verify_run_id，
-  issue 需保留证据链）
+- 排除：pinned（关键版本，不删）
 - 级联：eval_result / judge_task / export_token 均 ON DELETE CASCADE，删 run 自动连带
 - 分批：每批 20 条，避免长事务锁表（run + 级联结果）
 - 幂等：仅候选已存在才删，重复调用安全；无候选 → purged=0
@@ -26,17 +25,17 @@ DEFAULT_RETAIN = 50    # 与 seed system_config retain_runs 缺省值一致
 DEFAULT_BATCH = 20     # 分批删除大小（run + 级联结果，控制单事务量）
 
 
-def candidates_to_purge(runs, issue_run_ids: set[int], retain: int = DEFAULT_RETAIN) -> list[int]:
+def candidates_to_purge(runs, retain: int = DEFAULT_RETAIN) -> list[int]:
     """可清理 run id：按 (agent_id, suite_id) 分组，每组保留最近 retain 个，其余候选。
 
     保留语义叠加版本维度：每个版本最近 1 条（版本代表）优先保护，剩余按时间填充 retain，
     防止高频迭代把早期但重要的版本代表全部顶掉（版本数 ≤ retain 时每版本至少留 1 条）。
-    排除：pinned（关键版本不删）、id 在 issue_run_ids 的 run（issue 引用需保留）。
+    排除：pinned（关键版本不删）。
     返回按 id 升序（旧先删，分批时优先清最老数据）。
     """
     groups: dict[tuple[int, int], list] = {}
     for r in runs:
-        if r.pinned or r.id in issue_run_ids:
+        if r.pinned:
             continue
         groups.setdefault((r.agent_id, r.suite_id), []).append(r)
     out = []
@@ -81,19 +80,16 @@ async def run_cleanup(db: AsyncSession, *, retain: int | None = None,
                       batch: int = DEFAULT_BATCH) -> dict:
     """执行一轮清理：分批删候选 run（CASCADE 连带 result/judge_task/export_token）。
 
-    返回 {purged, skipped_issue, skipped_pinned, retain}；无候选 → purged=0（幂等）。
+    返回 {purged, skipped_pinned, retain}；无候选 → purged=0（幂等）。
     """
-    from app.models import EvalRun, Issue
+    from app.models import EvalRun
 
     if retain is None:
         retain = await _retain_runs(db)
     rows = (await db.execute(select(EvalRun).where(
         EvalRun.status.in_(_TERMINAL)))).scalars().all()
-    issue_refs = (await db.execute(select(Issue.created_run_id, Issue.last_verify_run_id))).all()
-    issue_run_ids = {rid for a, b in issue_refs for rid in (a, b) if rid is not None}
-    skipped_issue = sum(1 for r in rows if r.id in issue_run_ids)
     skipped_pinned = sum(1 for r in rows if r.pinned)
-    candidates = candidates_to_purge(rows, issue_run_ids, retain)
+    candidates = candidates_to_purge(rows, retain)
     purged = 0
     for i in range(0, len(candidates), batch):
         ids = candidates[i:i + batch]
@@ -103,7 +99,6 @@ async def run_cleanup(db: AsyncSession, *, retain: int | None = None,
         logger.info("数据清理批次 %d-%d，累计 %d", i, i + len(ids), purged)
     await _agent_side_cleanup_hook(db, candidates)
     if purged:
-        logger.info("数据清理完成：purged=%d skipped_issue=%d skipped_pinned=%d retain=%d",
-                    purged, skipped_issue, skipped_pinned, retain)
-    return {"purged": purged, "skipped_issue": skipped_issue,
-            "skipped_pinned": skipped_pinned, "retain": retain}
+        logger.info("数据清理完成：purged=%d skipped_pinned=%d retain=%d",
+                    purged, skipped_pinned, retain)
+    return {"purged": purged, "skipped_pinned": skipped_pinned, "retain": retain}

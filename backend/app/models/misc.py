@@ -1,18 +1,13 @@
-"""问题 / 系统配置 / 导出令牌 / 审计日志。"""
+"""系统配置 / 导出令牌 / 审计日志 / 熔断器。（issue 系统与告警通知已随轻量化删除。）"""
 from sqlalchemy import (
-    Boolean, CHAR, DateTime, Enum, Float, ForeignKey, Index, Integer, JSON, String, Text,
-    UniqueConstraint, text,
+    Boolean, CHAR, DateTime, Enum, Float, ForeignKey, Index, Integer, JSON, String,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.issue_rules import ISSUE_SEVERITY, ISSUE_STATUS
 from app.models.base import Base
 
 CONFIG_SCOPE = ("run", "global", "registration")
-ISSUE_VERIFY_RESULT = ("reproduced", "fixed", "verified")
-
-ALARM_KIND = ("run", "overfit", "drift")
-ALARM_STATE = ("alerted", "recovered")
 
 
 class SystemConfig(Base):
@@ -25,44 +20,6 @@ class SystemConfig(Base):
         Enum(*CONFIG_SCOPE, name="config_scope"), nullable=False, default="global"
     )
     is_hot: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    updated_at: Mapped[object] = mapped_column(
-        DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"),
-        server_onupdate=text("CURRENT_TIMESTAMP"),
-    )
-
-
-class Issue(Base):
-    """问题跟踪（run 后自动复现验证，状态机 open→fixing→fixed→verified→closed）。"""
-    __tablename__ = "issue"
-    __table_args__ = (
-        Index("idx_issue_status", "status"),
-        Index("idx_issue_agent_status", "agent_id", "status"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    agent_id: Mapped[int] = mapped_column(ForeignKey("agent.id"), nullable=False)
-    title: Mapped[str] = mapped_column(String(256), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text)
-    related_case_id: Mapped[int | None] = mapped_column(Integer)
-    related_dimension: Mapped[str | None] = mapped_column(ForeignKey("dimension.code"))
-    severity: Mapped[str] = mapped_column(
-        Enum(*ISSUE_SEVERITY, name="issue_severity"), nullable=False, default="medium"
-    )
-    status: Mapped[str] = mapped_column(
-        Enum(*ISSUE_STATUS, name="issue_status"), nullable=False, default="open"
-    )
-    created_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("eval_run.id", ondelete="SET NULL")
-    )
-    resolved_version: Mapped[str | None] = mapped_column(String(64))
-    last_verify_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("eval_run.id", ondelete="SET NULL")
-    )
-    last_verify_result: Mapped[str | None] = mapped_column(
-        Enum(*ISSUE_VERIFY_RESULT, name="issue_verify_result")
-    )
-    created_at: Mapped[object] = mapped_column(
-        DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
     updated_at: Mapped[object] = mapped_column(
         DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"),
         server_onupdate=text("CURRENT_TIMESTAMP"),
@@ -118,42 +75,6 @@ class AgentCircuit(Base):
     # 误差超 1700s 会让熔断误判冷却已到、跨 run 放行探针（7.6 C3 集成测试抓出的 bug）
     opened_at: Mapped[float | None] = mapped_column(Float(precision=53))
     probe_inflight: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    updated_at: Mapped[object] = mapped_column(
-        DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"),
-        server_onupdate=text("CURRENT_TIMESTAMP"),
-    )
-
-
-class AlarmNotify(Base):
-    """6.6 告警通知去重表：唯一 (kind, key)，state 标记当前是否处于告警态。
-
-    key 语义：
-    - run 告警：f"run-{run_id}"（一次 run 一封聚合邮件，run 完成后即完成态）
-    - overfit 告警：f"overfit-{agent_id}"（agent 级，恢复 = 不再超阈值）
-    - drift 告警：f"drift-{dimension_code}"（维度级，恢复 = 不再漂移）
-
-    state=alerted 时距 last_sent_at 在 dedupe_window 秒内 → 跳过重复发送；
-    同 key 恢复（state→recovered）后再次 alert 可立即重发（新告警周期）。
-    """
-    __tablename__ = "alarm_notify"
-    __table_args__ = (
-        UniqueConstraint("kind", "key", name="uq_alarm_notify_kind_key"),
-        Index("idx_alarm_state", "state"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    kind: Mapped[str] = mapped_column(Enum(*ALARM_KIND, name="alarm_kind"), nullable=False)
-    key: Mapped[str] = mapped_column(String(128), nullable=False)
-    run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("eval_run.id", ondelete="SET NULL")
-    )
-    state: Mapped[str] = mapped_column(
-        Enum(*ALARM_STATE, name="alarm_state"), nullable=False, default="alerted"
-    )
-    last_sent_at: Mapped[object] = mapped_column(
-        DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
-    created_at: Mapped[object] = mapped_column(
-        DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
     updated_at: Mapped[object] = mapped_column(
         DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"),
         server_onupdate=text("CURRENT_TIMESTAMP"),

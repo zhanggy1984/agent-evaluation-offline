@@ -13,26 +13,21 @@ TERMINAL_STATUS = {"completed", "partial_failed", "scoring_failed", "timeout", "
 BASELINE_RUN_STATUS = ("completed", "partial_failed")
 
 
-def build_gate_cards(agents, runs, suites, case_cnt: dict, *,
-                     overfit_threshold: float = 15.0, overfit_window: int = 3) -> list[dict]:
+def build_gate_cards(agents, runs, suites, case_cnt: dict) -> list[dict]:
     """L0 门禁墙：逐 agent 最新版本跨 suite 汇总 + 陈旧 suite 单独标注。
 
     - 当前版本 = 最近终态 run（按 started_at）反推
     - 该版本下所有终态 run 跨 suite 汇总 agent_score（各 run 简单均值）
     - 陈旧 suite = 该 agent 有 suite 但当前版本下无终态 run
     - 无终态 run 的 agent → version=None，stale 列出全部 suite
-    - 6.4b overfit：最近 manual − 最近 N 次 held_out 均值（超阈值标 overfit=true，门禁降级）；
-      threshold/window 为全局热配置（system_config），调用方读入传入，防与告警分叉
     """
     out = []
     for agent in agents:
         agent_runs = [r for r in runs
                       if r.agent_id == agent.id and r.status in TERMINAL_STATUS and r.started_at]
         agent_suites = [s for s in suites if s.agent_id == agent.id]
-        overfit_state = _overfit_state(agent_runs, overfit_threshold, overfit_window)
         if not agent_runs:
             card = _card(agent, None, None, [], agent_suites, case_cnt, 0, 0, 0)
-            card.update(overfit_state)
             out.append(card)
             continue
         latest = max(agent_runs, key=lambda r: r.started_at)
@@ -45,34 +40,8 @@ def build_gate_cards(agents, runs, suites, case_cnt: dict, *,
             version_runs, agent_suites, case_cnt, total,
             sum(r.pass_case or 0 for r in version_runs),
             sum(r.fail_case or 0 for r in version_runs))
-        card.update(overfit_state)
         out.append(card)
     return out
-
-
-# 6.4b 过拟合判定：有评分终态（timeout/cancelled 无 agent_score 不参与）
-_OVERFIT_SCORED = ("completed", "partial_failed")
-
-
-def _overfit_state(agent_runs, threshold: float = 15.0, window: int = 3) -> dict:
-    """6.4b 过拟合状态：最近 manual run score − 最近 N 次 held_out run score 均值。
-
-    gap 缺失（任一侧无评分 run）→ overfit_gap=None、overfit=False（数据不足不误报）。
-    threshold / window 来自全局热配置（system_config），由 build_gate_cards 调用方读入传入，
-    与 overfit.check_overfit 同口径（防看板与告警分叉）。
-    """
-    manual = [r for r in agent_runs
-              if r.trigger_type == "manual" and r.status in _OVERFIT_SCORED
-              and r.agent_score is not None]
-    held = [r for r in agent_runs
-            if r.trigger_type == "held_out" and r.status in _OVERFIT_SCORED
-            and r.agent_score is not None]
-    m = max(manual, key=lambda r: (r.started_at, r.id)) if manual else None
-    h_sorted = sorted(held, key=lambda r: (r.started_at, r.id), reverse=True)
-    recent = h_sorted[:max(int(window), 1)]
-    held_avg = round(sum(float(r.agent_score) for r in recent) / len(recent), 2) if recent else None
-    gap = round(float(m.agent_score) - held_avg, 2) if m and held_avg is not None else None
-    return {"overfit_gap": gap, "overfit": gap is not None and gap > threshold}
 
 
 def _card(agent, version, agent_score, version_runs, agent_suites, case_cnt,

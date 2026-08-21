@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import (
-    agents, annotations, auth, cases, config, dashboard, exports, issues, meta, reviews, runs,
+    agents, annotations, auth, cases, config, dashboard, exports, meta, runs,
     scaffold, uploads, users,
 )
 from app.core.errors import register_error_handlers
@@ -61,11 +61,9 @@ app.include_router(cases.case_router, prefix="/api")
 app.include_router(uploads.router, prefix="/api")
 app.include_router(annotations.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
-app.include_router(issues.router, prefix="/api")
 app.include_router(exports.router, prefix="/api")
 app.include_router(exports.download_router, prefix="/api")
 app.include_router(meta.router, prefix="/api")
-app.include_router(reviews.router, prefix="/api")
 
 _scanner_task: asyncio.Task | None = None
 _judge_task: asyncio.Task | None = None

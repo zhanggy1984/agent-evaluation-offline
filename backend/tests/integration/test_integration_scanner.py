@@ -1,12 +1,10 @@
-"""7.2 scanner 回收 + issue 复现验证数据一致性（容器真库）。
+"""7.2 scanner 回收验证数据一致性（容器真库）。
 
-覆盖 §15.1 生命周期兜底 + 6.2 issue 闭环：
+覆盖 §15.1 生命周期兜底：
 - 租约/硬超时回收 running → timeout（并置 orchestrator 取消标志）
 - scoring 超时 → scoring_failed（保留采集数据，不误标执行失败）
 - 终态 run 不回收（completed 保持）
-- scanner ⑤ _verify_issues_pass 兜底补验（mock verify 返回计数）
-- issue 复现验证真库闭环：复现（open+fail→reproduced）、幂等（同 run 跳过）、
-  回归重开（fixed+reproduced→open + audit_log）、修复（fixing+pass→fixed）
+- 崩溃现场 salvage 出分 + 缺 case 对账回填 + 不新建 judge 任务
 
 仅回收 running：scoring 是终态（心跳已停），lease 过期会误覆盖成 timeout——
 scoring 崩溃兜底由评分恢复机制负责，scanner 不碰终态。
@@ -20,11 +18,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from app.core.db import SessionLocal
-from app.models import AuditLog, CaseVersion, EvalResult, EvalRun, Issue, JudgeTask
+from app.models import CaseVersion, EvalResult, EvalRun, JudgeTask
 from app.runner.orchestrator import orchestrator
-from app.runner.scanner import _reap_one_pass, _verify_issues_pass
-from app.runner.scorer import score_run
-from app.runner.issue_verify import verify_issues_for_run
+from app.runner.scanner import _reap_one_pass
 from helpers import create_chain, make_run
 
 
@@ -126,110 +122,6 @@ async def test_completed_not_reaped(db, env, monkeypatch):
     assert reaped == 0
     r = await _get_run(run.id)
     assert r.status == "completed"
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_verify_issues_pass_calls_verify(db, env, monkeypatch):
-    """scanner ⑤ 兜底：对最近终态 run 补验（mock verify 计数，不依赖真实 issue）。"""
-    ch = await _seed_chain(env, db, case_names=[])
-    now = _utcnow()
-    for _ in range(2):
-        r = make_run(ch["agent"].id, ch["suite"].id)
-        r.status = "completed"
-        r.finished_at = now
-        db.add(r)
-        env.runs.append(r)
-    await db.flush(); await db.commit()
-
-    calls: list[int] = []
-
-    async def fake_verify(run_id):
-        calls.append(run_id)
-        return 1
-
-    monkeypatch.setattr("app.runner.issue_verify.verify_issues_for_run", fake_verify)
-    updated = await _verify_issues_pass()
-    assert updated == len(calls)
-    assert len(calls) >= 2  # 含本次 2 个终态 run（库里可能还有其他终态 run 一并补验）
-
-
-async def _seed_result_run(env, db, ch, *, pass_fail="fail", status="completed"):
-    """在 create_chain 基础上补一个终态 run + eval_result（verify 按 run 幂等，各环节须新 run）。
-
-    同一 case 多 run 共享同一份 case 快照（case_version 唯一约束 (case_id, version_no)，
-    首个 run 建 v1，后续复用最新版本）。
-    """
-    agent, case = ch["agent"], ch["cases"][0]
-    run = make_run(agent.id, ch["suite"].id)
-    run.status = status
-    db.add(run)
-    cv = (await db.execute(select(CaseVersion).where(
-        CaseVersion.case_id == case.id).order_by(CaseVersion.version_no.desc()).limit(1))).scalars().first()
-    if cv is None:
-        cv = CaseVersion(case_id=case.id, version_no=1, content_hash="it72", snapshot={})
-        db.add(cv)
-        await db.flush()
-    er = EvalResult(run_id=run.id, case_id=case.id, case_version_id=cv.id,
-                    pass_fail=pass_fail, score_per_dimension=[])
-    db.add(er)
-    env.runs.append(run)
-    await db.commit()
-    return run
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_issue_verify_reproduce_reopen_fix(db, env):
-    """issue 复现验证真库闭环：复现 → 幂等 → 回归重开 → 修复（各环节独立 run 触发）。"""
-    ch = await _seed_chain(env, db, case_names=["it72-case"])
-    agent, case = ch["agent"], ch["cases"][0]
-    issue = Issue(agent_id=agent.id, title="it72-issue", related_case_id=case.id,
-                  related_dimension="completeness", severity="medium", status="open")
-    db.add(issue)
-    await db.flush()
-    env.issues.append(issue)
-    await db.commit()
-
-    # ① 复现验证：open + 整体 fail → reproduced（记录 last_verify_*，状态不变）
-    run1 = await _seed_result_run(env, db, ch, pass_fail="fail")
-    updated = await verify_issues_for_run(run1.id)
-    assert updated == 1
-    async with SessionLocal() as s:
-        it = await s.get(Issue, issue.id)
-        assert it.status == "open"
-        assert it.last_verify_run_id == run1.id
-        assert it.last_verify_result == "reproduced"
-
-    # ② 幂等：同 run1 再验 → 跳过（last_verify_run_id == run1.id）
-    assert await verify_issues_for_run(run1.id) == 0
-
-    # ③ 回归自动重开：新 run 复现 + fixed → open + audit_log
-    run2 = await _seed_result_run(env, db, ch, pass_fail="fail")
-    async with SessionLocal() as s:
-        it = await s.get(Issue, issue.id)
-        it.status = "fixed"
-        await s.commit()
-    assert await verify_issues_for_run(run2.id) == 1
-    async with SessionLocal() as s:
-        it = await s.get(Issue, issue.id)
-        assert it.status == "open"
-        assert it.last_verify_result == "reproduced"
-        audit = (await s.execute(select(AuditLog).where(
-            AuditLog.action == "issue.reopen",
-            AuditLog.target_id == str(issue.id)))).scalars().first()
-        assert audit is not None
-        assert audit.detail.get("old_status") == "fixed"
-
-    # ④ 修复验证：新 run 整体 pass + fixing → fixed（记录 last_verify_result，状态由人工流转）
-    run3 = await _seed_result_run(env, db, ch, pass_fail="pass")
-    async with SessionLocal() as s:
-        it = await s.get(Issue, issue.id)
-        it.status = "fixing"
-        await s.commit()
-    assert await verify_issues_for_run(run3.id) == 1
-    async with SessionLocal() as s:
-        it = await s.get(Issue, issue.id)
-        assert it.status == "fixing"  # 修复态由人工流转，验证只记录结果
-        assert it.last_verify_result == "fixed"
 
 
 # ---------------- 7.5a timeout salvage + pending 回收 ----------------
@@ -367,47 +259,3 @@ async def test_scoring_stuck_reaped_when_no_active_task(db, env, monkeypatch):
     assert r.status == "scoring_failed"
 
 
-# ---------------- 7.5e pending_human 降级（scanner ③.5 + score_run ④） ----------------
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_pending_human_blocks_score(db, env, monkeypatch):
-    """7.5e：pending_human 纳入 score_run 阻塞集——有 pending_human 任务时不提前打终态。"""
-    ch = await _seed_chain(env, db, case_names=["it75-ph"])
-    run = make_run(ch["agent"].id, ch["suite"].id)
-    run.status = "scoring"
-    db.add(run); await db.flush(); env.runs.append(run)
-    await _make_result(db, run.id, ch["cases"][0])  # judge_task.run_id FK → eval_result 须先存在
-    db.add(JudgeTask(run_id=run.id, case_id=ch["cases"][0].id, dimension_code="completeness",
-                     status="pending_human"))
-    await db.commit()
-
-    async def _configured(db):
-        return True  # 强制走 judge 段（阻塞集判定依赖建任务段）
-
-    monkeypatch.setattr("app.runner.scorer._judge_configured", _configured)
-    await score_run(run.id)
-    r = await _get_run(run.id)
-    assert r.status == "scoring"  # pending_human 阻塞，不收敛为终态
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_pending_human_timeout_degrades(db, env, monkeypatch):
-    """7.5e：pending_human 超时（human_review_timeout）→ ③.5 降级 failed + ④ score_run 兜底收敛。"""
-    ch = await _seed_chain(env, db, case_names=["it75-ph2"])
-    now = _utcnow()
-    run = make_run(ch["agent"].id, ch["suite"].id, {"human_review_timeout": 1})
-    run.status = "scoring"
-    run.finished_at = now  # 已进入评分阶段（未超 scoring_timeout，不触发 ③）
-    db.add(run); await db.flush(); env.runs.append(run)
-    await _make_result(db, run.id, ch["cases"][0])  # case A 已采集
-    db.add(JudgeTask(run_id=run.id, case_id=ch["cases"][0].id, dimension_code="completeness",
-                     status="pending_human", updated_at=now - timedelta(seconds=100)))
-    await db.commit()
-
-    _patch_cancel(monkeypatch)
-    await _reap_one_pass()
-    r = await _get_run(run.id)
-    assert r.agent_score is not None  # ④ score_run 兜底收敛（降级后无活跃任务）
-    async with SessionLocal() as s:
-        tasks = (await s.execute(select(JudgeTask).where(JudgeTask.run_id == run.id))).scalars().all()
-        assert all(t.status == "failed" for t in tasks)  # ③.5 降级

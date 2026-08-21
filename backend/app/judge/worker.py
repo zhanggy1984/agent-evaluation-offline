@@ -145,23 +145,6 @@ async def _process_one(t: JudgeTask, run_cfg: dict, interface_id: int, client: J
                 agent_output=result.answer,
                 rubric_version=version,
             )
-            # 7.5e 低置信 → pending_human（人工复核）：confidence 显式给出且低于阈值才降级；
-            # 缺失（真实 judge 现输出无此字段）→ None，正常 done，永不进 pending_human（向后兼容）
-            conf = verdict.confidence
-            review_threshold = float(run_cfg.get("judge_review_confidence", 0.7))
-            if conf is not None and conf < review_threshold:
-                t.status = "pending_human"
-                t.result = {
-                    "dimension": t.dimension_code, "level": verdict.level,
-                    "score": verdict.score, "reason": verdict.reason,
-                    "rubric_version": verdict.rubric_version, "confidence": conf,
-                }
-                t.claim_id = None
-                t.lease_until = None
-                await db.commit()
-                logger.info("run %s case %s %s 低置信（%.2f）→ pending_human 人工复核",
-                            t.run_id, t.case_id, t.dimension_code, conf)
-                return
             t.status = "done"
             t.result = {
                 "dimension": t.dimension_code, "level": verdict.level,

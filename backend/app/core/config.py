@@ -36,11 +36,6 @@ class Settings(BaseSettings):
 
     # ---- LLM profile 密钥（judge 用，OpenAI 兼容端点） ----
     judge_api_key: str = ""
-    review_api_key: str = ""
-    # 6.5 用例骨架生成独立 LLM（llm.* 配置在 system_config；密钥只走 env，不落盘）
-    llm_api_key: str = ""
-    # 6.6 邮件告警 SMTP 密码（smtp.* 配置在 system_config；密钥只走 env，不落盘）
-    smtp_password: str = ""
 
     @model_validator(mode="after")
     def _validate_secrets(self) -> "Settings":

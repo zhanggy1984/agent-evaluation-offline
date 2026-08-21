@@ -214,9 +214,8 @@ async def score_run(run_id: int) -> None:
             await db.commit()
             tasks = (await db.execute(select(JudgeTask).where(
                 JudgeTask.run_id == run_id))).scalars().all()
-            # 存在 pending/processing/pending_human → 保持 scoring 等 worker（批后触发评分）
-            # 7.5e pending_human 纳入阻塞集：否则被 _judge_results_by_case 跳过而提前打终态（现 bug）
-            if any(t.status in ("pending", "processing", "pending_human") for t in tasks):
+            # 存在 pending/processing → 保持 scoring 等 worker（批后触发评分）
+            if any(t.status in ("pending", "processing") for t in tasks):
                 logger.info("run %s judge 任务未完成，保持 scoring（%d 个）", run_id, len(tasks))
                 return
             judge_by_case = _judge_results_by_case(tasks)
@@ -296,39 +295,6 @@ async def _score_executed_results(
     await db.commit()
     logger.info("run %s 评分完成 status=%s agent_score=%s pass=%s fail=%s na=%s err=%s",
                 run.id, run.status, run.agent_score, passed, failed, na, error)
-
-    # ---- 尾部（告警/issue/overfit）：score_run 与 salvage 共用，异常隔离——失败绝不影响 run 状态 ----
-    try:
-        from app.core.alarm import get_alarm_config, notify_alarm
-        from app.models import Agent
-        cfg = await get_alarm_config(db)
-        total_cnt = len(results)
-        agent = await db.get(Agent, run.agent_id)
-        name = agent.name if agent else f"agent{run.agent_id}"
-        if failed > 0 or (total_cnt and error / total_cnt > cfg["error_ratio"]):
-            summary = (f"run #{run.id}（{name}）评测异常：status={run.status}，"
-                       f"pass={passed} fail={failed} na={na} error={error}，"
-                       f"agent_score={run.agent_score}")
-            await notify_alarm("run", f"run-{run.agent_id}", run.id, True, summary)
-        else:
-            summary = (f"run #{run.id}（{name}）评测正常：status={run.status}，"
-                       f"pass={passed} fail={failed} na={na} error={error}，"
-                       f"agent_score={run.agent_score}")
-            await notify_alarm("run", f"run-{run.agent_id}", run.id, False, summary)
-    except Exception:
-        logger.exception("run %s 告警通知异常（不影响 run 状态）", run.id)
-
-    try:
-        from app.runner.issue_verify import verify_issues_for_run
-        await verify_issues_for_run(run.id)
-    except Exception:
-        logger.exception("run %s 复现验证异常（不影响 run 状态）", run.id)
-
-    try:
-        from app.runner.overfit import check_overfit
-        await check_overfit(run.id)
-    except Exception:
-        logger.exception("run %s overfit 检测异常（不影响 run 状态）", run.id)
     return True
 
 
@@ -337,8 +303,8 @@ async def score_run_salvage(run_id: int) -> None:
 
     原链路 scanner 置 timeout 后只 cancel、从不评分 → agent_score 恒 NULL（验收
     「故障后 run 能出分」）。salvage 只评已采集结果（含规则维度 + 已 done 的 judge），
-    不新建 judge 任务（故障现场不放大外部请求）；残留 pending/processing/pending_human
-    任务废弃为 failed（judge 未判维度 → N/A + judge_incomplete 兜底）；保持终态
+    不新建 judge 任务（故障现场不放大外部请求）；残留 pending/processing 任务废弃为
+    failed（judge 未判维度 → N/A + judge_incomplete 兜底）；保持终态
     timeout/scoring_failed 不翻转，只回填评分数据。幂等：已出分或非目标态直接返回。
     """
     from app.core.db import SessionLocal
@@ -368,13 +334,13 @@ async def score_run_salvage(run_id: int) -> None:
             await db.commit()
             results = (await db.execute(select(EvalResult).where(
                 EvalResult.run_id == run_id))).scalars().all()
-        # 残留 judge 任务废弃：pending/processing/pending_human → failed（done 保留结果），
+        # 残留 judge 任务废弃：pending/processing → failed（done 保留结果），
         # 不再新建任务——故障现场不放大外部请求。
         abandoned = False
         tasks = (await db.execute(select(JudgeTask).where(
             JudgeTask.run_id == run_id))).scalars().all()
         for t in tasks:
-            if t.status in ("pending", "processing", "pending_human"):
+            if t.status in ("pending", "processing"):
                 t.status = "failed"
                 t.claim_id = None
                 t.lease_until = None

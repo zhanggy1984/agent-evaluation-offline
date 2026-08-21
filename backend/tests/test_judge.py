@@ -51,30 +51,6 @@ class TestExtractVerdict(unittest.TestCase):
         v = extract_verdict('{"level": 2, "reason": "偏差", "other": "x"}')
         self.assertEqual(v, {"level": 2, "reason": "偏差"})
 
-    # ---- 7.5e 可选 confidence（0-1）----
-    def test_confidence_parsed(self):
-        # 合法 confidence → 透出（float）
-        v = extract_verdict('{"level": 4, "reason": "事实准确", "confidence": 0.9}')
-        self.assertEqual(v, {"level": 4, "reason": "事实准确", "confidence": 0.9})
-
-    def test_confidence_int_parsed_as_float(self):
-        v = extract_verdict('{"level": 3, "reason": "x", "confidence": 1}')
-        self.assertEqual(v["confidence"], 1.0)
-
-    def test_confidence_missing_not_included(self):
-        # 缺失 → 不含键（真实 DeepSeek 现输出；worker 据此永不进 pending_human，向后兼容）
-        v = extract_verdict('{"level": 3, "reason": "x"}')
-        self.assertNotIn("confidence", v)
-
-    def test_confidence_out_of_range_ignored(self):
-        # 越界 → 容忍不含键（不因 judge 偶发脏字段打 failed）
-        v = extract_verdict('{"level": 3, "reason": "x", "confidence": 1.5}')
-        self.assertEqual(v, {"level": 3, "reason": "x"})
-
-    def test_confidence_invalid_type_ignored(self):
-        v = extract_verdict('{"level": 3, "reason": "x", "confidence": "高"}')
-        self.assertEqual(v, {"level": 3, "reason": "x"})
-
     def test_invalid_level_out_of_range(self):
         with self.assertRaises(JudgeError):
             extract_verdict('{"level": 6, "reason": "x"}')
@@ -133,7 +109,7 @@ class TestBuildMessages(unittest.TestCase):
 
     def test_output_schema_enforced(self):
         user = self.msg[1]["content"]
-        self.assertIn('{"level": <0-5>, "reason": "<理由>", "confidence": <可选 0-1>}', user)
+        self.assertIn('{"level": <0-5>, "reason": "<理由>"}', user)
 
     def test_reference_docs_rendered_when_provided(self):
         msg = build_messages(dimension=DIM, template=TEMPLATE,

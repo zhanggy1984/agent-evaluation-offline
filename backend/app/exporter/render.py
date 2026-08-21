@@ -4,15 +4,14 @@
 （solution_detail :946 风险 #22 的结构性消除）。payload 由调用方（父进程）
 组装为可序列化 dict，本模块只负责渲染，不碰数据库。
 
+导出只支持 PDF（轻量化后 xlsx 已移除）。
+
 单位约定（与全站一致）：
 - 分数 0-100（[[score-scale-hundred]]）
 - 成本金额（元），单价单位 = 元/百万 token（[[cost-unit-per-million]]）
 """
 import io
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
@@ -75,19 +74,6 @@ def _err(r: dict) -> str:
     if not t and not d:
         return ""
     return f"{t}: {d}" if t else d
-
-
-# ---- 注入防护（7.6 A6）-----------------------------------------------------
-
-_CSV_FORBIDDEN = ("=", "+", "-", "@", "\t", "\r")
-
-
-def _sanitize_cell(v):
-    """公式注入防护：可控串以 = + - @ 或制表/换行开头时加 ' 前缀使其成为纯文本（Excel 公式不执行）。
-    非字符串（数值/None）原样返回，openpyxl 正常写数字/空单元格。"""
-    if not isinstance(v, str):
-        return v
-    return "'" + v if v.startswith(_CSV_FORBIDDEN) else v
 
 
 def _esc_html(s) -> str:
@@ -189,81 +175,4 @@ def render_pdf(payload: dict, watermark: str) -> bytes:
     story.append(tbl)
 
     doc.build(story, onFirstPage=_watermark, onLaterPages=_watermark)
-    return buf.getvalue()
-
-
-# ---- Excel -----------------------------------------------------------------
-
-def _style_header(ws) -> None:
-    fill = PatternFill("solid", fgColor="2F5597")
-    for c in ws[1]:
-        c.font = Font(bold=True, color="FFFFFF")
-        c.fill = fill
-        c.alignment = Alignment(vertical="center")
-    ws.freeze_panes = "A2"
-
-
-def render_xlsx(payload: dict, watermark: str) -> bytes:
-    run, results = payload["run"], payload["results"]
-    wb = Workbook()
-
-    # Sheet1 汇总
-    ws = wb.active
-    ws.title = "汇总"
-    rows = [
-        ("Run ID", run["run_id"]), ("Agent", run.get("agent_name") or ""),
-        ("版本", run.get("version") or ""),
-        ("状态", RUN_STATUS_LABEL.get(run.get("status"), run.get("status", ""))),
-        ("触发方式", run.get("trigger_type") or ""), ("总分", run.get("agent_score")),
-        ("用例总数", run.get("total_case", 0)),
-        ("通过 / 失败 / 错误 / N/A", f"{run.get('pass_case', 0)} / {run.get('fail_case', 0)}"
-                                   f" / {run.get('error_case', 0)} / {run.get('na_case', 0)}"),
-        ("TTFT p50/p95 (ms)", f"{run.get('ttft_p50')} / {run.get('ttft_p95')}"),
-        ("E2E p50/p95 (ms)", f"{run.get('e2e_p50')} / {run.get('e2e_p95')}"),
-        ("Token 总量", run.get("total_tokens")), ("成本（元）", run.get("total_cost")),
-        ("模型", ", ".join(run.get("models") or []) or "N/A"),
-    ]
-    for i, (k, v) in enumerate(rows, start=1):
-        ws.cell(i, 1, k).font = Font(bold=True)
-        ws.cell(i, 2, _sanitize_cell(v))
-    ws.column_dimensions["A"].width = 26
-    ws.column_dimensions["B"].width = 46
-
-    # Sheet2 用例明细
-    ws2 = wb.create_sheet("用例明细")
-    ws2.append(["序号", "用例", "接口", "结果", "总分", "维度分", "错误", "模型", "Tokens", "成本(元)"])
-    for i, r in enumerate(results, 1):
-        ws2.append([
-            i, _sanitize_cell(r.get("case_name")), _sanitize_cell(r.get("interface_name")),
-            _sanitize_cell(PF_LABEL.get(r.get("pass_fail"), r.get("pass_fail", ""))),
-            r.get("score_total"), _sanitize_cell(_dims(r.get("score_per_dimension"))),
-            _sanitize_cell(_err(r)),
-            _sanitize_cell(r.get("model")), r.get("total_tokens"), r.get("total_cost"),
-        ])
-    for idx, w in enumerate([6, 30, 16, 8, 8, 40, 28, 14, 10, 12], 1):
-        ws2.column_dimensions[get_column_letter(idx)].width = w
-    _style_header(ws2)
-
-    # Sheet3 成本明细
-    ws3 = wb.create_sheet("成本明细")
-    ws3.append(["用例", "模型", "Total Tokens", "成本(元)"])
-    for r in results:
-        ws3.append([_sanitize_cell(r.get("case_name")), _sanitize_cell(r.get("model")),
-                    r.get("total_tokens"), r.get("total_cost")])
-    if results:
-        ws3.append(["合计", "", sum(r.get("total_tokens") or 0 for r in results),
-                    round(sum((r.get("total_cost") or 0) for r in results), 6)])
-        for c in ws3[1]:
-            c.font = Font(bold=True)
-    for idx, w in enumerate([30, 14, 14, 14], 1):
-        ws3.column_dimensions[get_column_letter(idx)].width = w
-    _style_header(ws3)
-
-    # 页眉/页脚水印（Excel 无水印标准实现，落页脚最接近）
-    for s in wb.worksheets:
-        s.oddFooter.center.text = watermark
-        s.evenFooter.center.text = watermark
-
-    buf = io.BytesIO()
-    wb.save(buf)
     return buf.getvalue()

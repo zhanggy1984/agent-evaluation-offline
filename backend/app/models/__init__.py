@@ -8,9 +8,9 @@ from app.models.agent import Agent, AgentInterface
 from app.models.case import (
     CaseAnnotation, CaseScene, CaseVersion, SceneCatalog, TestCase, TestSuite,
 )
-from app.models.run import EvalResult, EvalRun, JudgeDriftHistory, JudgeTask
+from app.models.run import EvalResult, EvalRun, JudgeTask
 from app.models.user import RefreshToken, User
-from app.models.misc import AgentCircuit, AlarmNotify, AuditLog, ExportToken, Issue, SystemConfig
+from app.models.misc import AgentCircuit, AuditLog, ExportToken, SystemConfig
 
 __all__ = [
     "Base",
@@ -19,8 +19,8 @@ __all__ = [
     "JudgeRubric", "MetricDef", "AssertionOpDef",
     "TestSuite", "TestCase", "CaseVersion", "CaseAnnotation",
     "SceneCatalog", "CaseScene",
-    "EvalRun", "EvalResult", "JudgeTask", "JudgeDriftHistory",
+    "EvalRun", "EvalResult", "JudgeTask",
     "User", "RefreshToken",
-    "Issue", "SystemConfig", "ExportToken", "AuditLog", "AlarmNotify",
+    "SystemConfig", "ExportToken", "AuditLog",
     "AgentCircuit",
 ]

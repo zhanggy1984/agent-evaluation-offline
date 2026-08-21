@@ -6,7 +6,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from app.runner.scorer import (
     _aggregate_precomputed, _enabled_dims, _resolve_targets, _score_executed_results,
@@ -248,21 +248,15 @@ class TestRunLevelAggregation(unittest.TestCase):
     def _score(self, results, snapshot, targets=None):
         """跑 _score_executed_results，返回 (run, 是否有评分异常)。
 
-        run 级聚合是核心断言目标，run 由测试构造传入；尾部告警/issue/overfit
-        钩子各自开真实 DB session，宿主不连库 → patch 三个源头模块函数。
+        run 级聚合是核心断言目标，run 由测试构造传入。
         """
         db = AsyncMock()
         db.get.return_value = SimpleNamespace(snapshot=snapshot)
         db.commit.return_value = None
         run = self._run()
         async def _go():
-            with patch("app.core.alarm.get_alarm_config",
-                       AsyncMock(return_value={"error_ratio": 1.0})), \
-                 patch("app.core.alarm.notify_alarm", AsyncMock()), \
-                 patch("app.runner.issue_verify.verify_issues_for_run", AsyncMock()), \
-                 patch("app.runner.overfit.check_overfit", AsyncMock()):
-                ok = await _score_executed_results(db, run, results,
-                                                   DEF_WEIGHTS, targets or {}, {}, {})
+            ok = await _score_executed_results(db, run, results,
+                                               DEF_WEIGHTS, targets or {}, {}, {})
             return ok
         ok = asyncio.run(_go())
         return run, ok

@@ -28,7 +28,6 @@ def main() -> int:
     jwt = b64url(48)      # 远大于 256bit
     db_pwd = b64url(18)
     judge_key = os.environ.get("JUDGE_API_KEY", "").strip()
-    review_key = os.environ.get("REVIEW_API_KEY", "").strip()
 
     content = f"""# ============ AI Agent 评测系统 .env（由 scripts/init_env.py 生成） ============
 APP_ENV=dev
@@ -48,7 +47,6 @@ JWT_SECRET={jwt}
 
 # LLM profile 密钥（judge 用，OpenAI 兼容端点；base_url/model 配在 system_config）
 JUDGE_API_KEY={judge_key}
-REVIEW_API_KEY={review_key}
 """
     ENV_PATH.write_text(content, encoding="utf-8")
     print(f"已生成 .env：{ENV_PATH}")

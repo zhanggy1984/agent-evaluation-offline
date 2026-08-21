@@ -34,7 +34,6 @@
           <div class="case-panel">
             <div class="toolbar">
               <el-button v-if="isStaff && curSuiteId" type="primary" size="small" @click="openCaseDialog()">新建用例</el-button>
-              <el-button v-if="isStaff && curAgentId" size="small" :loading="generatingSkeleton" @click="handleGenerateSkeleton">生成骨架</el-button>
               <el-button size="small" :loading="loadingCases" @click="loadCases">刷新</el-button>
             </div>
             <el-table :data="cases" border size="small" v-loading="loadingCases">
@@ -244,7 +243,6 @@ import { listAgents, listInterfaces, listScenes, addCaseScenes } from '../api/ag
 import { listSuites, createSuite, updateSuite, deleteSuite } from '../api/suites'
 import { listCases, getCase, createCase, updateCase, invalidateCase } from '../api/cases'
 import { uploadFile } from '../api/uploads'
-import { generateSkeleton } from '../api/skeleton'
 import { listTodo, listCaseAnnotations, addAnnotation } from '../api/annotations'
 import { useAuthStore } from '../stores/auth'
 import { parseCaseField, buildCaseExample } from '../utils/caseParse'
@@ -283,42 +281,6 @@ const onAgentChange = async () => {
   curSuiteId.value = null
   cases.value = []
   await loadSuites()
-}
-
-// ---- 6.5 骨架生成（全量场景×接口，生成结果 status=draft，人工补齐黄金答案/断言后启用） ----
-const generatingSkeleton = ref(false)
-const handleGenerateSkeleton = async () => {
-  if (!curAgentId.value) return
-  const sceneCount = scenes.value.length || '全部'
-  try {
-    await ElMessageBox.confirm(
-      `将按 ${sceneCount} 个场景 × 全部已启用接口调用 LLM 生成用例骨架（每场景 1 次调用），` +
-      '生成结果为 draft 骨架，需人工补齐黄金答案/断言后启用；约需数十秒，是否继续？',
-      '生成骨架', { type: 'warning', confirmButtonText: '开始生成' }
-    )
-  } catch {
-    return // 用户取消
-  }
-  generatingSkeleton.value = true
-  try {
-    const r = await generateSkeleton(curAgentId.value, {})
-    let msg = `生成 ${r.generated} 个骨架，跳过 ${r.skipped} 个重复`
-    if (r.missing?.length) {
-      const first = r.missing[0]
-      msg += `；${r.missing.length} 个场景部分接口缺骨架（如 ${first.interface_names?.join('/')}）`
-      ElMessage.warning(msg)
-    } else if (r.failures?.length) {
-      msg += `；${r.failures.length} 个场景生成失败：${r.failures[0].error}`
-      ElMessage.warning(msg)
-    } else {
-      ElMessage.success(msg)
-    }
-    await loadSuites()
-  } catch (e) {
-    // 拦截器已弹错误
-  } finally {
-    generatingSkeleton.value = false
-  }
 }
 
 const loadSuites = async () => {

@@ -12,13 +12,11 @@ mock 策略（见 7.2 方案）：
 - orchestrator._probe_before_run → True（跳过 B.5 网络探测）
 - orchestrator._call_once → 按 case.name 返回固定 CaseOutcome（绕过真网络）
 - scorer._judge_configured → False（judge 未配置路径，断言评分一次到终态）
-- app.core.alarm.notify_alarm → noop（不写告警通知表）
 """
 import pytest
 
 pytest.importorskip("aiomysql")
 
-import app.core.alarm
 from sqlalchemy import select
 
 from app.core.db import SessionLocal
@@ -44,10 +42,6 @@ async def fake_judge_configured(db):
     return False
 
 
-async def fake_notify(*args, **kwargs):
-    return None
-
-
 def make_call_once(results: dict):
     """按 case.name 返回固定 CaseOutcome 的 _call_once 替身。"""
 
@@ -71,7 +65,6 @@ def _patch_orchestrator(monkeypatch, call_once):
     monkeypatch.setattr(orchestrator, "_probe_before_run", fake_probe)
     monkeypatch.setattr(orchestrator, "_call_once", call_once)
     monkeypatch.setattr("app.runner.scorer._judge_configured", fake_judge_configured)
-    monkeypatch.setattr(app.core.alarm, "notify_alarm", fake_notify)
 
 
 async def _seed(env, db, *, run_cfg=None, **kw):

@@ -10,16 +10,9 @@
         active-text-color="#ffffff"
       >
         <el-menu-item index="/dashboard">看板</el-menu-item>
-        <el-menu-item index="/performance">性能面板</el-menu-item>
-        <el-menu-item index="/cost">成本面板</el-menu-item>
-        <el-menu-item index="/coverage">覆盖率</el-menu-item>
-        <el-menu-item index="/issues">问题列表</el-menu-item>
-        <el-menu-item index="/meta-eval">元评测</el-menu-item>
-        <el-menu-item v-if="isStaff" index="/reviews">人工复核</el-menu-item>
         <el-menu-item index="/config">配置中心</el-menu-item>
         <el-menu-item index="/agents">Agent 管理</el-menu-item>
         <el-menu-item index="/cases">用例管理</el-menu-item>
-        <el-menu-item v-if="isAdmin" index="/plugins">插件字典</el-menu-item>
         <el-menu-item v-if="isAdmin" index="/users">用户管理</el-menu-item>
       </el-menu>
     </el-aside>

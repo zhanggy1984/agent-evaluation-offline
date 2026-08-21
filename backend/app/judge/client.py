@@ -29,18 +29,13 @@ class JudgeError(Exception):
 
 @dataclass
 class JudgeVerdict:
-    """单维度判分结果。score = RATINGS[level] × 100（0-100，步进 20）。
-
-    confidence：可选自信度（0-1，7.5e）。低置信 → 任务转 pending_human（人工复核）；
-    缺失（真实 DeepSeek 现输出无此字段）→ None，永不进 pending_human（向后兼容）。
-    """
+    """单维度判分结果。score = RATINGS[level] × 100（0-100，步进 20）。"""
 
     dimension: str
     level: int          # 0-5 锚点索引
     score: float
     reason: str
     rubric_version: str
-    confidence: float | None = None
 
 
 def is_configured(api_key: str, base_url: str, model_name: str) -> bool:
@@ -83,12 +78,7 @@ def extract_verdict(text: str) -> dict:
     reason = data.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         raise JudgeError("judge reason 缺失或为空")
-    result = {"level": level, "reason": reason.strip()}
-    # 7.5e 可选 confidence（0-1）；缺失/非法类型 → 不含该键（既有精确相等断言不受影响）
-    conf = data.get("confidence")
-    if isinstance(conf, (int, float)) and not isinstance(conf, bool) and 0 <= conf <= 1:
-        result["confidence"] = float(conf)
-    return result
+    return {"level": level, "reason": reason.strip()}
 
 
 def _render_anchors(template: dict) -> str:
@@ -123,8 +113,7 @@ def build_messages(
         f"分级锚点（level 0-5，对应分数 {RATINGS[0]*100:.0f}/{RATINGS[1]*100:.0f}/"
         f"{RATINGS[2]*100:.0f}/{RATINGS[3]*100:.0f}/{RATINGS[4]*100:.0f}/{RATINGS[5]*100:.0f}）：\n"
         f"{_render_anchors(template)}\n\n"
-        f"输出要求：只输出 JSON，形如 {{\"level\": <0-5 整数>, \"reason\": \"<引用具体证据的判级理由，100 字内>\", "
-        f"\"confidence\": <可选 0-1，你对判定的确信度，不确信可不输出>}}。"
+        f"输出要求：只输出 JSON，形如 {{\"level\": <0-5 整数>, \"reason\": \"<引用具体证据的判级理由，100 字内>\"}}。"
     )
 
     def _dump(v: Any) -> str:
@@ -142,7 +131,7 @@ def build_messages(
     parts.append(f"agent 回答：{_dump(agent_output or '')}")
     parts.append("</evaluation_data>")
     parts.append(f"请判定该 agent 回答的 {dimension_name} 等级，输出 JSON："
-                 f"{{\"level\": <0-5>, \"reason\": \"<理由>\", \"confidence\": <可选 0-1>}}。")
+                 f"{{\"level\": <0-5>, \"reason\": \"<理由>\"}}。")
     user = "\n".join(parts)
     return [
         {"role": "system", "content": system},
@@ -208,5 +197,4 @@ class JudgeClient:
             score=RATINGS[verdict["level"]] * 100,
             reason=verdict["reason"],
             rubric_version=rubric_version,
-            confidence=verdict.get("confidence"),
         )

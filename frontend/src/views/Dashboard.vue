@@ -48,10 +48,6 @@
               <span>通过率 {{ fmtRate(g.pass_rate) }}</span>
               <span>{{ g.pass_case }}/{{ g.total_case }} 用例</span>
             </div>
-            <!-- 6.4b 过拟合降级：manual run 分 vs 最近 held_out run 分差超阈值（gate.overfit 由后端 build_gate_cards 注入） -->
-            <div v-if="g.overfit && g.overfit_gap != null" class="gate-stale">
-              <el-tag size="small" type="danger">过拟合 Δ{{ g.overfit_gap }}</el-tag>
-            </div>
             <div v-if="g.stale_suites && g.stale_suites.length" class="gate-stale">
               <el-tag v-for="s in g.stale_suites" :key="s.id" size="small" type="warning">
                 陈旧:{{ s.name }}
@@ -131,6 +127,190 @@
       />
     </el-card>
 
+    <!-- 三面板：性能 / 成本 / 覆盖（轻量化合并，跟随顶部 agent 下钻） -->
+    <el-card v-if="activeAgentId" shadow="never" class="block">
+      <el-tabs v-model="activePanel">
+        <el-tab-pane label="性能" name="perf">
+          <EChart v-if="perfRows.length" :option="perfOption" height="300px" />
+          <el-empty v-else description="该 agent 暂无终态评测记录" />
+          <el-table v-if="perfRows.length" :data="perfRows" size="small" stripe style="margin-top: 12px">
+            <el-table-column prop="run_id" label="Run" width="70" />
+            <el-table-column prop="version" label="版本" width="100" />
+            <el-table-column label="TTFT p50" width="110">
+              <template #default="{ row }">{{ row.ttft_p50 ?? 'N/A' }}</template>
+            </el-table-column>
+            <el-table-column label="TTFT p95" width="110">
+              <template #default="{ row }">{{ row.ttft_p95 ?? 'N/A' }}</template>
+            </el-table-column>
+            <el-table-column label="E2E p50" width="110">
+              <template #default="{ row }">{{ row.e2e_p50 ?? 'N/A' }}</template>
+            </el-table-column>
+            <el-table-column label="E2E p95" width="110">
+              <template #default="{ row }">{{ row.e2e_p95 ?? 'N/A' }}</template>
+            </el-table-column>
+            <el-table-column label="开始时间" min-width="160">
+              <template #default="{ row }">{{ fmtTime(row.started_at) }}</template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="成本" name="cost">
+          <el-alert
+            v-if="costRows.length && costRows.every((r) => r.total_cost == null)"
+            type="warning"
+            :closable="false"
+            show-icon
+            title="该模型未配置单价，成本为 N/A（见下方模型单价表）"
+            style="margin-bottom: 12px"
+          />
+          <EChart v-if="costRows.length" :option="costOption" height="300px" />
+          <el-empty v-else description="该 agent 暂无终态评测记录" />
+          <el-table v-if="costRows.length" :data="costRows" size="small" stripe style="margin-top: 12px">
+            <el-table-column prop="run_id" label="Run" width="70" />
+            <el-table-column prop="version" label="版本" width="100" />
+            <el-table-column prop="model" label="模型" min-width="140" />
+            <el-table-column label="Token 总量" width="120">
+              <template #default="{ row }">{{ row.total_tokens ?? 'N/A' }}</template>
+            </el-table-column>
+            <el-table-column label="成本(元)" width="110">
+              <template #default="{ row }">{{ fmtCost(row.total_cost) }}</template>
+            </el-table-column>
+            <el-table-column label="开始时间" min-width="160">
+              <template #default="{ row }">{{ fmtTime(row.started_at) }}</template>
+            </el-table-column>
+          </el-table>
+          <div class="prices-head">
+            <span>模型单价</span>
+            <el-tag size="small" type="info" style="margin-left: 8px">成本(元) = (输入token×输入价 + 输出token×输出价) ÷ 1e6，单价单位：元/百万 token</el-tag>
+          </div>
+          <el-table :data="modelPrices" size="small" stripe style="margin-top: 8px">
+            <el-table-column prop="model" label="模型" min-width="180" />
+            <el-table-column label="输入单价(元/百万)" width="150">
+              <template #default="{ row }">{{ row.input_price ?? 'N/A' }}</template>
+            </el-table-column>
+            <el-table-column label="输出单价(元/百万)" width="150">
+              <template #default="{ row }">{{ row.output_price ?? 'N/A' }}</template>
+            </el-table-column>
+            <el-table-column label="生效时间" min-width="160">
+              <template #default="{ row }">{{ fmtTime(row.effective_from) }}</template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!modelPrices.length" description="暂无单价配置" />
+        </el-tab-pane>
+
+        <el-tab-pane label="覆盖" name="coverage">
+          <el-row :gutter="12">
+            <el-col :xs="24" :md="12">
+              <div class="cov-title">接口覆盖</div>
+              <div v-if="coverage" class="coverage-body">
+                <div class="coverage-rate">
+                  <el-progress type="dashboard" :percentage="pct(coverage.interface_rate)" :width="150">
+                    <template #default>
+                      <div class="pct-num">{{ pct(coverage.interface_rate) }}%</div>
+                      <div class="pct-sub">{{ coverage.interface_covered }}/{{ coverage.interface_total }}</div>
+                    </template>
+                  </el-progress>
+                </div>
+                <el-alert
+                  v-if="coverage.interface_blank.length"
+                  type="warning" :closable="false" show-icon title="以下接口未被任何用例覆盖（盲区）"
+                />
+                <el-alert v-else type="success" :closable="false" show-icon title="全部启用接口均已覆盖" />
+                <el-table v-if="coverage.interface_blank.length" :data="coverage.interface_blank" size="small" stripe style="margin-top: 12px">
+                  <el-table-column prop="id" label="ID" width="60" />
+                  <el-table-column prop="name" label="接口名" min-width="140" />
+                  <el-table-column prop="method" label="方法" width="80" />
+                  <el-table-column prop="path" label="路径" min-width="160" show-overflow-tooltip />
+                </el-table>
+              </div>
+              <el-empty v-else description="暂无数据" />
+            </el-col>
+            <el-col :xs="24" :md="12">
+              <div class="cov-title">场景覆盖</div>
+              <div v-if="coverage" class="coverage-body">
+                <div class="coverage-rate">
+                  <el-progress type="dashboard" :percentage="pct(coverage.scene_rate)" :width="150">
+                    <template #default>
+                      <div class="pct-num">{{ pct(coverage.scene_rate) }}%</div>
+                      <div class="pct-sub">{{ coverage.scene_covered }}/{{ coverage.scene_total }}</div>
+                    </template>
+                  </el-progress>
+                </div>
+                <el-alert
+                  v-if="coverage.scene_blank.length"
+                  type="warning" :closable="false" show-icon title="以下场景未被任何用例覆盖（盲区）"
+                />
+                <el-alert v-else type="success" :closable="false" show-icon title="全部场景均已覆盖" />
+                <el-table v-if="coverage.scene_blank.length" :data="coverage.scene_blank" size="small" stripe style="margin-top: 12px">
+                  <el-table-column prop="tag" label="场景" min-width="160" />
+                  <el-table-column prop="description" label="描述" min-width="160" show-overflow-tooltip />
+                </el-table>
+              </div>
+              <el-empty v-else description="暂无数据" />
+            </el-col>
+          </el-row>
+
+          <div class="baseline-head">
+            <TermTip term="baseline" />
+            <el-tag v-if="baseline.run" size="small" type="info" style="margin-left: 8px">
+              run #{{ baseline.run.run_id }} · v{{ baseline.run.version }}
+            </el-tag>
+            <el-tag v-if="baseline.is_gold_count" size="small" type="warning" style="margin-left: 8px">
+              <TermTip term="gold" /> {{ baseline.is_gold_count }} 例
+            </el-tag>
+          </div>
+          <template v-if="baseline.run">
+            <div class="baseline-summary">
+              总分 <b>{{ baseline.run.agent_score ?? '—' }}</b>
+              · 通过 {{ baseline.run.pass_case }}/{{ baseline.run.total_case }}
+              <span v-if="baseline.run.finished_at">· 完成 {{ fmtTime(baseline.run.finished_at) }}</span>
+              <el-tag size="small" type="info" style="margin-left: 8px">
+                {{ (RUN_STATUS[baseline.run.status] || {}).label || baseline.run.status }}
+              </el-tag>
+            </div>
+            <el-table :data="baselineRows" size="small" stripe style="margin-top: 12px">
+              <el-table-column prop="iface" label="接口" min-width="170" show-overflow-tooltip />
+              <el-table-column label="维度" width="100">
+                <template #default="{ row }">{{ DIM_LABEL[row.code] || row.code }}</template>
+              </el-table-column>
+              <el-table-column label="run 得分" width="200">
+                <template #default="{ row }">
+                  <el-progress
+                    v-if="row.score != null"
+                    :percentage="row.score"
+                    :stroke-width="12"
+                    :color="row.met ? '#67c23a' : '#f56c6c'"
+                  />
+                  <span v-else class="dim-none">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column width="90">
+                <template #header><TermTip term="target" /></template>
+                <template #default="{ row }">{{ row.target ?? '未配置' }}</template>
+              </el-table-column>
+              <el-table-column label="差距" width="100">
+                <template #default="{ row }">
+                  <span v-if="row.gap != null" :class="row.gap >= 0 ? 'gap-plus' : 'gap-minus'">
+                    {{ row.gap >= 0 ? '+' : '' }}{{ row.gap }}
+                  </span>
+                  <span v-else class="dim-none">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag v-if="row.met != null" :type="row.met ? 'success' : 'danger'" size="small">
+                    {{ row.met ? '达标' : '未达标' }}
+                  </el-tag>
+                  <el-tag v-else type="info" size="small">未配置</el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+          </template>
+          <el-empty v-else description="最近无已评分 run，暂无比对" />
+        </el-tab-pane>
+      </el-tabs>
+    </el-card>
+
     <!-- L1 趋势 -->
     <el-card v-if="activeAgentId" shadow="never" class="block">
       <template #header>
@@ -204,7 +384,6 @@
         <el-tag v-if="curRunId" size="small" style="margin-left: 8px">run #{{ curRunId }}</el-tag>
         <span v-if="isStaff" class="export-bar">
           <el-button size="small" type="primary" :loading="exporting" @click="doExport('pdf')">导出 PDF</el-button>
-          <el-button size="small" :loading="exporting" @click="doExport('xlsx')">导出 Excel</el-button>
         </span>
       </template>
       <el-table :data="runResults" v-loading="resultsLoading" size="small" stripe>
@@ -381,7 +560,11 @@ import {
   listRuns, createRun, cancelRun, rerunRun,
   listRunResults, listRunFailures, getResultEvidence,
 } from '../api/runs'
-import { getGate, getTrend, getCompare } from '../api/dashboard'
+import {
+  getGate, getTrend, getCompare,
+  getPerf, getCost, getCoverage, getBaseline,
+} from '../api/dashboard'
+import { listModelPrices } from '../api/config'
 import { createExport, downloadExport } from '../api/exports'
 import EChart from '../components/EChart.vue'
 import { filterRuns, paginate } from '../utils/runFilter'
@@ -444,6 +627,14 @@ const evidenceVisible = ref(false)
 const evidenceLoading = ref(false)
 const evidence = ref(null)
 const detailVisible = ref(false) // L3 用例明细抽屉
+
+// ---- 三面板（性能/成本/覆盖，轻量化合并，跟随顶部 agent 下钻）----
+const activePanel = ref('perf')
+const perfRows = ref([])
+const costRows = ref([])
+const modelPrices = ref([])
+const coverage = ref(null)
+const baseline = ref({ run: null, interfaces: [], is_gold_count: 0 })
 
 let pollTimer = null
 let pollCount = 0
@@ -523,12 +714,83 @@ const compareOption = computed(() => {
   }
 })
 
+const perfOption = computed(() => {
+  const names = ['TTFT p50', 'TTFT p95', 'E2E p50', 'E2E p95']
+  const keys = ['ttft_p50', 'ttft_p95', 'e2e_p50', 'e2e_p95']
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: names },
+    grid: { left: 48, right: 24, top: 36, bottom: 32 },
+    xAxis: {
+      type: 'category',
+      data: perfRows.value.map((r) => `#${r.run_id}\n${r.version}`),
+    },
+    yAxis: { type: 'value', name: 'ms' },
+    series: names.map((name, i) => ({
+      name,
+      type: 'line',
+      smooth: true,
+      symbolSize: 8,
+      data: perfRows.value.map((r) => r[keys[i]]),
+      lineStyle: { width: 2 },
+    })),
+  }
+})
+
+const costOption = computed(() => ({
+  tooltip: { trigger: 'axis' },
+  legend: { data: ['Token 总量', '成本(元)'] },
+  grid: { left: 56, right: 56, top: 36, bottom: 32 },
+  xAxis: {
+    type: 'category',
+    data: costRows.value.map((r) => `#${r.run_id}\n${r.version}`),
+  },
+  yAxis: [
+    { type: 'value', name: 'tokens' },
+    { type: 'value', name: '元' },
+  ],
+  series: [
+    {
+      name: 'Token 总量',
+      type: 'bar',
+      data: costRows.value.map((r) => r.total_tokens),
+      itemStyle: { color: '#5470c6' },
+    },
+    {
+      name: '成本(元)',
+      type: 'line',
+      yAxisIndex: 1,
+      smooth: true,
+      data: costRows.value.map((r) => r.total_cost), // 无单价时 null → 折线断开
+      itemStyle: { color: '#91cc75' },
+    },
+  ],
+}))
+
+// 接口 × 维度扁平化（覆盖 tab 基线对比表数据）
+const baselineRows = computed(() => {
+  const rows = []
+  for (const it of baseline.value.interfaces || []) {
+    for (const d of it.dims || []) {
+      rows.push({
+        iface: `${it.name}（${it.case_count} 用例）`,
+        code: d.code, score: d.score, target: d.target, gap: d.gap, met: d.met,
+      })
+    }
+  }
+  return rows
+})
+const fmtCost = (v) => (v == null ? 'N/A' : Number(v).toFixed(6).replace(/\.?0+$/, ''))
+const pct = (r) => (r == null ? 0 : Math.round(r * 100))
+
 // ---- 加载 ----
 async function refreshAll() {
   loading.value = true
   try {
     await Promise.all([loadAgents(), loadGate(), loadRuns()])
-    if (activeAgentId.value) await loadTrend(activeAgentId.value)
+    if (activeAgentId.value) {
+      await Promise.all([loadTrend(activeAgentId.value), loadPanels(activeAgentId.value)])
+    }
   } finally {
     loading.value = false
   }
@@ -592,15 +854,45 @@ async function loadTrend(agentId) {
   }
 }
 
+// 三面板数据：性能/成本/覆盖（含模型单价）一次并行拉取
+async function loadPanels(agentId) {
+  if (!agentId) {
+    perfRows.value = []
+    costRows.value = []
+    modelPrices.value = []
+    coverage.value = null
+    baseline.value = { run: null, interfaces: [], is_gold_count: 0 }
+    return
+  }
+  const [perf, cost, prices, cov, base] = await Promise.all([
+    getPerf(agentId),
+    getCost(agentId),
+    listModelPrices(),
+    getCoverage(agentId),
+    getBaseline(agentId),
+  ])
+  perfRows.value = perf
+  costRows.value = cost
+  modelPrices.value = prices
+  coverage.value = cov
+  baseline.value = base
+}
+
 function selectAgent(g) {
   activeAgentId.value = g.agent_id
   resetDrill()
   loadTrend(g.agent_id)
+  loadPanels(g.agent_id)
 }
 
 function onAgentChange() {
   resetDrill()
-  if (activeAgentId.value) loadTrend(activeAgentId.value)
+  if (activeAgentId.value) {
+    loadTrend(activeAgentId.value)
+    loadPanels(activeAgentId.value)
+  } else {
+    loadPanels(null)
+  }
 }
 
 // 切换 agent 时清空 L2/L3 下钻
@@ -945,5 +1237,56 @@ onBeforeUnmount(() => {
 .assert-op {
   font-weight: 600;
   margin-right: 8px;
+}
+/* 三面板（性能/成本/覆盖合并） */
+.prices-head {
+  display: flex;
+  align-items: center;
+  margin-top: 16px;
+  font-weight: 600;
+}
+.cov-title {
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.coverage-body {
+  display: flex;
+  flex-direction: column;
+}
+.coverage-rate {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+.pct-num {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--el-color-primary);
+}
+.pct-sub {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.baseline-head {
+  display: flex;
+  align-items: center;
+  margin-top: 16px;
+  font-weight: 600;
+}
+.baseline-summary {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  margin-top: 8px;
+}
+.dim-none {
+  color: var(--el-text-color-placeholder);
+}
+.gap-plus {
+  color: var(--el-color-success);
+  font-weight: 600;
+}
+.gap-minus {
+  color: var(--el-color-danger);
+  font-weight: 600;
 }
 </style>

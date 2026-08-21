@@ -15,7 +15,6 @@ from app.models import (
     CaseVersion,
     EvalResult,
     EvalRun,
-    Issue,
     TestCase,
     TestSuite,
 )
@@ -30,17 +29,14 @@ class Env:
         self.suites: list[TestSuite] = []
         self.cases: list[TestCase] = []
         self.runs: list[EvalRun] = []
-        self.issues: list[Issue] = []
-        self.drift_history_ids: list[int] = []
 
     async def cleanup(self) -> None:
-        """逆序删：judge_task → eval_result → case_version → run → case → issue → interface → suite → agent → drift_history。
+        """逆序删：judge_task → eval_result → case_version → run → case → interface → suite → agent。
 
-        issue.agent_id / issue.related_case_id 都是 FK → 必须在删 case 与删 agent 之间删 issue；
-        drift_history 无 FK 引用，最后删。独立 session 执行，不受测试 session 状态影响。
+        独立 session 执行，不受测试 session 状态影响。
         """
         from app.core.db import SessionLocal
-        from app.models import JudgeDriftHistory, JudgeTask
+        from app.models import JudgeTask
 
         async with SessionLocal() as db:
             if self.runs:
@@ -52,17 +48,12 @@ class Env:
                 await db.execute(delete(EvalRun).where(EvalRun.id.in_(r.id for r in self.runs)))
             if self.cases:
                 await db.execute(delete(TestCase).where(TestCase.id.in_(c.id for c in self.cases)))
-            if self.issues:
-                await db.execute(delete(Issue).where(Issue.id.in_(i.id for i in self.issues)))
             if self.interfaces:
                 await db.execute(delete(AgentInterface).where(AgentInterface.id.in_(i.id for i in self.interfaces)))
             if self.suites:
                 await db.execute(delete(TestSuite).where(TestSuite.id.in_(s.id for s in self.suites)))
             if self.agents:
                 await db.execute(delete(Agent).where(Agent.id.in_(a.id for a in self.agents)))
-            if self.drift_history_ids:
-                await db.execute(delete(JudgeDriftHistory).where(
-                    JudgeDriftHistory.id.in_(self.drift_history_ids)))
             await db.commit()
 
 

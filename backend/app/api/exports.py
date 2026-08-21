@@ -26,7 +26,7 @@ from app.core.dashboard_rules import PF_ORDER, TERMINAL_STATUS
 from app.core.db import get_db
 from app.core.errors import ApiError, E_NO_PERMISSION, E_NOT_FOUND, E_VALIDATION
 from app.core.response import ok
-from app.exporter.render import _fmt, render_pdf, render_xlsx
+from app.exporter.render import _fmt, render_pdf
 from app.models import Agent, AgentInterface, EvalResult, EvalRun, ExportToken, TestCase
 from app.models.user import User
 
@@ -39,14 +39,11 @@ Staff = Depends(require_role("admin", "evaluator"))
 
 EXPORT_DIR = Path("/app/exports")
 EXPORT_TTL_HOURS = 24
-_MEDIA = {
-    "pdf": "application/pdf",
-    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-}
+_MEDIA = {"pdf": "application/pdf"}
 
 
 class ExportCreate(BaseModel):
-    format: str = Field(..., pattern="^(pdf|xlsx)$")
+    format: str = Field(..., pattern="^pdf$")
 
 
 def _iso(dt) -> str | None:
@@ -121,8 +118,7 @@ async def create_export(run_id: int, body: ExportCreate, request: Request,
     payload = await _build_payload(db, run, results)
     watermark = f"{user.username} @ {datetime.now():%Y-%m-%d %H:%M:%S}"
 
-    render = render_pdf if body.format == "pdf" else render_xlsx
-    content = await asyncio.to_thread(render, payload, watermark)
+    content = await asyncio.to_thread(render_pdf, payload, watermark)
 
     token = secrets.token_urlsafe(32)
     token_hash = sha256(token.encode()).hexdigest()

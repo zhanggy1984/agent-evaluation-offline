@@ -42,7 +42,6 @@ JWT_SECRET=$jwt
 
 # LLM profile 密钥（judge 用，按实际填写）
 JUDGE_API_KEY=
-REVIEW_API_KEY=
 "@ | Out-File -FilePath $envPath -Encoding utf8
 
 Write-Host "已生成 .env：$envPath"

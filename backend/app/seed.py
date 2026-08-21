@@ -285,12 +285,8 @@ DEFAULT_SYSTEM_CONFIG = {
     "judge_na_threshold": {"value": 0.3, "scope": "run", "is_hot": True},
     "error_rate_block": {"value": 0.1, "scope": "run", "is_hot": True},
     "assertion_penalty": {"value": 30, "scope": "run", "is_hot": True},
-    "judge_review_confidence": {"value": 0.7, "scope": "run", "is_hot": True},
-    "human_review_timeout": {"value": 86400, "scope": "run", "is_hot": True},
     "judge_max_retries": {"value": 2, "scope": "run", "is_hot": True},
     "judge_repeat": {"value": 2, "scope": "run", "is_hot": True},
-    "overfit_threshold": {"value": 15, "scope": "global", "is_hot": True},
-    "overfit_heldout_window": {"value": 3, "scope": "global", "is_hot": True},
     "breaker_failure_threshold": {"value": 5, "scope": "run", "is_hot": True},
     "breaker_open_duration": {"value": 60, "scope": "run", "is_hot": True},
     "breaker_half_open_probe": {"value": 1, "scope": "run", "is_hot": True},
@@ -298,27 +294,9 @@ DEFAULT_SYSTEM_CONFIG = {
     "max_retries": {"value": 1, "scope": "run", "is_hot": True},
     # 进程级（global）
     "retain_runs": {"value": 50, "scope": "global", "is_hot": True},
-    "judge_drift_consistency_threshold": {"value": 0.8, "scope": "global", "is_hot": True},
     "heartbeat_interval": {"value": 30, "scope": "global", "is_hot": False},
     "judge_llm.base_url": {"value": "", "scope": "global", "is_hot": True},
     "judge_llm.model_name": {"value": "", "scope": "global", "is_hot": True},
-    "review_llm.base_url": {"value": "", "scope": "global", "is_hot": True},
-    "review_llm.model_name": {"value": "", "scope": "global", "is_hot": True},
-    "llm.base_url": {"value": "", "scope": "global", "is_hot": True},     # 6.5 骨架生成 LLM（密钥走 env LLM_API_KEY）
-    "llm.model_name": {"value": "", "scope": "global", "is_hot": True},
-    "llm_allowlist": {
-        "value": ["api.deepseek.com", "dashscope.aliyuncs.com", "open.bigmodel.cn", "api.moonshot.cn"],
-        "scope": "global", "is_hot": True,
-    },
-    # 6.6 告警通知（SMTP 密码走 env SMTP_PASSWORD，不落盘；alarm.enabled 默认关——不配置不发）
-    "smtp.host": {"value": "", "scope": "global", "is_hot": True},
-    "smtp.port": {"value": 465, "scope": "global", "is_hot": True},
-    "smtp.username": {"value": "", "scope": "global", "is_hot": True},
-    "smtp.from_addr": {"value": "", "scope": "global", "is_hot": True},
-    "alarm.enabled": {"value": False, "scope": "global", "is_hot": True},
-    "alarm.recipients": {"value": "", "scope": "global", "is_hot": True},
-    "alarm.dedupe_window": {"value": 3600, "scope": "global", "is_hot": True},
-    "alarm.error_ratio": {"value": 0.5, "scope": "global", "is_hot": True},
     # 注册期（registration：仅 agent 注册/文件上传时校验）
     "file_max_size": {"value": 50, "scope": "registration", "is_hot": True},
     # 7.6 A4 补漏：169.254.0.0/16（云元数据段）必须与代码常量 DEFAULT_AGENT_CIDRS 一致剔除，

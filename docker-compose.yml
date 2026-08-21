@@ -41,11 +41,6 @@ services:
       JWT_SECRET: ${JWT_SECRET:?jwt_secret 必须设置（≥256bit）}
       FERNET_KEYS: ${FERNET_KEYS:?fernet_keys 必须设置（逗号分隔多代）}
       JUDGE_API_KEY: ${JUDGE_API_KEY:-}
-      REVIEW_API_KEY: ${REVIEW_API_KEY:-}
-      # 6.5 骨架生成 LLM 密钥（不落库；llm.* 配置在 system_config）
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      # 6.6 邮件告警 SMTP 密码（不落库；smtp.* 配置在 system_config）
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       # 空库重建 admin 初始密码（seed 优先取此值；首登仍强制改密）
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     ports:

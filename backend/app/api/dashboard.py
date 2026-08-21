@@ -17,7 +17,6 @@ from app.core.dashboard_rules import (
     significance,
 )
 from app.core.db import get_db
-from app.runner.overfit import get_overfit_config
 from app.core.errors import ApiError, E_NOT_FOUND, E_VALIDATION
 from app.core.response import ok
 from app.models import (
@@ -35,19 +34,14 @@ ACCURACY = tuple(ACCURACY_DIMENSIONS)
 
 @router.get("/gate")
 async def gate(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """L0 门禁墙：逐 agent 最新版本跨 suite 汇总 + 陈旧 suite 单独标注。
-
-    6.4b overfit 阈值/窗口读全局热配置（system_config），与 overfit.check_overfit 同口径。
-    """
+    """L0 门禁墙：逐 agent 最新版本跨 suite 汇总 + 陈旧 suite 单独标注。"""
     logger.debug("gate in: user=%s", user.username)
     agents = (await db.execute(select(Agent).order_by(Agent.id))).scalars().all()
     runs = (await db.execute(select(EvalRun))).scalars().all()
     suites = (await db.execute(select(TestSuite))).scalars().all()
     case_cnt = {sid: n for sid, n in (await db.execute(
         select(TestCase.suite_id, func.count()).group_by(TestCase.suite_id))).all()}
-    threshold, window = await get_overfit_config(db)
-    out = build_gate_cards(agents, runs, suites, case_cnt,
-                           overfit_threshold=threshold, overfit_window=window)
+    out = build_gate_cards(agents, runs, suites, case_cnt)
     logger.debug("gate out: count=%s", len(out))
     return ok(out)
 

@@ -13,7 +13,8 @@ from app.models.base import Base
 RUN_STATUS = ("pending", "running", "scoring", "scoring_failed", "completed", "partial_failed", "timeout", "cancelled")
 TRIGGER_TYPE = ("manual", "held_out")
 PASS_FAIL = ("pass", "fail", "error", "na")
-JUDGE_TASK_STATUS = ("pending", "processing", "done", "failed", "pending_human")
+# pending_human（人工复核）7.5e 预留机制已随轻量化删除：真实 judge 不输出 confidence 永不触发
+JUDGE_TASK_STATUS = ("pending", "processing", "done", "failed")
 
 
 class EvalRun(Base):
@@ -119,18 +120,3 @@ class JudgeTask(Base):
         DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"),
         server_onupdate=text("CURRENT_TIMESTAMP"),
     )
-
-
-class JudgeDriftHistory(Base):
-    """元评测：judge 一致率漂移序列。"""
-    __tablename__ = "judge_drift_history"
-    __table_args__ = (
-        Index("idx_drift_dim", "dimension_code", "created_at"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    dimension_code: Mapped[str] = mapped_column(ForeignKey("dimension.code"), nullable=False)
-    consistency_rate: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False)
-    judged_case_cnt: Mapped[int] = mapped_column(Integer, nullable=False)
-    drift_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[object] = mapped_column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
