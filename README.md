@@ -1,8 +1,8 @@
 # AI Agent 线下评测平台（agent-evaluation-offline）
 
-> **Agent 提测上线前的线下评测平台**：对自研 4 个 agent（customer-service / contract-check / smart-procurement / good-question）的核心 LLM 接口在隔离测试环境做 HTTP 评测，量化**答案准确性 / 性能 / token 成本**三类指标，看板呈现汇总、版本对比、逐层下钻定位问题点。**线下**——评测不与生产流量混跑，用固定用例集 + 契约探测在独立测试环境执行。
+> **Agent 提测上线前的线下评测平台**：对任意 agent 的核心 LLM 接口在隔离测试环境做 HTTP 评测，量化**答案准确性 / 性能 / token 成本**三类指标，看板呈现汇总、版本对比、逐层下钻定位问题点。**线下**——评测不与生产流量混跑，用固定用例集 + 契约探测在独立测试环境执行。
 
-本系统是**生产级线下评测平台**：docker-compose 三容器一键启动、强契约驱动 4 个 agent 接入、规则断言 + LLM-judge 混合评分、门禁墙逐层下钻、人工复核回写、PDF/Excel 报告导出。
+本系统是**生产级线下评测平台**：docker-compose 三容器一键启动、强契约驱动任意 agent 接入、规则断言 + LLM-judge 混合评分、门禁墙逐层下钻、人工复核回写、PDF/Excel 报告导出。
 
 ---
 
@@ -14,7 +14,7 @@
 - [四、系统架构](#四系统架构)
 - [五、技术栈一览](#五技术栈一览)
 - [六、快速开始（3 步跑起来）](#六快速开始3-步跑起来)
-- [七、被评测的 4 个 Agent](#七被评测的-4-个-agent)
+- [七、接入 Agent](#七接入-agent)
 - [八、目录结构](#八目录结构)
 - [九、测试与验收](#九测试与验收)
 - [十、开发指南](#十开发指南)
@@ -24,7 +24,7 @@
 
 ## 一、项目简介：解决什么痛点
 
-4 个自研 agent 提测上线前，质量缺乏系统化量化与呈现：
+agent 提测上线前，质量缺乏系统化量化与呈现：
 
 - **评分口径不一**：答案「好不好」靠人工抽查，无统一维度、无门禁标准；
 - **回归难发现**：改造一次代码，无法快速判断「哪些接口、哪些场景变差了」；
@@ -35,7 +35,7 @@
 
 | 能力 | 实现 | 对应痛点 |
 |------|------|---------|
-| **强契约评测** | 跑前契约探测拦截，SSE 变体 / 同步变体两种标准契约，4 个 agent 统一收敛接入 | 口径不一 |
+| **强契约评测** | 跑前契约探测拦截，SSE 变体 / 同步变体两种标准契约，任意 agent 统一标准接入 | 口径不一 |
 | **规则 + LLM 混合评分** | 确定性断言扣分 + LLM-judge 六级 rubric 精评（含置信度 + 理由） | 回归难发现 |
 | **性能 / 成本量化** | 真实 usage 透出 × 模型单价表，TTFT/E2E 的 P50/P95，成本趋势 | 不可见 |
 | **逐层下钻定位** | 门禁墙 L0 契约 → L3 用例明细 → L3.5 未达标摘要 → L4 证据级回放 | 定位慢 |
@@ -66,7 +66,7 @@
 ## 三、技术闪光点
 
 ### 1. 强契约驱动 + 平台定标准（agent 只适配，平台零特判）
-平台定义标准契约（SSE 变体：`meta`/`usage`/`done` 必选 + `id:` 帧 + data 内 `ts`；同步变体：`usage`/`timing`/`meta`，不验 done），4 个 agent 各自收敛改造（标准契约 + `POST /admin/reset` 造数重置接口 + 鉴权 env 开关）。**平台侧禁止 `if agent` 特判**——发现/校验只认标准契约信号，契约探测不达标直接拦截报错，保证新 agent 接入即用。
+平台定义标准契约（SSE 变体：`meta`/`usage`/`done` 必选 + `id:` 帧 + data 内 `ts`；同步变体：`usage`/`timing`/`meta`，不验 done），接入方 agent 按标准收敛改造（标准契约 + `POST /admin/reset` 造数重置接口 + 鉴权 env 开关）。**平台侧禁止 `if agent` 特判**——发现/校验只认标准契约信号，契约探测不达标直接拦截报错，保证任意新 agent 接入即用。
 
 ### 2. 规则 + LLM-judge 混合评分
 - **确定性断言**：结构/文本/工具/检索四类断言算子（白名单插件注册），扣分制不否决，维度内精评；
@@ -82,7 +82,7 @@ run 终态由 `scorer` 汇总（`partial_failed` 只认执行/技术 error，`fa
 ### 5. 门禁墙逐层下钻（L0 → L4）
 | 层 | 内容 | 作用 |
 |----|------|------|
-| L0 | 门禁墙（agent 级汇总） | 4 agent 均分 / 通过率 / 用例数；跑前契约探测不达标 → run 直接 partial_failed（硬拦截） |
+| L0 | 门禁墙（agent 级汇总） | agent 均分 / 通过率 / 用例数；跑前契约探测不达标 → run 直接 partial_failed（硬拦截） |
 | L3 | 用例明细 | 每用例得分 + 每维度分 |
 | L3.5 | 未达标摘要 | 未达标用例 + 维度分 < 达标分的逐条判定理由 |
 | L4 | 证据回放 | agent 回答 / 思考链 / judge 判定 / 断言 / 工具调用 / usage |
@@ -114,25 +114,22 @@ agent 透出真实 usage（不估算），× 模型单价表（元/百万 token�
 
 ```mermaid
 graph TB
-    subgraph 线下评测平台
+    subgraph PLATFORM["线下评测平台"]
         WEB["Vue3 + Element Plus + ECharts<br/>（frontend/dist，npm run build）"]
         NGINX["nginx :8180<br/>静态服务 + /api 反代"]
         API["FastAPI App :8100<br/>REST API + scanner + judge worker"]
         MYSQL[(MySQL 8<br/>业务事实：agent/用例/run/评分)]
     end
-    subgraph 后端模块
+    subgraph MODULE["后端模块"]
         RUN["runner<br/>orchestrator / scanner / scorer / executor"]
         JUDGE["judge<br/>LLM-judge 六级 rubric + 人工复核"]
         MET["metrics<br/>accuracy / performance / cost"]
         ASRT["assertions<br/>结构/文本/工具/检索断言算子"]
     end
-    subgraph 被评对象（宿主机）
-        CS["customer-service :8000"]
-        CC["contract-check :8001"]
-        SP["smart-procurement :8002"]
-        GQ["good-question :8080"]
+    subgraph TARGET["被评测 Agent（宿主机，任意接入）"]
+        AGENT["标准契约<br/>SSE / 同步二选一 + POST /admin/reset"]
     end
-    subgraph 外部
+    subgraph EXT["外部"]
         DS["DeepSeek LLM（judge）"]
     end
 
@@ -142,10 +139,7 @@ graph TB
     RUN --> JUDGE
     RUN --> MET
     RUN --> ASRT
-    RUN -- host.docker.internal --> CS
-    RUN -- host.docker.internal --> CC
-    RUN -- host.docker.internal --> SP
-    RUN -- host.docker.internal --> GQ
+    RUN -- host.docker.internal --> AGENT
     API --> MYSQL
     JUDGE --> DS
 ```
@@ -223,22 +217,21 @@ open http://localhost:8180        # 浏览器前端
 | 评测员 | `evaluator` | seed 演示账号（仅本地评测环境） | 触发评测、人工复核、标注用例 |
 | 查看者 | `viewer` | seed 演示账号（仅本地评测环境） | 只读看板 |
 
-> 触发评测前需确认被评 agent 栈在线：`docker ps` 检查 cs/cc/sp/gq 端口（见下节）。注意 **RAG 项目（rag-*）常驻占用 80/8001/8080/3306/19530**，与 agent 栈端口冲突，跑真实评测前先确认。
+> 触发评测前需确认被评 agent 服务在线（标准契约 + `POST /admin/reset` 就绪），且宿主侧对应端口未被其他服务占用。
 
 ---
 
-## 七、被评测的 4 个 Agent
+## 七、接入 Agent
 
-4 个 agent 是独立仓库、各自 docker compose 运行，通过 `host.docker.internal` 被平台访问：
+本平台是**公开、统一标准的评测系统**：任何 agent（内部自研或第三方）只要满足平台定义的标准契约即可接入评测，平台对 agent 零特判。接入方 agent 独立部署（各自 docker compose），通过 `host.docker.internal` 被平台访问。
 
-| Agent | 宿主端口 | 契约变体 | 评测重点 |
-|-------|---------|---------|---------|
-| customer-service | 8000 | SSE（token 级流式） | 意图识别、confirm 交互自动确认 |
-| contract-check | 8001 | 同步 | 条款抽取、违规检出（数量/金额逐字比对） |
-| smart-procurement | 8002 | 同步 | 标书解析、专家匹配、评标 |
-| good-question | 8080 | SSE | 回答质量、检索溯源（tool_call 透出 doc_id/score） |
+| 接入要求 | 说明 |
+|---------|------|
+| 标准契约 | SSE 变体（`meta`/`usage`/`done` 必选 + `id:` 帧 + data 内 `ts`）或同步变体（`usage`/`timing`/`meta`，不验 done）二选一 |
+| 造数重置 | 提供 `POST /admin/reset`，跑前重置业务数据，保证用例可重复 |
+| 鉴权开关 | 评测环境鉴权走 env 开关旁路，方便编排压测 |
 
-> agent 侧契约改造与回归（标准契约 + `POST /admin/reset` + 鉴权 env 开关）在各 agent 仓库完成，不在本仓库。
+> agent 侧契约改造与回归在各 agent 仓库完成，不在本仓库。契约探测不达标 → run 直接 partial_failed（硬拦截），接入即用。
 
 ---
 
@@ -276,7 +269,6 @@ ai-evaluation/
 ├── solution.md              # 技术方案（v0.3，88 项决策）
 ├── solution_detail.md       # 技术方案明细（v1.2，含遗留问题清单）
 ├── task.md                  # 任务拆分与验收（前置 A/B + 阶段一~七）
-├── agent-baseline.md        # 4 agent 真实代码基线
 └── README.md
 ```
 
@@ -368,7 +360,7 @@ docker compose exec backend python -m app.seed   # 初始化数据
 | 登录提示账号锁定 | 试错触发登录滑动窗口锁定，等窗口过或用管理员重置 |
 | 前端 8180 白屏 | 前端改过代码未 rebuild：`docker compose build frontend && docker compose up -d frontend` |
 | 改后端代码不生效 | 容器挂载源码但 uvicorn 不自动重载：`docker compose restart backend` |
-| 跑真实评测 agent 连接失败 | 先 `docker ps` 确认 cs/cc/sp/gq 端口在线；**RAG 项目(rag-*)常驻抢 80/8001/8080/3306/19530**，与 agent 栈冲突需先停 |
+| 跑真实评测 agent 连接失败 | 先确认被评 agent 服务在线（标准契约 + `POST /admin/reset` 就绪），宿主端口未被占用 |
 | 宿主跑 pytest 报 pytest_html 缺 py.xml | 加 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` + `-p pytest_asyncio.plugin` |
 | 集成测试 24 errors（2003 连库失败） | Windows 宿主无法直达 bridge IP；用 socat 转发 127.0.0.1:3307 或在容器内跑 |
 | httpx 报 localhost 502（后端无日志） | 宿主 Clash 系统代理写进注册表，httpx trust_env 读到 → 验证脚本一律 `trust_env=False` |
@@ -385,4 +377,3 @@ docker compose exec backend python -m app.seed   # 初始化数据
 - **技术方案**：[solution.md](solution.md)（v0.3，88 项决策）
 - **方案明细**：[solution_detail.md](solution_detail.md)（v1.2，含遗留问题清单）
 - **任务拆分与验收**：[task.md](task.md)（前置阶段 A/B + 阶段一~七）
-- **Agent 基线**：[agent-baseline.md](agent-baseline.md)（4 agent 真实代码基线，契约 gap 依据）
