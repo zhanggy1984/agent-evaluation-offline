@@ -13,6 +13,7 @@ backend/uploads/
 backend/exports/
 backend/backups/
 backend/*.pdf
+backups/
 
 # ---- Python 缓存 ----
 __pycache__/
@@ -21,6 +22,7 @@ __pycache__/
 
 # ---- 本地工具痕迹 ----
 .claude/
+.codegraph/
 
 # ---- 内部验收产物：逐 issue 一次性脚本（含测试凭据），不进仓库 ----
 backend/verify_*.py
