@@ -6,6 +6,17 @@
 
 ---
 
+> ## ⚠️ 前置依赖：共享 infra
+>
+> 本 agent **不自带任何中间件**，运行前须先部署共享 infra（MySQL 等）。
+>
+> ```bash
+> # 发布物：clone infra 独立仓库后启动
+> git clone https://github.com/zhanggy1984/share-infra && cd infra && docker compose up -d
+> # 本地开发：infra 位于 ../infra
+> cd ../infra && docker compose up -d
+> ```
+
 ## 目录
 
 - [一、项目简介：解决什么痛点](#一项目简介解决什么痛点)
@@ -162,13 +173,14 @@ graph TB
 ## 六、快速开始（3 步跑起来）
 
 > 前置：Docker Desktop（Linux 容器）、Python 3.11。
+> **共享 infra**：本 agent 不自带任何中间件（仅依赖共享 infra 的 MySQL）。启动前先部署 infra（见 infra 仓库 README：`docker compose up -d`）。
 
 ### 第 1 步：配置环境变量
 
 ```bash
 cp .env.example .env
 # 编辑 .env，至少填入（缺失则启动直接报错）：
-#   DB_PASSWORD=xxx        # MySQL 密码
+#   DB_PASSWORD=xxx        # 共享 infra 的 ai_evaluation 库密码
 #   JWT_SECRET=xxx         # ≥256bit（JWT 签名）
 #   FERNET_KEYS=xxx        # 逗号分隔多代密钥
 # 可选：
@@ -176,12 +188,12 @@ cp .env.example .env
 #   ADMIN_PASSWORD=xxx     # 空库重建 admin 初始密码
 ```
 
-### 第 2 步：一键启动全栈（3 个容器）
+### 第 2 步：启动应用容器（backend + frontend）
 
 ```bash
 docker compose up -d --build
-# 等待 MySQL healthy（backend 依赖 mysql 条件健康）
-docker compose ps                 # 三个容器 Up
+# 等待 backend healthy（依赖共享 infra MySQL 就绪）
+docker compose ps                 # ai-eval-backend / ai-eval-frontend 全部 Up
 curl localhost:8100/healthz       # {"status":"ok"}
 ```
 
@@ -191,7 +203,8 @@ curl localhost:8100/healthz       # {"status":"ok"}
 |------|---------|--------|
 | backend | 8100（`APP_HOST_PORT`） | 8000 |
 | frontend | 8180（`FRONT_HOST_PORT`） | 80 |
-| mysql | 3306 | 3306 |
+
+> 本 agent 只起应用容器；MySQL 在共享 infra（库 `ai_evaluation`）。
 
 ### 第 3 步：初始化数据（seed 手动执行）
 
@@ -294,10 +307,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -p pytest_asyncio.plugin tests
 
 # 集成测试（需连库）。Windows 宿主无法直达 docker bridge IP，需 socat 转发
 # （详见 tests/integration/conftest.py；转发容器已存在则复用，DB_PORT 按实际转发端口）：
-docker run -d --name temp-mysql-fwd --network ai-evaluation_app \
-  -p 127.0.0.1:3307:3306 alpine/socat tcp-listen:3306,fork,reuseaddr tcp-connect:ai-eval-mysql:3306
+# 共享 infra MySQL 已映射宿主 33061，Windows 宿主可直接连接（无需 socat）：
 cd backend
-$env:RUN_INTEGRATION='1'; $env:DB_HOST='127.0.0.1'; $env:DB_PORT='3307'; $env:DB_PASSWORD='<密码>'
+$env:RUN_INTEGRATION='1'; $env:DB_HOST='127.0.0.1'; $env:DB_PORT='33061'; $env:DB_PASSWORD='<密码>'
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -p pytest_asyncio.plugin tests/integration
 
 # 备选：若宿主连库被拒（1045 Access denied），改在 backend 容器内临时装 pytest 跑

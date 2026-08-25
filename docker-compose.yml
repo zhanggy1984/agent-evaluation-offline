@@ -1,33 +1,22 @@
-# AI Agent 评测系统 docker-compose（前置阶段 A）
-# 7.6 C 多 worker 化：默认 --workers=1 保持现状；置 BACKEND_WORKERS=2 可验证多 worker 互斥。
-# 跨进程已 DB 化：run 互斥（agent 行 FOR UPDATE）、reset(seed) 锁、熔断（agent_circuit）、
-# scanner 单例（GET_LOCK）。限流信号量/登录滑动窗口保持进程内（soft limit，DB 硬防线兜底）。
-# 宿主机 4 个 agent 通过 host.docker.internal 访问（extra_hosts 已配 host-gateway）
+# ============================================================
+# agent-evaluation-offline — 共享 infra 模式（全共享方案，2026-08-25 起）
+#
+# 本 agent 不自带任何中间件，仅依赖共享 infra 的 MySQL：
+#   mysql -> infra MySQL（库 ai_evaluation / 账号 evaluation）
+#   （aeo 无 Redis / Milvus 依赖）
+#
+# 前置：先部署共享 infra（D:/study/aiprojcet/infra，`docker compose up -d`）。
+# 启动：docker compose up -d --build
+# 连接：前端 http://localhost:8180 / 后端 http://localhost:8100
+#
+# 表结构：aeo 用 alembic 管理（手动/脚本执行），迁移数据已含表 + alembic_version，
+#   应用启动不自动跑 alembic，无需改建表逻辑。
+# 开发热挂载 ./backend:/app 保留（改代码 restart 生效）；extra_hosts 保留（评测需访问宿主机 agent）。
+# ============================================================
+
+name: agent-evaluation-offline
 
 services:
-  mysql:
-    image: mysql:8.0
-    container_name: ai-eval-mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root_please_change}
-      MYSQL_DATABASE: ${DB_NAME:-ai_evaluation}
-      MYSQL_USER: ${DB_USER:-evaluation}
-      MYSQL_PASSWORD: ${DB_PASSWORD:-change_me}
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
-      - --default-time-zone=+08:00
-    volumes:
-      - mysql-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD:-root_please_change}"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-      start_period: 20s
-    networks: [app]
-    restart: unless-stopped
-
   backend:
     build: ./backend
     container_name: ai-eval-backend
@@ -47,19 +36,17 @@ services:
       - "${APP_HOST_PORT:-8100}:8000"
     # 7.6 C5 多 worker：默认 1 保持现状；置 BACKEND_WORKERS=2 可验证多 worker 互斥
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${BACKEND_WORKERS:-1}
-    depends_on:
-      mysql:
-        condition: service_healthy
     extra_hosts:
       # 宿主机 agent 访问（Linux host-gateway；Windows/Mac Docker Desktop 原生支持）
       - "host.docker.internal:host-gateway"
     volumes:
-      # 开发期热挂载：改代码后 restart 即生效（无需 rebuild）；生产部署移除本段
+      # 开发期热挂载：改代码后 restart 即生效（无需 rebuild）
       - ./backend:/app
       # 文件型用例自存文件（决策 #12）：宿主 ./uploads ↔ 容器 /app/uploads
       - ./uploads:/app/uploads
-    networks: [app]
     restart: unless-stopped
+    networks:
+      - shared-infra
 
   frontend:
     build: ./frontend
@@ -68,12 +55,11 @@ services:
       - "${FRONT_HOST_PORT:-8180}:80"
     depends_on:
       - backend
-    networks: [app]
     restart: unless-stopped
+    networks:
+      - shared-infra
 
 networks:
-  app:
-    driver: bridge
-
-volumes:
-  mysql-data:
+  shared-infra:
+    external: true
+    name: shared-infra_shared-infra

@@ -278,7 +278,7 @@ CC_ADAPTER_CFG = {
 }
 
 # ── good-question：SSE，login→建 session→chat，token 事件需 field_map 映射为 answer ──
-GQ_LIBRARY_ID = 6  # Milvus 验证库（无文档，检索空亦合法）
+GQ_LIBRARY_ID = 3  # 现存空文档库（无文档，检索空亦合法）；原 6 迁移后 id 漂移不存在，2026-08-25 修正
 GQ_ADAPTER_CFG = {
     "contract_type": "sse",
     "timeout": 180,
