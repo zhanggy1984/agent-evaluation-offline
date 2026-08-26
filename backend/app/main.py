@@ -6,6 +6,7 @@
 """
 import asyncio
 import logging
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +16,7 @@ from app.api import (
     scaffold, uploads, users,
 )
 from app.core.errors import register_error_handlers
-from app.core.logging import setup_logging
+from app.core.logging import setup_logging, trace_id_var
 from app.judge.worker import judge_worker_loop
 from app.runner.scanner import scanner_loop
 
@@ -35,6 +36,17 @@ app.add_middleware(
 )
 
 register_error_handlers(app)
+
+
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    """链路追踪：取网关透传的 X-Request-ID（无则生成 uuid），写入 contextvar 供日志
+    filter 使用，并在响应头回传（经网关时网关会隐藏后端重复头，无副作用）。"""
+    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    trace_id_var.set(rid)
+    response = await call_next(request)
+    response.headers.setdefault("X-Request-ID", rid)
+    return response
 
 
 @app.middleware("http")

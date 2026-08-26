@@ -2,11 +2,26 @@
 
 脱敏规则：key 命中 authorization/token/password/secret/api_key/fernet/credential/auth_config
 的字段值统一打码；正文（answer/reasoning）默认不落日志。
+
+链路追踪（T10）：JsonFormatter 显式输出 trace_id，值来自中间件注入的
+X-Request-ID（网关生成）或本地 uuid；不参与脱敏（非敏感字段）。
 """
+import contextvars
 import json
 import logging
 import re
 from datetime import datetime, timezone
+
+# 当前请求的 trace_id（见 main.py trace_middleware 注入）
+trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="")
+
+
+class TraceIdFilter(logging.Filter):
+    """把当前请求的 trace_id 注入日志记录（JsonFormatter 显式输出该字段）。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.trace_id = trace_id_var.get()
+        return True
 
 _SENSITIVE_KEY = re.compile(
     r"(authorization|token|password|secret|api[_-]?key|fernet|credential|auth_config)",
@@ -44,6 +59,7 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
+            "trace_id": getattr(record, "trace_id", ""),
         }
         if record.exc_info:
             data["exc"] = self.formatException(record.exc_info)
@@ -58,6 +74,8 @@ def setup_logging(level: int = logging.INFO) -> None:
     root.handlers.clear()
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
+    # handler filter 在 emit 前应用，覆盖所有 logger（root logger 的 filter 对子 logger 无效）
+    handler.addFilter(TraceIdFilter())
     root.addHandler(handler)
     root.setLevel(level)
     # 控制第三方噪音

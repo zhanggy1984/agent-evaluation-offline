@@ -123,9 +123,12 @@ agent 透出真实 usage（不估算），× 模型单价表（元/百万 token�
 graph TB
     subgraph PLATFORM["线下评测平台"]
         WEB["Vue3 + Element Plus + ECharts<br/>（frontend/dist，npm run build）"]
-        NGINX["nginx :8180<br/>静态服务 + /api 反代"]
+        NGINX["nginx :8180<br/>静态服务 + /api 反代 → api-gateway"]
         API["FastAPI App :8100<br/>REST API + scanner + judge worker"]
         MYSQL[(MySQL 8<br/>业务事实：agent/用例/run/评分)]
+    end
+    subgraph 共享网关
+        GATEWAY["API 网关 api-gateway:8099（共享 infra）<br/>Host 虚拟域名路由 + X-Request-ID traceId<br/>按真实 IP 限流"]
     end
     subgraph MODULE["后端模块"]
         RUN["runner<br/>orchestrator / scanner / scorer / executor"]
@@ -141,7 +144,8 @@ graph TB
     end
 
     WEB --> NGINX
-    NGINX --> API
+    NGINX --> GATEWAY
+    GATEWAY --> API
     API --> RUN
     RUN --> JUDGE
     RUN --> MET
