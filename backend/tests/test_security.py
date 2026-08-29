@@ -164,3 +164,26 @@ def test_agent_client_no_deny_no_regression():
     client = build_agent_client()
     assert client._resolve("localhost", 80) == "localhost"
     assert client._resolve("127.0.0.1", 80) == "127.0.0.1"
+
+
+# ---------------- P2-C4 version 严格 semver（防 tooltip XSS） ----------------
+from app.api.runs import _SEMVER
+
+
+def test_run_version_full_semver_accepted():
+    # 合法 semver 通过
+    assert _SEMVER.match("1.2.3")
+    assert _SEMVER.match("10.20.300")
+    assert _SEMVER.match("0.0.1")
+
+
+def test_run_version_injection_suffix_rejected():
+    # 原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 等可入库 → Dashboard tooltip XSS；
+    # 必须拒绝任何后缀（含 HTML/空白/换行/额外字符）
+    assert not _SEMVER.match("1.2.3<script>")
+    assert not _SEMVER.match("1.2.3 <img src=x onerror=alert(1)>")
+    assert not _SEMVER.match("1.2.3abc")
+    assert not _SEMVER.match("1.2.3\n")
+    assert not _SEMVER.match("1.2.3/1")
+    assert not _SEMVER.match("1.2")  # 缺 patch
+    assert not _SEMVER.match("1.2.3.4")  # 超 3 段

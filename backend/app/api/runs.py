@@ -35,7 +35,9 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 Admin = Depends(require_role("admin"))
 Staff = Depends(require_role("admin", "evaluator"))
 
-_SEMVER = re.compile(r"^\d+\.\d+\.\d+")
+# P2-C4：必须锚定结尾——原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 能入库，
+# 其值会被 Dashboard 图表 tooltip 当 HTML 渲染成 XSS。\Z 拒绝尾部任何字符（含换行）。
+_SEMVER = re.compile(r"^\d+\.\d+\.\d+\Z")
 _ACTIVE_STATUS = ("pending", "running", "scoring")
 
 logger = logging.getLogger(__name__)

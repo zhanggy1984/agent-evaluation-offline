@@ -596,7 +596,8 @@ const PF = {
   na: { label: 'N/A', type: 'info' },
 }
 const ACTIVE = ['pending', 'running', 'scoring']
-const SEMVER = /^\d+\.\d+\.\d+/
+// P2-C4：锚定结尾（原只验前缀，`1.2.3<script>` 能通过 → 图表 tooltip XSS）
+const SEMVER = /^\d+\.\d+\.\d+$/
 
 const auth = useAuthStore()
 const { isAdmin } = storeToRefs(auth)
@@ -649,6 +650,8 @@ const fmtTime = (t) => (t ? new Date(t).toLocaleString('zh-CN') : '-')
 const fmtRate = (r) => (r == null ? 'N/A' : `${(r * 100).toFixed(1)}%`)
 // 分数统一兜底：保留 2 位小数并去尾零（避免 100.0 / 2.092 这类长尾展示，走查 #3）
 const fmtScore = (v) => (v == null ? 'N/A' : Number(Number(v).toFixed(2)))
+// P2-C4：tooltip 走 ECharts HTML 渲染，任何动态串进 HTML 前必须转义（存量恶意 version 兜底）
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 
 // ---- 图表 option ----
 const trendOption = computed(() => ({
@@ -657,7 +660,7 @@ const trendOption = computed(() => ({
     formatter: (params) => {
       const r = trendData.value[params[0].dataIndex]
       return [
-        `#${r.run_id} ${r.version}（${runStatus(r.status).label}）`,
+        `#${r.run_id} ${esc(r.version)}（${esc(runStatus(r.status).label)}）`,
         `总分：${fmtScore(r.agent_score)}`,
         `通过率：${fmtRate(r.pass_rate)}（${r.pass_case}/${r.total_case}）`,
         `TTFT p50：${fmtScore(r.ttft_p50)}`,
