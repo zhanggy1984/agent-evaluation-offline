@@ -18,6 +18,7 @@ from datetime import datetime
 from statistics import mean
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.assertions import run_assertions
 from app.core.constants import (
@@ -216,7 +217,15 @@ async def score_run(run_id: int) -> None:
                     if (run_id, r.case_id, dim) not in keys:
                         db.add(JudgeTask(run_id=run_id, case_id=r.case_id,
                                          dimension_code=dim, status="pending"))
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError:
+                # P2-D7：并发 score_run 撞复合主键（run_id, case_id, dimension_code）——
+                # 另一事务已建同批任务（D6 行锁下极罕见，防御性兜底，circuit_repo 同款）。
+                # 回滚后让出：对方会继续处理（pending 保持 scoring 等 worker / 全 done
+                # 评分到 completed）；本事务避免访问被 rollback 失效（expired）的 run/results。
+                await db.rollback()
+                return
             tasks = (await db.execute(select(JudgeTask).where(
                 JudgeTask.run_id == run_id))).scalars().all()
             # 存在 pending/processing → 保持 scoring 等 worker（批后触发评分）

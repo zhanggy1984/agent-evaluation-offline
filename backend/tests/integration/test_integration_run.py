@@ -13,6 +13,8 @@ mock 策略（见 7.2 方案）：
 - orchestrator._call_once → 按 case.name 返回固定 CaseOutcome（绕过真网络）
 - scorer._judge_configured → False（judge 未配置路径，断言评分一次到终态）
 """
+import asyncio
+
 import pytest
 
 pytest.importorskip("aiomysql")
@@ -288,3 +290,32 @@ async def test_score_run_judge_done_backfills(db, env, monkeypatch):
     assert r.status == "completed"
     assert er.judge_results and er.judge_results[0]["score"] == 80.0
     assert er.score_total is not None
+
+
+# ---------------- P2-D7 score_run 并发插 JudgeTask 幂等（IntegrityError 兜底） ----------------
+@pytest.mark.asyncio(loop_scope="session")
+async def test_score_run_preseeded_judge_tasks_idempotent(db, env, monkeypatch):
+    """并发另一 score_run 已预插 pending 任务 → 本次幂等不重复插、不报 IntegrityError。"""
+    monkeypatch.setattr("app.runner.scorer._judge_configured", fake_judge_configured_true)
+    ch, run = await _seed_scoring(env, db)
+    async with SessionLocal() as s:
+        s.add(JudgeTask(run_id=run.id, case_id=ch["cases"][0].id, dimension_code="factuality",
+                        status="pending"))
+        await s.commit()
+    await score_run(run.id)
+    async with SessionLocal() as s:
+        tasks = (await s.execute(select(JudgeTask).where(JudgeTask.run_id == run.id))).scalars().all()
+    assert [t.dimension_code for t in tasks] == ["factuality"]  # 数量不增
+    assert tasks[0].status == "pending"  # 仍 pending 等 worker，未翻终态
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_score_run_parallel_no_duplicate(db, env, monkeypatch):
+    """两个 score_run 并发（D6 行锁串行化 + D7 兜底）→ 无异常、JudgeTask 精确只建一份。"""
+    monkeypatch.setattr("app.runner.scorer._judge_configured", fake_judge_configured_true)
+    _, run = await _seed_scoring(env, db)
+    await asyncio.gather(score_run(run.id), score_run(run.id))
+    async with SessionLocal() as s:
+        tasks = (await s.execute(select(JudgeTask).where(JudgeTask.run_id == run.id))).scalars().all()
+    assert [t.dimension_code for t in tasks] == ["factuality"]  # 并发不重复
+    assert tasks[0].status == "pending"
