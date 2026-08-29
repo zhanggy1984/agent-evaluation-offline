@@ -96,8 +96,11 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
     # 互斥：同 agent 单 in_progress run（§15.4）。7.6 C1 多 worker 化：
     # 持 agent 行 FOR UPDATE 锁跨 worker 串行「查 active + 插 run + commit」，
     # 防止两 worker 同时过互斥检查各建一个 run（内存态互斥不跨进程）。
+    # P2-D2 修复：活跃检查必须锁定读（with_for_update）——REPEATABLE READ 下本事务
+    # 首个一致性读（上方 db.get(Agent)）已建立快照，普通读查 active 会读到旧快照
+    # 漏掉并发 worker 刚提交的 run（实测双插）；锁定读永远读最新已提交数据。
     async with agent_mutex(body.agent_id, db):
-        active = (await db.execute(select(EvalRun.id).where(
+        active = (await db.execute(select(EvalRun.id).with_for_update().where(
             EvalRun.agent_id == body.agent_id, EvalRun.status.in_(_ACTIVE_STATUS)))).first()
         if active:
             raise ApiError(E_RUN_MUTEX, "该 agent 已有进行中的 run，请等待完成或取消", 409)
@@ -164,8 +167,9 @@ async def rerun_run(run_id: int, request: Request, _: User = Staff,
     if src is None:
         raise ApiError(E_NOT_FOUND, "run 不存在", 404)
     # 7.6 C1 同 create_run：跨 worker 串行「查 active + 插 run + commit」
+    # P2-D2：同 create_run，活跃检查锁定读，避免 REPEATABLE READ 旧快照漏看并发 run。
     async with agent_mutex(src.agent_id, db):
-        active = (await db.execute(select(EvalRun.id).where(
+        active = (await db.execute(select(EvalRun.id).with_for_update().where(
             EvalRun.agent_id == src.agent_id, EvalRun.status.in_(_ACTIVE_STATUS)))).first()
         if active:
             raise ApiError(E_RUN_MUTEX, "该 agent 已有进行中的 run，请等待完成或取消", 409)
