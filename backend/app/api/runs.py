@@ -64,18 +64,26 @@ async def _is_held_out_hidden(db: AsyncSession, run: EvalRun, user: User) -> boo
     return not is_held_out_visible(run.trigger_type, user, agent.owner_id if agent else None)
 
 
-def _run_out(r: EvalRun) -> dict:
+def _run_out(r: EvalRun, *, redact: bool = False) -> dict:
+    """run 摘要。redact=True：裁剪结果型字段（P2-D8 owner 对 held_out run 隐藏聚合结果）。
+
+    owner 不可见留出集复测的分数/通过数/延迟，但 run 记录本身保留——它占用 agent
+    执行槽位（create_run 互斥 409），owner 需知情。状态型元数据不裁剪。
+    """
     return {
         "id": r.id, "agent_id": r.agent_id, "suite_id": r.suite_id, "version": r.version,
         "trigger_type": r.trigger_type, "status": r.status, "generation": r.generation,
         "started_at": r.started_at.isoformat() if r.started_at else None,
         "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-        "total_case": r.total_case, "pass_case": r.pass_case, "fail_case": r.fail_case,
-        "error_case": r.error_case, "na_case": r.na_case,
-        "agent_score": float(r.agent_score) if r.agent_score is not None else None,
-        "judge_incomplete": r.judge_incomplete,
-        "ttft_p50": float(r.ttft_p50) if r.ttft_p50 is not None else None,
-        "e2e_p50": float(r.e2e_p50) if r.e2e_p50 is not None else None,
+        "total_case": r.total_case,
+        "pass_case": None if redact else r.pass_case,
+        "fail_case": None if redact else r.fail_case,
+        "error_case": None if redact else r.error_case,
+        "na_case": None if redact else r.na_case,
+        "agent_score": None if redact else (float(r.agent_score) if r.agent_score is not None else None),
+        "judge_incomplete": None if redact else r.judge_incomplete,
+        "ttft_p50": None if redact else (float(r.ttft_p50) if r.ttft_p50 is not None else None),
+        "e2e_p50": None if redact else (float(r.e2e_p50) if r.e2e_p50 is not None else None),
     }
 
 
@@ -125,20 +133,29 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
 
 @router.get("")
 async def list_runs(agent_id: int | None = None, limit: int = 50, offset: int = 0,
-                    _: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(EvalRun).order_by(EvalRun.id.desc())
     if agent_id is not None:
         stmt = stmt.where(EvalRun.agent_id == agent_id)
     rows = (await db.execute(stmt.limit(min(limit, 200)).offset(max(offset, 0)))).scalars().all()
-    return ok([_run_out(r) for r in rows])
+    # P2-D8：批量查 agent owner → owner 对 held_out run 裁剪聚合结果。列表不能逐条 404
+    #（会破坏分页语义），run 记录保留、结果型字段置 None。
+    owner_map = {}
+    if rows:
+        owner_map = {a.id: a.owner_id for a in (await db.execute(
+            select(Agent.id, Agent.owner_id).where(
+                Agent.id.in_({r.agent_id for r in rows})))).all()}
+    return ok([_run_out(r, redact=not is_held_out_visible(r.trigger_type, user, owner_map.get(r.agent_id)))
+               for r in rows])
 
 
 @router.get("/{run_id}")
-async def get_run(run_id: int, _: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_run(run_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     run = await db.get(EvalRun, run_id)
     if run is None:
         raise ApiError(E_NOT_FOUND, "run 不存在", 404)
-    return ok(_run_out(run))
+    # P2-D8：owner 对 held_out run 裁剪聚合结果（记录可见、结果不可见；run_results 同源判定）
+    return ok(_run_out(run, redact=await _is_held_out_hidden(db, run, user)))
 
 
 @router.post("/{run_id}/cancel")

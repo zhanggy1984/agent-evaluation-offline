@@ -698,7 +698,9 @@ CREATE TABLE audit_log (
 | GET | /dashboard/agents/{id}/cost | 成本面板 |
 
 **数据可见性（对象级，deps.py 实现）**：
-- 留出集：`owner_id==当前用户` 时，`/suites/{sid}/cases` 过滤 `is_held_out=true`，`/runs` 及 `/dashboard/*` 过滤 `trigger_type='held_out'`（owner 不可见 held-out 用例与结果）。
+- 留出集：`owner_id==当前用户` 时，`/suites/{sid}/cases` 过滤 `is_held_out=true`（owner 不可见 held-out 用例与结果）。
+  - P2-D8 修订：`/runs` 列表/详情对 owner **裁剪** held_out run 的聚合结果（`agent_score`/pass/fail/error_case/`ttft_p50`/`e2e_p50` 等结果型字段置 None），run 记录保留——留出集 run 占用 agent 执行槽位（create_run 互斥 409），整体过滤会让 owner 无法定位「agent 为何不可触发」；admin/非 owner 不受影响。
+  - `/dashboard/*`（gate/trend/compare/perf/cost/baseline）**全局排除** `trigger_type='held_out'`：看板为常规评测视图，留出集复测是独立评估通道，混入会污染「最新版本门禁分」等常规指标；QA 经 `/runs` 列表（filter trigger_type）+ run 详情查看留出集结果。
 - 职责分离：`owner_id==当前用户` 时禁止标/改自己 agent 的 `golden_answer`/`assertions`。
 - 独立 QA：QA = 非该 agent owner 的 evaluator（独立第三方标注/评分基准）。
 

@@ -37,7 +37,10 @@ async def gate(user: User = Depends(get_current_user), db: AsyncSession = Depend
     """L0 门禁墙：逐 agent 最新版本跨 suite 汇总 + 陈旧 suite 单独标注。"""
     logger.debug("gate in: user=%s", user.username)
     agents = (await db.execute(select(Agent).order_by(Agent.id))).scalars().all()
-    runs = (await db.execute(select(EvalRun))).scalars().all()
+    # P2-D8：看板为常规评测视图，排除留出集复测 run（不展示其聚合结果，也防其污染
+    #「最新版本门禁分」等常规指标；留出集结果走 /runs 列表 + 详情查看）
+    runs = (await db.execute(select(EvalRun).where(
+        EvalRun.trigger_type != "held_out"))).scalars().all()
     suites = (await db.execute(select(TestSuite))).scalars().all()
     case_cnt = {sid: n for sid, n in (await db.execute(
         select(TestCase.suite_id, func.count()).group_by(TestCase.suite_id))).all()}
@@ -52,7 +55,8 @@ async def trend(agent_id: int, user: User = Depends(get_current_user),
     """L1 趋势：该 agent 全部终态 run 时间序列（viewer 可读）。"""
     logger.debug("trend in: agent_id=%s user=%s", agent_id, user.username)
     rows = (await db.execute(select(EvalRun).where(
-        EvalRun.agent_id == agent_id, EvalRun.status.in_(TERMINAL_STATUS),
+        EvalRun.agent_id == agent_id, EvalRun.trigger_type != "held_out",  # P2-D8：排除留出集
+        EvalRun.status.in_(TERMINAL_STATUS),
     ).order_by(EvalRun.started_at))).scalars().all()
     out = [{
         "run_id": r.id, "version": r.version, "status": r.status,
@@ -74,8 +78,11 @@ async def compare(a: int, b: int, user: User = Depends(get_current_user),
                   db: AsyncSession = Depends(get_db)):
     """L2 版本对比：两 run 各 accuracy 维度均值对比，|Δ| > 2σ 才标显著。"""
     logger.debug("compare in: a=%s b=%s user=%s", a, b, user.username)
-    run_a = await db.get(EvalRun, a)
-    run_b = await db.get(EvalRun, b)
+    # P2-D8：看板对比仅限常规评测 run；held_out run 查询层过滤 → 404（不泄露留出集存在性）
+    run_a = (await db.execute(select(EvalRun).where(
+        EvalRun.id == a, EvalRun.trigger_type != "held_out"))).scalar_one_or_none()
+    run_b = (await db.execute(select(EvalRun).where(
+        EvalRun.id == b, EvalRun.trigger_type != "held_out"))).scalar_one_or_none()
     if run_a is None or run_b is None:
         raise ApiError(E_NOT_FOUND, "run 不存在", 404)
     if run_a.agent_id != run_b.agent_id:
@@ -127,7 +134,8 @@ async def _run_dim_means(db: AsyncSession, run_id: int) -> dict[str, float]:
 async def _agent_dim_series(db: AsyncSession, agent_id: int) -> dict[str, list[float]]:
     """同 agent 全部终态 run 各维度 run 级均值序列（2σ 显著性用）。"""
     rows = (await db.execute(select(EvalRun).where(
-        EvalRun.agent_id == agent_id, EvalRun.status.in_(TERMINAL_STATUS),
+        EvalRun.agent_id == agent_id, EvalRun.trigger_type != "held_out",  # P2-D8：排除留出集
+        EvalRun.status.in_(TERMINAL_STATUS),
     ))).scalars().all()
     history: dict[str, list[float]] = {}
     for r in rows:
@@ -155,7 +163,8 @@ async def perf(agent_id: int, user: User = Depends(get_current_user),
     """性能面板：该 agent 全部终态 run 的 ttft/e2e 延迟序列（viewer 可读）。"""
     logger.debug("perf in: agent_id=%s user=%s", agent_id, user.username)
     rows = (await db.execute(select(EvalRun).where(
-        EvalRun.agent_id == agent_id, EvalRun.status.in_(TERMINAL_STATUS),
+        EvalRun.agent_id == agent_id, EvalRun.trigger_type != "held_out",  # P2-D8：排除留出集
+        EvalRun.status.in_(TERMINAL_STATUS),
     ).order_by(EvalRun.started_at))).scalars().all()
     out = [{
         "run_id": r.id, "version": r.version, "status": r.status,
@@ -176,7 +185,8 @@ async def cost(agent_id: int, user: User = Depends(get_current_user),
     """
     logger.debug("cost in: agent_id=%s user=%s", agent_id, user.username)
     runs = (await db.execute(select(EvalRun).where(
-        EvalRun.agent_id == agent_id, EvalRun.status.in_(TERMINAL_STATUS),
+        EvalRun.agent_id == agent_id, EvalRun.trigger_type != "held_out",  # P2-D8：排除留出集
+        EvalRun.status.in_(TERMINAL_STATUS),
     ).order_by(EvalRun.started_at))).scalars().all()
     models: dict[int, list[str]] = {}
     if runs:
@@ -233,7 +243,8 @@ async def baseline(agent_id: int, user: User = Depends(get_current_user),
     """
     logger.debug("baseline in: agent_id=%s user=%s", agent_id, user.username)
     run = (await db.execute(select(EvalRun).where(
-        EvalRun.agent_id == agent_id, EvalRun.status.in_(BASELINE_RUN_STATUS),
+        EvalRun.agent_id == agent_id, EvalRun.trigger_type != "held_out",  # P2-D8：排除留出集
+        EvalRun.status.in_(BASELINE_RUN_STATUS),
     ).order_by(EvalRun.id.desc()).limit(1))).scalar_one_or_none()
     out = {"run": None, "interfaces": [], "is_gold_count": 0}
     if run is not None:
