@@ -124,7 +124,7 @@ graph TB
     subgraph PLATFORM["线下评测平台"]
         WEB["Vue3 + Element Plus + ECharts<br/>（frontend/dist，npm run build）"]
         NGINX["nginx :8180<br/>静态服务 + /api 反代 → api-gateway"]
-        API["FastAPI App :8100<br/>REST API + scanner + judge worker"]
+        API["FastAPI App :8000（容器内）<br/>REST API + scanner + judge worker"]
         MYSQL[(MySQL 8<br/>业务事实：agent/用例/run/评分)]
     end
     subgraph 共享网关
@@ -155,7 +155,7 @@ graph TB
     JUDGE --> DS
 ```
 
-**对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api` 反代到共享网关 `api-gateway:8099`（`Host: eval.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。宿主端口映射的 backend 地址（如 `localhost:8100`）仅供开发调试 / 评测直连，绕过网关。
+**对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api` 反代到共享网关 `api-gateway:8099`（`Host: eval.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。**P2-D12：backend 已收敛，不暴露宿主端口（无 `localhost:8100`），后端仅内网可达、对外唯一入口即前端 nginx → 网关**；宿主侧开发脚本经 `localhost:8180`（网关链路）或容器内 `8000`（`docker exec`）访问。
 
 **关键链路**：触发评测（手动）→ 契约探测（L0 硬拦截）→ 逐 case：reset(seed) 造数归位 → 调用 agent 接口（采集 answer/usage/timing/tool_call）→ 断言 + judge 评分 → scorer 汇总（加权平均 + 维度门禁 + run 终态）→ 门禁墙呈现 + 未达标摘要 → PDF 报告导出。
 
@@ -201,14 +201,14 @@ docker compose up -d --build
 # backend 启动时自动执行 alembic upgrade head 建表（幂等：存量库已到 head 无操作）
 # 依赖共享 infra MySQL 就绪；MySQL 未起时 backend 可能 crash-loop，先起 infra 再起本编排
 docker compose ps                 # ai-eval-backend / ai-eval-frontend 全部 Up
-curl localhost:8100/healthz       # {"status":"ok"}
+curl localhost:8180/healthz       # {"status":"ok"}（经前端 nginx → 网关）
 ```
 
 **平台端口**（宿主侧）：
 
 | 容器 | 宿主端口 | 容器内 |
 |------|---------|--------|
-| backend | 8100（`APP_HOST_PORT`） | 8000 |
+| backend | 无（P2-D12 收敛，仅内网） | 8000 |
 | frontend | 8180（`FRONT_HOST_PORT`） | 80 |
 
 > 本 agent 只起应用容器；MySQL 在共享 infra（库 `ai_evaluation`）。

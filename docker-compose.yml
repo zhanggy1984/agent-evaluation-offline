@@ -7,7 +7,7 @@
 #
 # 前置：先部署共享 infra（D:/study/aiprojcet/infra，`docker compose up -d`）。
 # 启动：docker compose up -d --build
-# 连接：前端 http://localhost:8180 / 后端 http://localhost:8100
+# 连接：前端 http://localhost:8180（P2-D12：后端不暴露宿主端口，对外唯一入口 = 前端 nginx → 网关）
 #
 # 表结构：启动时自动 `alembic upgrade head`（幂等：存量库已到 head 无操作、全新库建表），
 #   迁移数据已含表 + alembic_version；seed 需手动执行（README 快速开始第 3 步）。
@@ -35,8 +35,8 @@ services:
       JUDGE_API_KEY: ${JUDGE_API_KEY:-}
       # 空库重建 admin 初始密码（seed 优先取此值；首登仍强制改密）
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-    ports:
-      - "${APP_HOST_PORT:-8100}:8000"
+    # P2-D12：后端不暴露宿主端口（对外唯一入口 = 前端 nginx → 网关，含 traceId/限流/防串线）。
+    # 需要宿主直连调试时临时加：ports: ["127.0.0.1:8100:8000"]（用后移除）。
     # 7.6 C5 多 worker：默认 1 保持现状；置 BACKEND_WORKERS=2 可验证多 worker 互斥
     # P0：先 alembic 建表再起服务（全新库迁移；alembic/env.py 从 settings 连库，容器内直接可用）
     command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${BACKEND_WORKERS:-1}"
