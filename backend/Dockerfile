@@ -13,5 +13,10 @@ COPY . .
 
 EXPOSE 8000
 
+# 健康检查：python:3.11-slim 无 curl/wget，用标准库 urllib 探活 /healthz（app/main.py:84，无鉴权）。
+# compose 未定义 healthcheck 时此配置生效；探活失败由 restart: unless-stopped 拉起。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"
+
 # 单进程部署约束（workers=1）
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

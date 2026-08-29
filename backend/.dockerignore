@@ -1,0 +1,39 @@
+# backend 镜像构建排除清单（build context = ./backend，见 docker-compose.yml）
+#
+# 注意：运行必需项【不得】排除——migrations/ + alembic.ini（启动时 alembic upgrade head）、
+# app/、requirements.txt、verify_fresh_start.py（容器内冒烟矩阵）。
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# 本地/运行时目录（compose 已挂载宿主对应目录）
+backups/
+exports/
+uploads/
+
+# 本地环境与日志
+.env
+*.log
+
+# 测试产物与样例文件（容器内不跑单测）
+tests/
+*.pdf
+
+# 开发调试一次性脚本（gitignored 不入库；进镜像徒增体积）
+verify_*.py
+!verify_fresh_start.py
+expand_cases_*.py
+run_*.py
+trigger_*.py
+gen_cc_*.py
+fix_judge_golden_233.py
+gold_calibrate_228.py
+heldout_228.py
+monitor_run.py
