@@ -58,7 +58,9 @@ def test_model_prices_versioned():
 
 
 def test_seed_users_roles():
+    """demo 用户只声明用户名/角色；密码一律走 env 注入（P0 安全收敛，禁止明文落源码）。"""
     users = {u["username"]: u for u in seed_data.SEED_USERS}
     assert {"evaluator", "viewer"} <= set(users)
     for u in users.values():
-        assert u["role"] in ROLE and u["password"]
+        assert u["role"] in ROLE
+        assert "password" not in u, "demo 账号密码禁止硬编码在 seed_data（须 env 注入）"

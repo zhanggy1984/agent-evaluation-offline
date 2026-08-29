@@ -6,10 +6,12 @@
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import types
 import unittest
 
+import app.adapters.base as base
 from app.adapters.base import RequestSpec, request_kwargs
 from app.adapters.engine import ConfigEngine, _poll_hit, render_template
 
@@ -42,6 +44,30 @@ class _SeqClient:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+class _UploadsTestCase(unittest.TestCase):
+    """multipart 测试基类：模拟 uploads 目录。
+
+    P0 安全收敛后 multipart 路径限定 uploads 目录内（adapters.base 白名单校验），
+    测试文件统一建在临时 uploads 目录下并同步 _UPLOADS_DIR。
+    """
+
+    def setUp(self):
+        self._uploads = tempfile.mkdtemp(prefix="uploads_tmp_")
+        self._orig_uploads_dir = base._UPLOADS_DIR
+        base._UPLOADS_DIR = os.path.realpath(self._uploads)
+
+    def tearDown(self):
+        base._UPLOADS_DIR = self._orig_uploads_dir
+        shutil.rmtree(self._uploads, ignore_errors=True)
+
+    def upload_file(self, suffix=".pdf", content=b"%PDF-1.4"):
+        """在模拟 uploads 目录内建文件，返回路径（唯一名，避免同目录多次建文件撞名）。"""
+        path = os.path.join(self._uploads, f"case{len(os.listdir(self._uploads))}{suffix}")
+        with open(path, "wb") as f:
+            f.write(content)
+        return path
 
 
 class TestPollHit(unittest.TestCase):
@@ -119,7 +145,7 @@ class TestPreparePoll(unittest.TestCase):
             _run(eng.prepare(None, client))
 
 
-class TestPrepareMultipart(unittest.TestCase):
+class TestPrepareMultipart(_UploadsTestCase):
     def _upload_cfg(self, file_path_var="{case.input.file_path}"):
         return {
             "prepare": [{
@@ -131,9 +157,7 @@ class TestPrepareMultipart(unittest.TestCase):
         }
 
     def test_files_sent_via_multipart(self):
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            f.write(b"%PDF-1.4 fake contract")
-            path = f.name
+        path = self.upload_file(content=b"%PDF-1.4 fake contract")
         case = types.SimpleNamespace(input={"file_path": path}, input_turns=None, expected={})
         eng = ConfigEngine(_FakeAgent(), _FakeInterface(), self._upload_cfg(), {})
         client = _SeqClient([types.SimpleNamespace(status_code=200, json=lambda: {"task_id": 42})])
@@ -150,9 +174,7 @@ class TestPrepareMultipart(unittest.TestCase):
 
     def test_prepare_can_reference_case_input(self):
         """prepare 步骤可引用 {case.*}（文件型上传的基础）。"""
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            f.write(b"%PDF-1.4")
-            path = f.name
+        path = self.upload_file()
         case = types.SimpleNamespace(input={"file_path": path}, input_turns=None, expected={})
         eng = ConfigEngine(_FakeAgent(), _FakeInterface(), self._upload_cfg(), {})
         client = _SeqClient([types.SimpleNamespace(status_code=200, json=lambda: {"task_id": 1})])
@@ -161,7 +183,7 @@ class TestPrepareMultipart(unittest.TestCase):
         self.assertEqual(kw["files"]["file"][0], os.path.basename(path))
 
 
-class TestRequestKwargs(unittest.TestCase):
+class TestRequestKwargs(_UploadsTestCase):
     def test_json_mode(self):
         spec = RequestSpec("POST", "u", {}, json={"q": "hi"})
         kw = request_kwargs(spec)
@@ -169,15 +191,52 @@ class TestRequestKwargs(unittest.TestCase):
         self.assertNotIn("files", kw)
 
     def test_multipart_mode(self):
-        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
-            f.write(b"abc")
-            path = f.name
+        path = self.upload_file(suffix=".txt", content=b"abc")
         spec = RequestSpec("POST", "u", {}, files={"f": path}, data={"k": "v"})
         kw = request_kwargs(spec)
         self.assertIn("files", kw)
         self.assertNotIn("json", kw)
         self.assertEqual(kw["data"], {"k": "v"})
         self.assertEqual(kw["files"]["f"][1], b"abc")
+
+
+class TestUploadsPathGuard(_UploadsTestCase):
+    """P0-4 负向用例：uploads 内放行，穿越 / 越界绝对路径 / 软链逃逸一律拒绝。"""
+
+    def _assert_rejected(self, path: str):
+        with self.assertRaisesRegex(ValueError, "不在 uploads 目录内"):
+            base._assert_inside_uploads(path)
+
+    def test_accepts_inside_uploads(self):
+        path = self.upload_file()
+        self.assertEqual(base._assert_inside_uploads(path), os.path.realpath(path))
+
+    def test_rejects_parent_dir_traversal(self):
+        # ../ 穿越：realpath 落到 uploads 外 → 拒绝
+        self._assert_rejected(os.path.join(self._uploads, "..", "escape.txt"))
+
+    def test_rejects_absolute_path_outside_uploads(self):
+        outside = tempfile.mkdtemp(prefix="outside_tmp_")
+        try:
+            self._assert_rejected(os.path.join(outside, "secret.txt"))
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_rejects_symlink_escape(self):
+        # 软链逃逸：uploads 内链接指向外部文件 → realpath 解析到外部 → 拒绝
+        outside = tempfile.mkdtemp(prefix="outside_tmp_")
+        try:
+            target = os.path.join(outside, "secret.txt")
+            with open(target, "w", encoding="utf-8") as f:
+                f.write("secret")
+            link = os.path.join(self._uploads, "link.txt")
+            try:
+                os.symlink(target, link)
+            except (OSError, NotImplementedError):
+                self.skipTest("当前无创建 symlink 权限（Windows 需管理员）")
+            self._assert_rejected(link)
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
 
 
 class TestRenderFilesTemplate(unittest.TestCase):

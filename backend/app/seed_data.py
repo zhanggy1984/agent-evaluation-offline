@@ -483,9 +483,11 @@ SEED_MODEL_PRICES = [
      "effective_from": datetime(2026, 7, 1)},
 ]
 
-# 走查/演示用户（role ∈ ROLE 枚举；password_changed_at 置非 None → 不强制改密，走查不被打断）。
+# 走查/演示用户（role ∈ ROLE 枚举）。P0 安全收敛：密码禁止硬编码在源码，
+# 改由 env DEMO_EVALUATOR_PASSWORD / DEMO_VIEWER_PASSWORD 注入（seed.py::_seed_users），
+# 缺 env 不建——生产不产生已知口令账号；password_changed_at=None → 首登强制改密。
 # admin 不走这里（seed.py::_seed_admin 独立：密码走 env ADMIN_PASSWORD，首登强制改密）。
 SEED_USERS = [
-    {"username": "evaluator", "password": "Eval#2026", "role": "evaluator"},
-    {"username": "viewer", "password": "View#2026", "role": "viewer"},
+    {"username": "evaluator", "role": "evaluator"},
+    {"username": "viewer", "role": "viewer"},
 ]

@@ -255,17 +255,26 @@ async def _seed_model_prices(db) -> None:
 
 
 async def _seed_users(db) -> None:
-    """走查/演示用户幂等 seed（evaluator/viewer；password_changed_at 非 None → 不强制改密）。"""
-    from datetime import datetime
+    """走查/演示用户幂等 seed（evaluator/viewer）。
 
+    P0 安全收敛：密码改由 env DEMO_EVALUATOR_PASSWORD / DEMO_VIEWER_PASSWORD 注入
+    （对齐 _seed_admin 的 env-only 模式），缺 env 则跳过不建——生产默认无已知口令账号；
+    password_changed_at=None → 首登强制改密（与 admin 同口径）。
+    """
     from app.seed_data import SEED_USERS
 
     for u in SEED_USERS:
         exists = (await db.execute(select(User.id).where(User.username == u["username"]))).first()
         if exists:
             continue
-        db.add(User(username=u["username"], password_hash=hash_password(u["password"]),
-                    role=u["role"], password_changed_at=datetime.now()))
+        # P0 安全收敛：密码只从 env 注入（DEMO_<用户名大写>_PASSWORD），缺 env 跳过不建
+        password = os.environ.get(f"DEMO_{u['username'].upper()}_PASSWORD")
+        if not password:
+            logger.info("seed user %s 缺 DEMO_*_PASSWORD env，跳过（生产不建 demo 账号）",
+                        u["username"])
+            continue
+        db.add(User(username=u["username"], password_hash=hash_password(password),
+                    role=u["role"], password_changed_at=None))
         logger.info("seed user %s（%s）", u["username"], u["role"])
 
 
@@ -297,6 +306,13 @@ DEFAULT_SYSTEM_CONFIG = {
     "heartbeat_interval": {"value": 30, "scope": "global", "is_hot": False},
     "judge_llm.base_url": {"value": "", "scope": "global", "is_hot": True},
     "judge_llm.model_name": {"value": "", "scope": "global", "is_hot": True},
+    # P0 补齐：judge 出站域名白名单（SSRF §15.3）。缺失时 worker 读空 → _validate_allowlist
+    # 拒绝所有 host（语义维度永远判不出分）且配置中心因"未知 key"无法补救，必须 seed 默认值。
+    # 预设常用 OpenAI 兼容厂商（对齐 solution_detail §七配置表），按实际选用在配置中心增删。
+    "llm_allowlist": {
+        "value": ["api.deepseek.com", "dashscope.aliyuncs.com", "open.bigmodel.cn", "api.moonshot.cn"],
+        "scope": "global", "is_hot": True,
+    },
     # 注册期（registration：仅 agent 注册/文件上传时校验）
     "file_max_size": {"value": 50, "scope": "registration", "is_hot": True},
     # 7.6 A4 补漏：169.254.0.0/16（云元数据段）必须与代码常量 DEFAULT_AGENT_CIDRS 一致剔除，

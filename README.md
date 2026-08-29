@@ -2,7 +2,7 @@
 
 > **Agent 提测上线前的线下评测平台**：对任意 agent 的核心 LLM 接口在隔离测试环境做 HTTP 评测，量化**答案准确性 / 性能 / token 成本**三类指标，看板呈现汇总、版本对比、逐层下钻定位问题点。**线下**——评测不与生产流量混跑，用固定用例集 + 契约探测在独立测试环境执行。
 
-本系统是**生产级线下评测平台**：docker-compose 三容器一键启动、强契约驱动任意 agent 接入、规则断言 + LLM-judge 混合评分、门禁墙逐层下钻、PDF 报告导出。
+本系统是**生产级线下评测平台**：docker-compose 两容器（backend + frontend）一键启动、MySQL 走共享 infra、强契约驱动任意 agent 接入、规则断言 + LLM-judge 混合评分、门禁墙逐层下钻、PDF 报告导出。
 
 ---
 
@@ -172,7 +172,7 @@ graph TB
 | LLM judge | DeepSeek（openai 兼容） | 语义维度六级 rubric 精评 |
 | 插件 | 断言算子白名单 + 配置型 adapter | 可插拔评测维度 |
 | 测试 | pytest + pytest-asyncio | 单元 / 集成（`RUN_INTEGRATION=1` 连库） |
-| 部署 | docker compose | backend + frontend + MySQL 三容器 |
+| 部署 | docker compose | backend + frontend 两容器 + 共享 infra MySQL |
 
 ---
 
@@ -198,7 +198,8 @@ cp .env.example .env
 
 ```bash
 docker compose up -d --build
-# 等待 backend healthy（依赖共享 infra MySQL 就绪）
+# backend 启动时自动执行 alembic upgrade head 建表（幂等：存量库已到 head 无操作）
+# 依赖共享 infra MySQL 就绪；MySQL 未起时 backend 可能 crash-loop，先起 infra 再起本编排
 docker compose ps                 # ai-eval-backend / ai-eval-frontend 全部 Up
 curl localhost:8100/healthz       # {"status":"ok"}
 ```
@@ -229,8 +230,8 @@ open http://localhost:8180        # 浏览器前端
 | 角色 | 账号 | 密码 | 可做什么 |
 |------|------|------|---------|
 | 管理员 | `admin` | 由 `.env` 的 `ADMIN_PASSWORD` 注入 | 建 agent/接口、改全局配置、管理用户 |
-| 评测员 | `evaluator` | seed 演示账号（仅本地评测环境） | 触发评测、标注用例 |
-| 查看者 | `viewer` | seed 演示账号（仅本地评测环境） | 只读看板 |
+| 评测员 | `evaluator` | 由 `DEMO_EVALUATOR_PASSWORD` 注入（缺省不建） | 触发评测、标注用例 |
+| 查看者 | `viewer` | 由 `DEMO_VIEWER_PASSWORD` 注入（缺省不建） | 只读看板 |
 
 > 触发评测前需确认被评 agent 服务在线（标准契约 + `POST /admin/reset` 就绪），且宿主侧对应端口未被其他服务占用。
 
@@ -278,7 +279,7 @@ ai-evaluation/
 │   └── nginx.conf           # 静态服务 + /api 反代
 ├── uploads/                 # 文件型用例自存文件（宿主 ↔ 容器挂载）
 ├── scripts/                 # seed / 初始化脚本
-├── docker-compose.yml       # 3 容器编排
+├── docker-compose.yml       # 2 容器编排（backend+frontend）+ 共享 infra MySQL
 ├── .env.example             # 环境变量模板
 ├── prd.txt                  # 产品需求
 ├── solution.md              # 技术方案（v0.3，88 项决策）

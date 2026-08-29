@@ -10,6 +10,10 @@ from dataclasses import dataclass
 
 import httpx
 
+# P0 安全收敛：multipart 文件路径白名单。文件型用例自存于平台 uploads（决策 #12），
+# 出站读取一律限定该目录内，防 {case.input.file_path} 路径穿越读容器任意文件（如 .env）。
+_UPLOADS_DIR = os.path.realpath(os.environ.get("UPLOADS_DIR", "/app/uploads"))
+
 
 @dataclass
 class RequestSpec:
@@ -27,16 +31,25 @@ def multipart_files(files: dict) -> dict:
     """{表单字段: 文件路径} → httpx multipart files（读字节 + basename 文件名 + MIME 类型）。
 
     ConfigEngine 与 probe 共用：一次性读进内存，避免跨 await 持有文件句柄；
-    路径须为平台容器内可读路径（文件型用例自存于平台 uploads，决策 #12）。
+    路径须为平台 uploads 目录内的可读路径（P0：realpath 校验防路径穿越）。
     """
     out = {}
     for field, path in files.items():
-        with open(path, "rb") as f:
+        rp = _assert_inside_uploads(str(path))
+        with open(rp, "rb") as f:
             content = f.read()
-        name = os.path.basename(str(path))
+        name = os.path.basename(rp)
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
         out[field] = (name, content, mime)
     return out
+
+
+def _assert_inside_uploads(path: str) -> str:
+    """校验并返回 realpath：必须在 uploads 目录内，否则拒绝（防 ../ 与软链逃逸）。"""
+    rp = os.path.realpath(path)
+    if not rp.startswith(_UPLOADS_DIR + os.sep):
+        raise ValueError(f"文件路径不在 uploads 目录内: {path}")
+    return rp
 
 
 def request_kwargs(spec: RequestSpec, timeout: float | None = None) -> dict:

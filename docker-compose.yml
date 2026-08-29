@@ -9,8 +9,8 @@
 # 启动：docker compose up -d --build
 # 连接：前端 http://localhost:8180 / 后端 http://localhost:8100
 #
-# 表结构：aeo 用 alembic 管理（手动/脚本执行），迁移数据已含表 + alembic_version，
-#   应用启动不自动跑 alembic，无需改建表逻辑。
+# 表结构：启动时自动 `alembic upgrade head`（幂等：存量库已到 head 无操作、全新库建表），
+#   迁移数据已含表 + alembic_version；seed 需手动执行（README 快速开始第 3 步）。
 # 开发热挂载 ./backend:/app 保留（改代码 restart 生效）；extra_hosts 保留（评测需访问宿主机 agent）。
 # ============================================================
 
@@ -35,7 +35,8 @@ services:
     ports:
       - "${APP_HOST_PORT:-8100}:8000"
     # 7.6 C5 多 worker：默认 1 保持现状；置 BACKEND_WORKERS=2 可验证多 worker 互斥
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${BACKEND_WORKERS:-1}
+    # P0：先 alembic 建表再起服务（全新库迁移；alembic/env.py 从 settings 连库，容器内直接可用）
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${BACKEND_WORKERS:-1}"
     extra_hosts:
       # 宿主机 agent 访问（Linux host-gateway；Windows/Mac Docker Desktop 原生支持）
       - "host.docker.internal:host-gateway"

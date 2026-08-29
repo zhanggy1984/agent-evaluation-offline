@@ -31,4 +31,5 @@ export const CONFIG_META = {
   // ---- 注册期（registration）----
   file_max_size: { label: '附件大小上限', unit: 'MB', precision: 0, desc: '用例附件上传的最大体积' },
   base_url_allowlist: { label: 'Agent 地址白名单', unit: '', precision: 0, desc: '注册 agent 时允许的 base_url 网段（SSRF 防护）' },
+  llm_allowlist: { label: 'judge LLM 白名单', unit: '', precision: 0, desc: 'judge 出站 LLM 域名白名单（SSRF 防护）' },
 }
