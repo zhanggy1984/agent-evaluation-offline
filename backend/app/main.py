@@ -10,11 +10,14 @@ import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from app.api import (
     agents, annotations, auth, cases, config, dashboard, exports, meta, runs,
     scaffold, uploads, users,
 )
+from app.core.db import SessionLocal
 from app.core.errors import register_error_handlers
 from app.core.logging import setup_logging, trace_id_var
 from app.judge.worker import judge_worker_loop
@@ -83,7 +86,16 @@ _judge_task: asyncio.Task | None = None
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok"}
+    # P2-D14：探 DB（SELECT 1），DB 不可达 → 503 degraded（就绪语义）。Docker HEALTHCHECK
+    # 用 urllib 对 503 抛错 → 容器标 unhealthy；restart 策略不因 unhealthy 重启（基于退出码），
+    # 故 DB 挂时容器保持运行不 crash-loop，网关/监控可见 503 信号。
+    try:
+        async with SessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        return {"status": "ok"}
+    except Exception:
+        logger.warning("healthz: DB 不可达")
+        return JSONResponse({"status": "degraded"}, status_code=503)
 
 
 @app.on_event("startup")

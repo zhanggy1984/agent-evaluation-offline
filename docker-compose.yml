@@ -48,6 +48,9 @@ services:
       - ./backend:/app
       # 文件型用例自存文件（决策 #12）：宿主 ./uploads ↔ 容器 /app/uploads
       - ./uploads:/app/uploads
+    # P2-D14：容器资源限制（FastAPI + scanner + judge worker + reportlab PDF 导出）
+    mem_limit: 1024m
+    cpus: "1.0"
     restart: unless-stopped
     networks:
       - shared-infra
@@ -59,6 +62,9 @@ services:
       - "${FRONT_HOST_PORT:-8180}:80"
     depends_on:
       - backend
+    # P2-D14：nginx 静态服务资源限制（对齐 api-gateway 先例）
+    mem_limit: 128m
+    cpus: "0.25"
     restart: unless-stopped
     networks:
       - shared-infra

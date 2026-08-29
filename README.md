@@ -213,6 +213,14 @@ curl localhost:8180/healthz       # {"status":"ok"}（经前端 nginx → 网关
 
 > 本 agent 只起应用容器；MySQL 在共享 infra（库 `ai_evaluation`）。
 
+**备份（P2-D14）**：`scripts/backup_db.ps1` 全库备份（共享 infra MySQL 容器内 mysqldump，`--single-transaction --no-tablespaces`，密码从 `../infra/.env` 读，不硬编码），滚动保留最近 14 份。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/backup_db.ps1   # → backups/ai_evaluation_YYYYMMDD_HHMMSS.sql
+```
+
+恢复：`docker exec -i shared-mysql mysql -h127.0.0.1 -uevaluation -p<PASS> ai_evaluation < backups/xxx.sql`。
+
 ### 第 3 步：初始化数据（seed 手动执行）
 
 > seed 不会在启动时自动跑，需手动执行一次（幂等 upsert，可重跑）。
