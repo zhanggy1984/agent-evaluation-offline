@@ -30,7 +30,9 @@
         <el-button type="primary" class="pwd-btn" :loading="loading" @click="handleSubmit">
           提交
         </el-button>
-        <el-button class="pwd-btn" @click="goBack">取消</el-button>
+        <!-- P2-D11：强制改密用户无「取消」语义——守卫会把非改密页弹回，按钮是虚假期望，
+             故隐藏；非强制用户（MainLayout 顶部入口主动改密）保留取消回首页 -->
+        <el-button v-if="!auth.must_change_password" class="pwd-btn" @click="goBack">取消</el-button>
       </el-form>
     </el-card>
   </div>

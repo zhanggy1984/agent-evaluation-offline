@@ -23,6 +23,8 @@ const routes = [
       { path: 'agents', name: 'agents', component: () => import('../views/Agents.vue') },
       { path: 'cases', name: 'cases', component: () => import('../views/Cases.vue') },
       { path: 'users', name: 'users', component: () => import('../views/Users.vue') },
+      // P2-D11：未知路径兜底 404（布局内显示，保留侧边栏可导航；须放最后）
+      { path: ':pathMatch(.*)*', name: 'not-found', component: () => import('../views/NotFound.vue') },
     ],
   },
 ]
