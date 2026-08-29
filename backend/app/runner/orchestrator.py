@@ -480,7 +480,12 @@ class RunOrchestrator:
         """
         self.drop_run_limits(run_id)  # 7.8 前置④：case 全部归还信号量，清理 per-run 桶
         async with SessionLocal() as db:
-            run = await db.get(EvalRun, run_id)
+            # P2-D6：锁定读保证读到最新已提交状态。REPEATABLE READ 普通读受事务快照影响，
+            # 会读到 scanner 标 timeout 前的旧值（external_terminal=False），把 scanner 的
+            # timeout 覆盖成 scoring/completed。锁定读永远读最新：scanner 已 commit timeout
+            # 则不覆盖只对账；本事务持 run 行锁期间 scanner 的 UPDATE 阻塞，commit 后
+            # scanner 条件更新（status IN pending/running）失败自动跳过，形成互不覆盖闭环。
+            run = await db.get(EvalRun, run_id, with_for_update=True)
             if run is None:
                 return
             logger.info("run %s _finish 进入（status=%s）", run_id, run.status)
@@ -493,8 +498,14 @@ class RunOrchestrator:
                         TestCase.suite_id == run.suite_id, TestCase.status == "active",
                         TestCase.is_held_out == (run.trigger_type == "held_out")))).scalars():
                     if not any(r.case_id == case.id for r in results):
-                        await self._save_result(run_id, case, None, None,
-                                                error_type="cancelled", error_detail="未执行（取消/中断）")
+                        # P2-D6：事务内直插 error 结果（复用本事务 db）。本事务持 run 行
+                        # FOR UPDATE 锁；若走 _save_result 自开 session，插 eval_result 的
+                        # FK 检查需 S 锁 eval_run 行，与本事务 X 锁互锁超时（1205）。
+                        db.add(EvalResult(
+                            run_id=run_id, case_id=case.id,
+                            case_version_id=await self._ensure_case_version(case),
+                            pass_fail="error", error_type="cancelled",
+                            error_detail="未执行（取消/中断）", finished_at=_now()))
                 results = (await db.execute(select(EvalResult).where(EvalResult.run_id == run_id))).scalars().all()
 
             na = sum(1 for r in results if r.pass_fail == "na")
@@ -519,14 +530,18 @@ class RunOrchestrator:
 
     async def _fail_run(self, run_id: int, reason: str) -> None:
         async with SessionLocal() as db:
-            run = await db.get(EvalRun, run_id)
+            # P2-D6：锁定读 + 状态前置判断——防旧快照/竞态覆盖已写入的终态
+            # （timeout/cancelled/completed）。锁定读永远读最新，仅对非终态置
+            # partial_failed；run 不存在提前返回（心跳/限流桶随之也不存在）。
+            run = await db.get(EvalRun, run_id, with_for_update=True)
             if run is None:
                 return
-            run.status = PARTIAL_FAILED
-            run.finished_at = _now()
-            if not run.run_config:
-                run.run_config = {"fail_reason": reason}
-            await db.commit()
+            if run.status in ("pending", "running", "scoring"):
+                run.status = PARTIAL_FAILED
+                run.finished_at = _now()
+                if not run.run_config:
+                    run.run_config = {"fail_reason": reason}
+                await db.commit()
         self._heartbeats.pop(run_id, None)
         self.drop_run_limits(run_id)  # 异常路径同清理 per-run 桶
 

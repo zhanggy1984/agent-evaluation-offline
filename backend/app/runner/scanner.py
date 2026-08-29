@@ -15,7 +15,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 
 from app.core.db import SessionLocal
 from app.models.run import EvalRun, JudgeTask
@@ -52,10 +52,18 @@ async def _reap_one_pass() -> int:
             EvalRun.hard_deadline.isnot(None),
             EvalRun.hard_deadline < now,
         ))).scalars().all()
+        # P2-D6：条件 UPDATE——SELECT 是快照读，可能选到过期的 running/pending 期间
+        # _finish 已把 run 推进到 scoring/completed；无条件对象赋值（UPDATE WHERE id）
+        # 会用旧快照覆盖新状态。条件更新（仍为 pending/running 才标 timeout）让后写方
+        # 不覆盖先写方，rowcount 精确收集本次真正回收的 run。
         for run in {*lease_rows, *deadline_rows}:
-            run.status = "timeout"
-            run.finished_at = now
-            reaped.append(run.id)
+            result = await db.execute(
+                update(EvalRun)
+                .where(EvalRun.id == run.id,
+                       EvalRun.status.in_(("pending", "running")))
+                .values(status="timeout", finished_at=now))
+            if result.rowcount == 1:
+                reaped.append(run.id)
         # ③ scoring 超时（scoring 是「采集完成待评分」终态，评分应在时限内完成；
         #    超时 = scorer 崩溃/未接管/卡死 → 标 scoring_failed，保留采集数据，不误标执行失败）
         #    7.5d：存在活跃 judge 任务（pending/processing）→ 慢 judge，不误杀；
@@ -74,15 +82,21 @@ async def _reap_one_pass() -> int:
                 if active_task is not None:
                     logger.info("run %s scoring 超时但有活跃 judge 任务（慢 judge），不回收", run.id)
                     continue
-                run.status = "scoring_failed"
-                run.finished_at = now
-                scoring_failed.append((run.id, limit))
+                # P2-D6：条件 UPDATE——scorer 可能已把 run 回填成 completed，无条件覆盖
+                # 会丢失完成态；仅当仍为 scoring 才标 scoring_failed（rowcount 收集成功者）。
+                result = await db.execute(
+                    update(EvalRun)
+                    .where(EvalRun.id == run.id, EvalRun.status == "scoring")
+                    .values(status="scoring_failed", finished_at=now))
+                if result.rowcount == 1:
+                    scoring_failed.append((run.id, limit))
         # ④ scoring 无活跃 judge 任务 → score_run 兜底收敛
         #   worker _drain_once 在无任务可认领时早退不触发最终评分（worker.py）；此处兜底，
         #   防 run 永久卡 scoring。score_run 幂等（非 scoring 直接返回），安全。
         scoring_stuck: list[int] = []
+        failed_ids = {rid for rid, _ in scoring_failed}  # ③ 已标 scoring_failed 的跳过
         for run in scoring_rows:
-            if run.status != "scoring":  # ③ 已标 scoring_failed 的跳过
+            if run.id in failed_ids:
                 continue
             active_task = (await db.execute(select(JudgeTask).where(
                 JudgeTask.run_id == run.id,

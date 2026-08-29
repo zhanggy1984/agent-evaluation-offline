@@ -72,7 +72,8 @@ class _FakeDB:
     def __init__(self, run, agent, suite, cases):
         self._run, self._agent, self._suite, self._cases = run, agent, suite, cases
 
-    async def get(self, model, pk):
+    async def get(self, model, pk, with_for_update=False):
+        # P2-D6：_finish/_fail_run 改用锁定读（FOR UPDATE），mock 忽略该参数（单测不验证锁）
         name = getattr(model, "__name__", str(model))
         if name == "EvalRun":
             return self._run
@@ -86,6 +87,9 @@ class _FakeDB:
         if "test_case" in str(stmt).lower():
             return _ScalarResult(self._cases)
         return _ScalarResult([])  # active_runs / EvalResult 等
+
+    def add(self, obj):
+        pass  # P2-D6：_finish 对账在锁内事务直插 EvalResult，单测不落库
 
     async def commit(self):
         pass

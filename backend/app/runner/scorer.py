@@ -184,7 +184,12 @@ async def score_run(run_id: int) -> None:
     from app.models import CaseVersion, EvalResult, EvalRun, JudgeTask
 
     async with SessionLocal() as db:
-        run = await db.get(EvalRun, run_id)
+        # P2-D6：锁定读——普通读受 REPEATABLE READ 快照影响，事务内首个一致读建快照后
+        # 连续读陈旧；scanner ③ 标 scoring_failed 后本事务仍可能读到 scoring，走完评分再
+        # commit 会把 scoring_failed 覆盖回 completed。锁定读永远读最新：scanner 已标
+        # failed/终态则幂等返回；评分长事务持 run 行锁期间 scanner ③ 的 UPDATE 阻塞至
+        # commit 后条件失败跳过（评分完成语义优先）。
+        run = await db.get(EvalRun, run_id, with_for_update=True)
         if run is None:
             return
         if run.status != "scoring":
