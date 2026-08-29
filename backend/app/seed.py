@@ -281,45 +281,74 @@ async def _seed_users(db) -> None:
 # §七 配置项清单默认值（scope/is_hot 与详设一致）
 DEFAULT_SYSTEM_CONFIG = {
     # 运行期（run scope：仅 run 创建时快照到 run_config）
-    "global_max_inflight": {"value": 16, "scope": "run", "is_hot": True},
-    "per_agent_concurrency": {"value": 3, "scope": "run", "is_hot": True},
-    "case_timeout": {"value": 120, "scope": "run", "is_hot": True},
-    "scoring_timeout": {"value": 3600, "scope": "run", "is_hot": True},   # scoring 超时（秒）：超时 → scoring_failed 兜底
-    "contract_check_timeout": {"value": 300, "scope": "run", "is_hot": True},
-    "sse_idle_timeout": {"value": 60, "scope": "run", "is_hot": True},
-    "run_timeout": {"value": None, "scope": "run", "is_hot": True},   # None → orchestrator.estimate_run_timeout 估算（7.4）
-    "perf_repeat_count": {"value": 5, "scope": "run", "is_hot": True},
-    "judge_concurrency": {"value": 4, "scope": "run", "is_hot": True},
-    "judge_call_timeout": {"value": 120, "scope": "run", "is_hot": True},
-    "judge_na_threshold": {"value": 0.3, "scope": "run", "is_hot": True},
-    "error_rate_block": {"value": 0.1, "scope": "run", "is_hot": True},
-    "assertion_penalty": {"value": 30, "scope": "run", "is_hot": True},
-    "judge_max_retries": {"value": 2, "scope": "run", "is_hot": True},
-    "judge_repeat": {"value": 2, "scope": "run", "is_hot": True},
-    "breaker_failure_threshold": {"value": 5, "scope": "run", "is_hot": True},
-    "breaker_open_duration": {"value": 60, "scope": "run", "is_hot": True},
-    "breaker_half_open_probe": {"value": 1, "scope": "run", "is_hot": True},
-    "retry_backoff_max": {"value": 10, "scope": "run", "is_hot": True},
-    "max_retries": {"value": 1, "scope": "run", "is_hot": True},
+    # P2-C2：meta 为配置契约（type/min/max/nullable/max_len/item_type/max_items），
+    # 配置中心 put 时校验（app/core/sysconfig_schema.py），新增 key 必须带 meta。
+    "global_max_inflight": {"value": 16, "scope": "run", "is_hot": True,
+                            "meta": {"type": "int", "min": 1, "max": 1024}},
+    "per_agent_concurrency": {"value": 3, "scope": "run", "is_hot": True,
+                              "meta": {"type": "int", "min": 1, "max": 1024}},
+    "case_timeout": {"value": 120, "scope": "run", "is_hot": True,
+                     "meta": {"type": "int", "min": 1, "max": 86400}},
+    "scoring_timeout": {"value": 3600, "scope": "run", "is_hot": True,   # scoring 超时（秒）：超时 → scoring_failed 兜底
+                        "meta": {"type": "int", "min": 1, "max": 604800}},
+    "contract_check_timeout": {"value": 300, "scope": "run", "is_hot": True,
+                               "meta": {"type": "int", "min": 1, "max": 86400}},
+    "sse_idle_timeout": {"value": 60, "scope": "run", "is_hot": True,
+                         "meta": {"type": "int", "min": 1, "max": 86400}},
+    "run_timeout": {"value": None, "scope": "run", "is_hot": True,   # None → orchestrator.estimate_run_timeout 估算（7.4）
+                    "meta": {"type": "int", "min": 1, "max": 604800, "nullable": True}},
+    "perf_repeat_count": {"value": 5, "scope": "run", "is_hot": True,
+                          "meta": {"type": "int", "min": 1, "max": 100}},
+    "judge_concurrency": {"value": 4, "scope": "run", "is_hot": True,
+                          "meta": {"type": "int", "min": 1, "max": 64}},
+    "judge_call_timeout": {"value": 120, "scope": "run", "is_hot": True,
+                           "meta": {"type": "int", "min": 1, "max": 3600}},
+    "judge_na_threshold": {"value": 0.3, "scope": "run", "is_hot": True,
+                           "meta": {"type": "number", "min": 0.0, "max": 1.0}},
+    "error_rate_block": {"value": 0.1, "scope": "run", "is_hot": True,
+                         "meta": {"type": "number", "min": 0.0, "max": 1.0}},
+    "assertion_penalty": {"value": 30, "scope": "run", "is_hot": True,
+                          "meta": {"type": "int", "min": 0, "max": 100}},
+    "judge_max_retries": {"value": 2, "scope": "run", "is_hot": True,
+                          "meta": {"type": "int", "min": 0, "max": 10}},
+    "judge_repeat": {"value": 2, "scope": "run", "is_hot": True,
+                     "meta": {"type": "int", "min": 1, "max": 10}},
+    "breaker_failure_threshold": {"value": 5, "scope": "run", "is_hot": True,
+                                  "meta": {"type": "int", "min": 1, "max": 1000}},
+    "breaker_open_duration": {"value": 60, "scope": "run", "is_hot": True,
+                              "meta": {"type": "int", "min": 1, "max": 86400}},
+    "breaker_half_open_probe": {"value": 1, "scope": "run", "is_hot": True,
+                                "meta": {"type": "int", "min": 1, "max": 100}},
+    "retry_backoff_max": {"value": 10, "scope": "run", "is_hot": True,
+                          "meta": {"type": "int", "min": 1, "max": 3600}},
+    "max_retries": {"value": 1, "scope": "run", "is_hot": True,
+                    "meta": {"type": "int", "min": 0, "max": 100}},
     # 进程级（global）
-    "retain_runs": {"value": 50, "scope": "global", "is_hot": True},
-    "heartbeat_interval": {"value": 30, "scope": "global", "is_hot": False},
-    "judge_llm.base_url": {"value": "", "scope": "global", "is_hot": True},
-    "judge_llm.model_name": {"value": "", "scope": "global", "is_hot": True},
+    "retain_runs": {"value": 50, "scope": "global", "is_hot": True,
+                    "meta": {"type": "int", "min": 1, "max": 10000}},
+    "heartbeat_interval": {"value": 30, "scope": "global", "is_hot": False,
+                           "meta": {"type": "int", "min": 1, "max": 86400}},
+    "judge_llm.base_url": {"value": "", "scope": "global", "is_hot": True,
+                           "meta": {"type": "str", "max_len": 256}},
+    "judge_llm.model_name": {"value": "", "scope": "global", "is_hot": True,
+                             "meta": {"type": "str", "max_len": 128}},
     # P0 补齐：judge 出站域名白名单（SSRF §15.3）。缺失时 worker 读空 → _validate_allowlist
     # 拒绝所有 host（语义维度永远判不出分）且配置中心因"未知 key"无法补救，必须 seed 默认值。
     # 预设常用 OpenAI 兼容厂商（对齐 solution_detail §七配置表），按实际选用在配置中心增删。
     "llm_allowlist": {
         "value": ["api.deepseek.com", "dashscope.aliyuncs.com", "open.bigmodel.cn", "api.moonshot.cn"],
         "scope": "global", "is_hot": True,
+        "meta": {"type": "list", "item_type": "str", "max_items": 50},
     },
     # 注册期（registration：仅 agent 注册/文件上传时校验）
-    "file_max_size": {"value": 50, "scope": "registration", "is_hot": True},
+    "file_max_size": {"value": 50, "scope": "registration", "is_hot": True,
+                      "meta": {"type": "int", "min": 1, "max": 10240}},
     # 7.6 A4 补漏：169.254.0.0/16（云元数据段）必须与代码常量 DEFAULT_AGENT_CIDRS 一致剔除，
     # 否则 DB 配置残留会绕过 create_agent 的 SSRF 校验（_get_allowlist_cidrs 读的是本配置）
     "base_url_allowlist": {
         "value": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
         "scope": "registration", "is_hot": False,
+        "meta": {"type": "list", "item_type": "str", "max_items": 50},
     },
 }
 

@@ -9,8 +9,10 @@ from app.core.constants import ALLOWED_CLASS_PATHS
 from app.core.db import get_db
 from app.core.errors import ApiError, E_VALIDATION
 from app.core.response import ok
+from app.core.sysconfig_schema import validate_sysconfig_value
 from app.models import AssertionOpDef, JudgeRubric, MetricDef, ModelPrice, SystemConfig
 from app.models.user import User
+from app.seed import DEFAULT_SYSTEM_CONFIG  # 配置契约单一真相源（meta），put 时校验
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -38,6 +40,11 @@ async def put_global_config(body: ConfigPutBody, _: User = Admin, db: AsyncSessi
             raise ApiError(E_VALIDATION, f"未知配置项 {key}（必须先在 seed 登记）", 400)
         if not row.is_hot:
             raise ApiError(E_VALIDATION, f"{key} 非热生效（is_hot=false），改需重启", 400)
+        # P2-C2：复用 DEFAULT_SYSTEM_CONFIG 的 meta 契约做类型/范围校验，
+        # 拦截 admin 误配（case_timeout=0 / judge_na_threshold=99 等）放大为全站异常
+        err = validate_sysconfig_value(key, value, DEFAULT_SYSTEM_CONFIG.get(key, {}).get("meta"))
+        if err:
+            raise ApiError(E_VALIDATION, err, 400)
         row.value = value
     await db.commit()
     return ok()
