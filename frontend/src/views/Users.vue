@@ -105,7 +105,7 @@ const load = async () => {
   loading.value = true
   try {
     const data = await listUsers({
-      page: query.page,
+      page_num: query.page, // P2-B3 对齐后端 list_users 参数名（原发 page 被 FastAPI 静默丢弃恒取第 1 页）
       page_size: query.page_size,
       role: query.role || undefined,
     })
