@@ -26,6 +26,8 @@ __pycache__/
 
 # ---- 内部验收产物：逐 issue 一次性脚本（含测试凭据），不进仓库 ----
 backend/verify_*.py
+# 例外：verify_fresh_start.py 是空库重建冒烟矩阵（官方验证脚本，凭据走 env 不入库），纳入版本控制
+!backend/verify_fresh_start.py
 backend/run_*.py
 backend/trigger_*.py
 backend/expand_*.py
