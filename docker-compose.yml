@@ -27,6 +27,9 @@ services:
       DB_USER: ${DB_USER:-evaluation}
       DB_NAME: ${DB_NAME:-ai_evaluation}
       DB_PASSWORD: ${DB_PASSWORD:?db_password 必须设置}
+      # P2-C3 迁移专用账号（DDL，仅 alembic upgrade head 短时使用）；缺省回退 DB_USER（单账号兼容现状）
+      DB_MIGRATE_USER: ${DB_MIGRATE_USER:-}
+      DB_MIGRATE_PASSWORD: ${DB_MIGRATE_PASSWORD:-}
       JWT_SECRET: ${JWT_SECRET:?jwt_secret 必须设置（≥256bit）}
       FERNET_KEYS: ${FERNET_KEYS:?fernet_keys 必须设置（逗号分隔多代）}
       JUDGE_API_KEY: ${JUDGE_API_KEY:-}

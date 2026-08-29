@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     db_user: str = "evaluation"
     db_name: str = "ai_evaluation"
     db_password: str = ""
+    # P2-C3 迁移专用账号（alembic DDL）：成对配置时用迁移账号，否则回退 db_user（兼容单账号现状）
+    db_migrate_user: str = ""
+    db_migrate_password: str = ""
 
     # ---- 密钥（强校验） ----
     jwt_secret: str = ""
@@ -53,6 +56,19 @@ class Settings(BaseSettings):
     def sqlalchemy_url(self) -> str:
         return (
             f"mysql+aiomysql://{self.db_user}:{self.db_password}@"
+            f"{self.db_host}:{self.db_port}/{self.db_name}?charset=utf8mb4"
+        )
+
+    @property
+    def sqlalchemy_migrate_url(self) -> str:
+        """迁移专用连接（P2-C3）：DB_MIGRATE_* 成对配置时用迁移账号（DDL），
+        任一缺省回退主账号（兼容现状：单账号跑迁移与服务）。"""
+        if self.db_migrate_user and self.db_migrate_password:
+            user, pw = self.db_migrate_user, self.db_migrate_password
+        else:
+            user, pw = self.db_user, self.db_password
+        return (
+            f"mysql+aiomysql://{user}:{pw}@"
             f"{self.db_host}:{self.db_port}/{self.db_name}?charset=utf8mb4"
         )
 
