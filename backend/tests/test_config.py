@@ -16,7 +16,10 @@ def _settings(**overrides):
 
 
 def test_migrate_url_uses_migrate_account():
+    # 显式传 db_host/db_port：pydantic-settings 大小写不敏感注入运行环境 DB_HOST/DB_PORT
+    #（如 127.0.0.1:33061），断言写死 localhost 会被改写而失败——显式锁定 host 使断言自洽。
     s = _settings(**{
+        "db_host": "localhost", "db_port": 3306,
         "db_user": "eval", "db_password": "dp",
         "db_migrate_user": "mig", "db_migrate_password": "mp",
     })
