@@ -10,7 +10,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_role
@@ -64,6 +64,9 @@ class CaseCreate(BaseModel):
 class CaseUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = None
+    # P2-D9：前端编辑始终提交 interface_id/scenes，原缺字段被 Pydantic 静默丢弃——
+    # 用户改接口/场景保存不生效。补上与 CaseCreate 对齐；update_case 特殊处理（见下）。
+    interface_id: int | None = None
     input_type: str | None = Field(default=None, pattern="^(text|file|conversation)$")
     input: dict | None = None
     input_turns: dict | None = None
@@ -74,6 +77,7 @@ class CaseUpdate(BaseModel):
     status: str | None = None
     is_gold: bool | None = None
     is_held_out: bool | None = None
+    scenes: list[str] | None = None
 
 
 async def _get_suite(db: AsyncSession, suite_id: int) -> TestSuite:
@@ -285,6 +289,24 @@ async def update_case(case_id: int, body: CaseUpdate, user: User = Staff,
     data = body.model_dump(exclude_unset=True)
     if "status" in data and data["status"] not in CASE_STATUSES:
         raise ApiError(E_VALIDATION, "status 仅支持 draft/active/invalidated", 400)
+    # P2-D9：interface_id/scenes 不能走普通 setattr——TestCase 无 scenes 属性；
+    # interface_id 须属于该 agent（与 create_case 同校验）。
+    # 显式 null 语义：interface_id=null（异常态）→ 保留原值不覆盖；scenes=null（前端
+    # 清空）→ 删旧不插新。字段缺失（exclude_unset 不出现）→ 完全不动。
+    if "interface_id" in data:
+        if data["interface_id"] is not None:
+            new_iface = await db.get(AgentInterface, data["interface_id"])
+            if new_iface is None or new_iface.agent_id != suite.agent_id:
+                raise ApiError(E_VALIDATION, "接口不存在或不属于该 agent", 400)
+            case.interface_id = data["interface_id"]
+        data.pop("interface_id")
+    if "scenes" in data:
+        scenes = data.pop("scenes")
+        if scenes:
+            await _validate_scenes(db, suite.agent_id, scenes)
+        await db.execute(delete(CaseScene).where(CaseScene.case_id == case_id))
+        if scenes:
+            db.add_all([CaseScene(case_id=case_id, scene_tag=t) for t in scenes])
     for field, value in data.items():
         setattr(case, field, value)
     await db.commit()

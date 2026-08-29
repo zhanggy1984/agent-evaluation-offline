@@ -12,9 +12,11 @@ from sqlalchemy import delete
 from app.models import (
     Agent,
     AgentInterface,
+    CaseScene,
     CaseVersion,
     EvalResult,
     EvalRun,
+    SceneCatalog,
     TestCase,
     TestSuite,
 )
@@ -43,6 +45,8 @@ class Env:
                 await db.execute(delete(JudgeTask).where(JudgeTask.run_id.in_(r.id for r in self.runs)))
                 await db.execute(delete(EvalResult).where(EvalResult.run_id.in_(r.id for r in self.runs)))
             if self.cases:
+                # case_scene FK→test_case.id，须先于 case 删除
+                await db.execute(delete(CaseScene).where(CaseScene.case_id.in_(c.id for c in self.cases)))
                 await db.execute(delete(CaseVersion).where(CaseVersion.case_id.in_(c.id for c in self.cases)))
             if self.runs:
                 await db.execute(delete(EvalRun).where(EvalRun.id.in_(r.id for r in self.runs)))
@@ -53,6 +57,8 @@ class Env:
             if self.suites:
                 await db.execute(delete(TestSuite).where(TestSuite.id.in_(s.id for s in self.suites)))
             if self.agents:
+                # scene_catalog FK→agent.id，须先于 agent 删除
+                await db.execute(delete(SceneCatalog).where(SceneCatalog.agent_id.in_(a.id for a in self.agents)))
                 await db.execute(delete(Agent).where(Agent.id.in_(a.id for a in self.agents)))
             await db.commit()
 
