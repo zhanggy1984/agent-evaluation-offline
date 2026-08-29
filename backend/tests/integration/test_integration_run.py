@@ -20,9 +20,10 @@ pytest.importorskip("aiomysql")
 from sqlalchemy import select
 
 from app.core.db import SessionLocal
-from app.models import CaseVersion, EvalResult, EvalRun
+from app.models import CaseVersion, EvalResult, EvalRun, JudgeTask
 from app.runner.executor import ERROR_HTTP, CaseOutcome
 from app.runner.orchestrator import orchestrator
+from app.runner.scorer import score_run
 from helpers import create_chain, make_run
 
 _PASS_OUTCOME = CaseOutcome(
@@ -223,3 +224,67 @@ async def test_case_version_rotation_on_change(db, env):
     assert cvs[1].snapshot["metrics"] == case.metrics
     # 不变复用最新版本，无第三条
     assert await orchestrator._ensure_case_version(case) == v2
+
+
+# ---------------- P2-D4 score_run judge 已配置分支（未配置路径见上方 full_run） ----------------
+
+async def fake_judge_configured_true(db):
+    """judge 已配置（否则上例 monkeypatch False 已覆盖未配置一次到终态）。"""
+    return True
+
+
+async def _seed_scoring(env, db, *, metrics=None):
+    """run=scoring + 单 case 结果 + case_version 快照（metrics 含 enabled 语义维度）。"""
+    metrics = metrics or {"factuality": {"enabled": True}}
+    ch = await create_chain(db, case_kw={"metrics": metrics})
+    run = make_run(ch["agent"].id, ch["suite"].id)
+    run.status = "scoring"
+    db.add(run)
+    await db.flush()
+    cv = CaseVersion(case_id=ch["cases"][0].id, version_no=1, content_hash="0" * 64,
+                     snapshot={"input": ch["cases"][0].input,
+                               "expected": {"golden_answer": "A 售价 100 元"}, "metrics": metrics})
+    db.add(cv)
+    await db.flush()
+    res = EvalResult(run_id=run.id, case_id=ch["cases"][0].id, case_version_id=cv.id,
+                     pass_fail="pass", answer="A 售价 100 元")
+    db.add(res)
+    await db.commit()
+    env.agents.append(ch["agent"]); env.interfaces.append(ch["iface"])
+    env.suites.append(ch["suite"]); env.cases.extend(ch["cases"]); env.runs.append(run)
+    return ch, run
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_score_run_judge_configured_keeps_scoring(db, env, monkeypatch):
+    """judge 已配置 + enabled 语义维度 → 建 JudgeTask(pending)，run 保持 scoring 等 worker。"""
+    monkeypatch.setattr("app.runner.scorer._judge_configured", fake_judge_configured_true)
+    _, run = await _seed_scoring(env, db)
+    await score_run(run.id)
+    r = await _load_run(run.id)
+    (er,) = await _load_results(run.id)
+    assert r.status == "scoring"        # 等 worker，不落终态
+    assert er.score_total is None       # 未评分
+    async with SessionLocal() as s:
+        tasks = (await s.execute(select(JudgeTask).where(JudgeTask.run_id == run.id))).scalars().all()
+    assert [t.dimension_code for t in tasks] == ["factuality"]
+    assert tasks[0].status == "pending"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_score_run_judge_done_backfills(db, env, monkeypatch):
+    """judge 已配置 + 任务全 done → 回填 judge_results 完整评分 → completed。"""
+    monkeypatch.setattr("app.runner.scorer._judge_configured", fake_judge_configured_true)
+    ch, run = await _seed_scoring(env, db)
+    async with SessionLocal() as s:
+        s.add(JudgeTask(run_id=run.id, case_id=ch["cases"][0].id, dimension_code="factuality",
+                        status="done",
+                        result={"dimension": "factuality", "level": 4, "score": 80.0,
+                                "reason": "事实准确", "rubric_version": "1.2"}))
+        await s.commit()
+    await score_run(run.id)
+    r = await _load_run(run.id)
+    (er,) = await _load_results(run.id)
+    assert r.status == "completed"
+    assert er.judge_results and er.judge_results[0]["score"] == 80.0
+    assert er.score_total is not None
