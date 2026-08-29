@@ -5,7 +5,7 @@
 """
 import unittest
 
-from app.runner.orchestrator import RUN_TIMEOUT_CAP_S, estimate_run_timeout
+from app.runner.orchestrator import RUN_TIMEOUT_CAP_S, _pct, estimate_run_timeout
 
 # judge 参数默认值（seed DEFAULT_SYSTEM_CONFIG）
 DEF = dict(judge_repeat=2, judge_concurrency=4, judge_call_timeout=120)
@@ -63,6 +63,36 @@ class TestEstimateRunTimeout(unittest.TestCase):
     def test_cap_exact_boundary(self):
         # 恰在封顶内不截断：3600 保持
         self.assertEqual(_est(), 3600)
+
+
+class TestPercentile(unittest.TestCase):
+    """P2-A2 P50 off-by-one：nearest-rank 口径（位置=ceil(n·p/100)，1-based）。
+
+    回归核心：n=5, p=50 旧实现 round(2.5)-1=1 取第 2 小（银行家舍入），新实现取中位数。
+    """
+
+    def test_odd_median_regression(self):
+        # 旧实现返回 2（第 2 小）→ 修复后必须返回 3（中位数）
+        self.assertEqual(_pct([1, 2, 3, 4, 5], 50), 3)
+
+    def test_even_lower_median(self):
+        # 偶数长度 nearest-rank 取下中位
+        self.assertEqual(_pct([1, 2, 3, 4], 50), 2)
+
+    def test_p95_max(self):
+        self.assertEqual(_pct([1, 2, 3, 4, 5], 95), 5)
+
+    def test_p0_min(self):
+        self.assertEqual(_pct([1, 2, 3, 4, 5], 0), 1)
+
+    def test_p100_max(self):
+        self.assertEqual(_pct([1, 2, 3, 4, 5], 100), 5)
+
+    def test_single_element(self):
+        self.assertEqual(_pct([42], 50), 42)
+
+    def test_empty(self):
+        self.assertEqual(_pct([], 50), 0.0)
 
 
 if __name__ == "__main__":

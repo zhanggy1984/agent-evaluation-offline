@@ -50,11 +50,11 @@ def _now() -> datetime:
 
 
 def _pct(values: list[float], p: float) -> float:
-    """p 分位数（0-100），最小数据集 len>=1。"""
+    """p 分位数（0-100），nearest-rank 口径（位置=ceil(n·p/100)，1-based）；最小数据集 len>=1。"""
     if not values:
         return 0.0
     s = sorted(values)
-    idx = max(0, min(len(s) - 1, round(len(s) * p / 100) - 1))
+    idx = max(0, min(len(s) - 1, math.ceil(len(s) * p / 100) - 1))
     return s[idx]
 
 
