@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from app.core.http import AllowlistAsyncClient
+from app.core.http import JUDGE_DENY_CIDRS, AllowlistAsyncClient
 from app.judge.rubric import RATINGS, anchors_of
 
 logger = logging.getLogger(__name__)
@@ -148,7 +148,10 @@ class JudgeClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
-        self._http = AllowlistAsyncClient(allow_hosts=allowlist, allow_cidrs=[], timeout=timeout)
+        # P2-C1：域名白名单（llm_allowlist）+ IP 黑名单（拒绝内网/元数据段）双保险，
+        # 与 agent 路径（CIDR 白名单 + 169.254 剔除）对等；admin 热改白名单指内网/元数据也被出站拦截
+        self._http = AllowlistAsyncClient(allow_hosts=allowlist, allow_cidrs=[],
+                                          deny_cidrs=JUDGE_DENY_CIDRS, timeout=timeout)
 
     async def judge(
         self,

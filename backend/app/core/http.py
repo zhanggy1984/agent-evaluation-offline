@@ -44,15 +44,37 @@ def build_networks(cidrs: Iterable[str]) -> list:
 class AllowlistAsyncClient(httpx.AsyncClient):
     """解析→校验→IP 直连+透传 Host 的出站客户端。follow_redirects 固定 False。"""
 
-    def __init__(self, allow_hosts: Iterable[str], allow_cidrs: Iterable[str], timeout: float = 60.0, **kwargs):
+    def __init__(self, allow_hosts: Iterable[str], allow_cidrs: Iterable[str],
+                 deny_cidrs: Iterable[str] = (), timeout: float = 60.0, **kwargs):
         kwargs.setdefault("follow_redirects", False)
         super().__init__(timeout=timeout, **kwargs)
         self._allow_hosts = {h.strip() for h in allow_hosts if h.strip()}
         self._networks = build_networks(allow_cidrs)
+        # P2-C1：deny 黑名单（judge 出站用，拒绝内网/云元数据段）。agent 不传 → 空，行为不变。
+        self._deny_networks = build_networks(deny_cidrs)
+
+    def _check_denied(self, host: str, port: int) -> None:
+        """deny 校验：host（IP 或域名）解析出的全部 IP 命中拒绝段 → 拒绝。deny 空直接放行。"""
+        if not self._deny_networks:
+            return
+        if _is_ip(host):
+            ips = {host}
+        else:
+            try:
+                infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            except socket.gaierror:
+                raise ApiError(E_VALIDATION, f"SSRF: {host} 无法解析")
+            ips = {info[4][0].split("%")[0] for info in infos}
+        for ip_str in ips:
+            ip_obj = ipaddress.ip_address(ip_str)
+            if any(ip_obj in net for net in self._deny_networks):
+                raise ApiError(E_VALIDATION, f"SSRF: {host} 命中拒绝段（内网/元数据）IP {ip_str}")
 
     def _resolve(self, host: str, port: int) -> str:
         """返回可直连的 host：白名单 host 原样返回；否则解析并校验 IP 后返回 IP。"""
         if host in self._allow_hosts:
+            # P2-C1：白名单 host 命中也要过 deny 校验（judge 出站主路径，防 admin 热改白名单指内网/元数据）
+            self._check_denied(host, port)
             return host
         if _is_ip(host):
             ip_obj = ipaddress.ip_address(host)
@@ -98,6 +120,17 @@ DEFAULT_AGENT_CIDRS = (
     "10.0.0.0/8",
     "172.16.0.0/12",
     "192.168.0.0/16",
+)
+
+# ---- judge 出站拒绝段：只放行公网模型厂商，内网保留段/云元数据段一律拒绝 ----
+# P2-C1：judge 用「域名白名单（llm_allowlist）+ IP 黑名单」组合；agent 用内网 CIDR 白名单，
+# 语义相反（judge 目标是公网），故独立常量，不能复用 DEFAULT_AGENT_CIDRS。
+JUDGE_DENY_CIDRS = (
+    "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16",    # 本机回环 / 云元数据段（metadata 169.254.169.254）
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",  # 私网
+    "100.64.0.0/10",                                 # CGNAT
+    "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",    # 保留/组播
+    "::1/128", "fc00::/7", "fe80::/10", "::ffff:0:0/96",  # IPv6 环回/ULA/link-local/IPv4 映射
 )
 
 

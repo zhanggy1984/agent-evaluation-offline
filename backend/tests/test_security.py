@@ -86,7 +86,7 @@ def test_random_ids():
 
 
 # ---------------- SSRF（7.6 A4：build_networks 拒全放行 / 169.254 移出白名单） ----------------
-from app.core.http import DEFAULT_AGENT_CIDRS, build_networks
+from app.core.http import DEFAULT_AGENT_CIDRS, JUDGE_DENY_CIDRS, AllowlistAsyncClient, build_agent_client, build_networks
 
 
 def test_build_networks_rejects_any_any():
@@ -111,3 +111,56 @@ def test_build_networks_normal_cidrs_ok():
 def test_default_cidrs_exclude_cloud_metadata():
     # 169.254.0.0/16（云元数据段 metadata 169.254.169.254）不得在默认白名单
     assert "169.254.0.0/16" not in DEFAULT_AGENT_CIDRS
+
+
+# ---------------- P2-C1 judge 出站 SSRF：域名白名单（llm_allowlist）+ IP 黑名单（deny_cidrs） ----------------
+import socket
+
+# judge 路径：allow_hosts=llm_allowlist、allow_cidrs=[]（域名白名单）、deny_cidrs=JUDGE_DENY_CIDRS（IP 黑名单）
+def _judge_client(hosts):
+    return AllowlistAsyncClient(allow_hosts=hosts, allow_cidrs=[], deny_cidrs=JUDGE_DENY_CIDRS)
+
+
+def test_judge_deny_rejects_metadata_ip():
+    # admin 热改白名单加云元数据 IP（169.254.169.254）→ 白名单命中但出站被 deny 拦截
+    client = _judge_client(["169.254.169.254"])
+    with pytest.raises(ApiError):
+        client._resolve("169.254.169.254", 80)
+
+
+def test_judge_deny_rejects_private_ip():
+    # admin 热改白名单加私网 IP → 拒绝
+    client = _judge_client(["10.0.0.5"])
+    with pytest.raises(ApiError):
+        client._resolve("10.0.0.5", 443)
+
+
+def test_judge_deny_rejects_domain_resolving_private(monkeypatch):
+    # 白名单域名解析到私网（DNS 被控 / 域名过期被抢注）→ 拒绝
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda h, p, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", p))])
+    client = _judge_client(["evil.example.com"])
+    with pytest.raises(ApiError):
+        client._resolve("evil.example.com", 443)
+
+
+def test_judge_deny_allows_public_domain(monkeypatch):
+    # 厂商公网域名解析到公网 IP → 正常放行（不影响 seed 预设 4 家）
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda h, p, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("111.111.111.111", p))])
+    client = _judge_client(["api.deepseek.com"])
+    assert client._resolve("api.deepseek.com", 443) == "api.deepseek.com"
+
+
+def test_judge_deny_excludes_cloud_metadata():
+    # 云元数据段必须在 judge 拒绝段（与 DEFAULT_AGENT_CIDRS 剔除口径一致）
+    assert "169.254.0.0/16" in JUDGE_DENY_CIDRS
+
+
+def test_agent_client_no_deny_no_regression():
+    # agent 路径不传 deny_cidrs（默认空）→ 白名单 host 命中直接返回，行为不变（回归护栏）
+    client = build_agent_client()
+    assert client._resolve("localhost", 80) == "localhost"
+    assert client._resolve("127.0.0.1", 80) == "127.0.0.1"
