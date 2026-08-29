@@ -103,7 +103,10 @@ class JudgeTask(Base):
         Index("idx_judge_status", "status", "next_retry_at"),
     )
 
-    run_id: Mapped[int] = mapped_column(ForeignKey("eval_result.run_id", ondelete="CASCADE"), primary_key=True)
+    # P2-D5 修复：run_id 原引用非唯一列 eval_result.run_id（MySQL 约束 judge_task_ibfk_3），
+    # 且 ON DELETE CASCADE 随任一条 eval_result 删除连带清掉该 run 全部 judge_task。
+    # 改挂 eval_run.id（run 主键）：只有删 run 才级联清判分任务，语义正确。
+    run_id: Mapped[int] = mapped_column(ForeignKey("eval_run.id", ondelete="CASCADE"), primary_key=True)
     # case_id 业务上就是用例 id，FK 指向 test_case.id（唯一键）；
     # 旧版指向 eval_result.case_id（非唯一列）会阻塞按 case 级联删除 eval_result（FK 1451）
     case_id: Mapped[int] = mapped_column(ForeignKey("test_case.id"), primary_key=True)
