@@ -607,7 +607,11 @@ onMounted(async () => {
     curAgentId.value = agents.value[0].id
     await loadSuites()
   }
-  loadTodo()
+  // P2-D10：待办队列是 staff 标注工作流功能（后端 /annotations/todo 仅 admin/evaluator，
+  // viewer 无标注权限）——viewer 打开页面不再无条件触发 403 toast
+  if (isStaff.value) {
+    loadTodo()
+  }
 })
 </script>
 
