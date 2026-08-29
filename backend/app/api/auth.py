@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user_allow_change, require_role
 from app.core.db import get_db
 from app.core.errors import ApiError, E_ACCOUNT_LOCKED, E_TOKEN_INVALID, E_VALIDATION
 from app.core.response import ok
@@ -192,7 +192,7 @@ class ChangePasswordBody(BaseModel):
 @router.post("/change-password")
 async def change_password(
     body: ChangePasswordBody,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_allow_change),
     db: AsyncSession = Depends(get_db),
 ):
     if not await asyncio.to_thread(verify_password, body.old_password, user.password_hash):
@@ -208,7 +208,7 @@ async def change_password(
 
 
 @router.get("/me")
-async def me(user: User = Depends(get_current_user)):
+async def me(user: User = Depends(get_current_user_allow_change)):
     return ok({
         "id": user.id,
         "username": user.username,

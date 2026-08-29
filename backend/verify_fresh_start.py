@@ -3,16 +3,18 @@
 用法：
     docker compose exec -T backend python verify_fresh_start.py
 
-前置：空库已 `alembic upgrade head` + `python -m app.seed`（本脚本纯读 + 幂等无害操作，不重建不改库）。
+前置：空库已 `alembic upgrade head` + `python -m app.seed`。本脚本含首登强制改密闭环（P1-a）：
+登录 → change-password → 重登，跑完库内 admin/evaluator/viewer 密码变为 SMOKE_PASSWORD
+（冒烟测试专用，非幂等——重建空库后才能重跑）。
 
 验证矩阵：
 1. seed 完整性：15 张表行数精确断言（dimension/assertion_op_def/metric_def/judge_rubric/system_config/
    agent/agent_interface/agent_dimension_weight/scene_catalog/test_suite/test_case/case_scene/
    baseline_target/user/model_price）；system_config/user 期望值动态计算（见 TABLE_ROWS 注释）；
    seed 幂等复跑由宿主 tests/test_seed.py + 容器手工验证
-2. 登录鉴权：admin 登录 must_change_password=true；demo 账号（seed 置 password_changed_at=None）
-   同样首登强制改密（与 admin 同口径，本次均不改密）；demo 按 DEMO_EVALUATOR_PASSWORD /
-   DEMO_VIEWER_PASSWORD env 是否存在决定验证（P0 安全收敛：未设不建，跳过登录与权限矩阵）
+2. 登录鉴权：admin 与 demo 账号统一「首登强制改密闭环」——登录断言 must_change_password=true →
+   change-password（old=seed 初始密码, new=SMOKE_PASSWORD）→ 新密码重登断言 false；demo 按
+   DEMO_EVALUATOR_PASSWORD / DEMO_VIEWER_PASSWORD env 是否存在决定验证（P0 安全收敛：未设不建，跳过）
 3. 基础配置域：GET /config/model-prices（deepseek-chat 2 档版本化）/assertion-ops/rubrics 非空；
    dimension/metric_def 无独立读端点 → DB 行数断言（见 1）
 4. agent 域：GET /agents=4；每家 interface=1 且 enabled、weights 4 维齐全、详情含 adapter_config；
@@ -44,6 +46,8 @@ DEMO_CREDS = {
     "evaluator": os.environ.get("DEMO_EVALUATOR_PASSWORD"),
     "viewer": os.environ.get("DEMO_VIEWER_PASSWORD"),
 }
+# 冒烟改密测试密码（首登强制改密闭环用；跑完库内账号密码变为该值，docstring 已注明非幂等）
+SMOKE_PASSWORD = os.environ.get("SMOKE_PASSWORD", "Verify#Reset2026")
 
 
 def _seed_config_count() -> int:
@@ -100,6 +104,20 @@ async def _login(client: httpx.AsyncClient, username: str, password: str) -> dic
     return auth["data"]
 
 
+async def _login_and_force_change(client: httpx.AsyncClient, username: str, initial_pwd: str) -> dict:
+    """首登强制改密闭环：登录断言 must_change_password=true → change-password → 新密码重登断言 false。
+
+    返回改密后的 token 集（后续业务断言统一用它；改密后 refresh 族已撤销，必须重登拿新 token）。
+    """
+    tok = await _login(client, username, initial_pwd)
+    assert tok["must_change_password"] is True, f"{username} 首登 must_change_password 应为 true"
+    await _api(client, "POST", "/api/auth/change-password", tok["access_token"],
+               {"old_password": initial_pwd, "new_password": SMOKE_PASSWORD})
+    tok2 = await _login(client, username, SMOKE_PASSWORD)
+    assert tok2["must_change_password"] is False, f"{username} 改密后 must_change_password 应为 false"
+    return tok2
+
+
 async def main() -> None:
     try:
         # ---------- 1. seed 完整性（DB 层） ----------
@@ -114,24 +132,23 @@ async def main() -> None:
         assert ADMIN_PASSWORD, "verify 需 ADMIN_PASSWORD env（与 seed 同口径；未设时 seed 也不会建 admin）"
 
         async with httpx.AsyncClient(timeout=60, trust_env=False) as c:
-            # ---------- 2. 登录鉴权 ----------
-            adm = await _login(c, "admin", ADMIN_PASSWORD)
+            # ---------- 2. 登录鉴权（首登强制改密闭环） ----------
+            adm = await _login_and_force_change(c, "admin", ADMIN_PASSWORD)
             assert adm["role"] == "admin"
-            assert adm["must_change_password"] is True, "admin 首登 must_change_password 应为 true"
             me = await _api(c, "GET", "/api/auth/me", adm["access_token"])
-            assert me["data"]["must_change_password"] is True
-            _p("② admin 登录 OK：must_change_password=true（改密动作留待阶段 4 走查）")
+            assert me["data"]["must_change_password"] is False
+            _p("② admin 登录→改密→重登闭环 OK：must_change_password true→false；me 同步 false")
 
-            # demo 账号：env 注入的才存在（P0：未设不建），对存在的账号验证登录与权限矩阵
+            # demo 账号：env 注入的才存在（P0：未设不建），对存在的账号走同一改密闭环与权限矩阵
             tokens: dict[str, str] = {}
             for name, pw in DEMO_CREDS.items():
                 if not pw:
                     _p(f"② {name} 未设 DEMO_{name.upper()}_PASSWORD，跳过（生产默认不建 demo 账号）")
                     continue
-                tok = await _login(c, name, pw)
-                assert tok["role"] == name and tok["must_change_password"] is True
+                tok = await _login_and_force_change(c, name, pw)
+                assert tok["role"] == name
                 tokens[name] = tok["access_token"]
-                _p(f"② {name} 登录 OK（seed 置 password_changed_at=None → 首登强制改密，与 admin 同口径）")
+                _p(f"② {name} 登录→改密→重登闭环 OK")
 
             # 权限矩阵：viewer 只读；evaluator 可建 suite 不可建 agent（仅对存在的 demo 账号验证）
             if "viewer" in tokens:

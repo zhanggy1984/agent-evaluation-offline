@@ -15,6 +15,8 @@ E_TOKEN_INVALID = 1001
 E_NO_PERMISSION = 1002
 E_ACCOUNT_LOCKED = 1003
 E_RATE_LIMITED = 1004
+# 首登未改密：token 有效但 password_changed_at 为空，业务接口拦截（改密/me 放行）
+E_NEED_CHANGE_PASSWORD = 1005
 
 # ---- 资源 2xxx ----
 E_NOT_FOUND = 2001

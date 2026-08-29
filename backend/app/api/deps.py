@@ -11,7 +11,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.core.errors import ApiError, E_ACCOUNT_LOCKED, E_NO_PERMISSION, E_TOKEN_INVALID
+from app.core.errors import (
+    ApiError,
+    E_ACCOUNT_LOCKED,
+    E_NEED_CHANGE_PASSWORD,
+    E_NO_PERMISSION,
+    E_TOKEN_INVALID,
+)
 from app.core.security import decode_access_token
 from app.models.user import User
 
@@ -22,11 +28,12 @@ ROLE_EVALUATOR = "evaluator"
 ROLE_VIEWER = "viewer"
 
 
-async def get_current_user(
+async def _load_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     db: AsyncSession = Depends(get_db),
 ) -> User:
+    """加载并校验 token / 账号状态（未含强制改密检查，供严格版与放行版复用）。"""
     if credentials is None:
         raise ApiError(E_TOKEN_INVALID, "未登录", 401)
     payload = decode_access_token(credentials.credentials)
@@ -39,6 +46,25 @@ async def get_current_user(
         raise ApiError(E_TOKEN_INVALID, "账号不存在或已禁用", 401)
     if user.locked_until and datetime.now(timezone.utc) < user.locked_until.replace(tzinfo=timezone.utc):
         raise ApiError(E_ACCOUNT_LOCKED, "账号锁定", 403)
+    return user
+
+
+async def get_current_user(
+    user: User = Depends(_load_current_user),
+) -> User:
+    """严格鉴权：password_changed_at 为空（首登未改密）→ 拦截业务接口（403 需先改密）。
+
+    强制改密后端兜底（P1-a）：即使前端路由守卫被绕过（API 直连），未改密账号也无法用业务接口。
+    """
+    if user.password_changed_at is None:
+        raise ApiError(E_NEED_CHANGE_PASSWORD, "首次登录需先修改密码", 403)
+    return user
+
+
+async def get_current_user_allow_change(
+    user: User = Depends(_load_current_user),
+) -> User:
+    """放行强制改密：供 change-password / me 等改密流程端点使用（改密前唯一可访问的接口组）。"""
     return user
 
 
