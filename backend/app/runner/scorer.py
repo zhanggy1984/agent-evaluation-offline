@@ -257,7 +257,7 @@ async def _score_executed_results(
                 usage=r.usage,
                 model=r.model,
                 model_price=await _load_price(db, r.model),
-                weights=weights,
+                weights=_resolve_weights(weights, interface_by_case.get(r.case_id, 0)),
                 targets=_resolve_targets(targets, interface_by_case.get(r.case_id, 0)),
             )
             r.assertion_results = assertion_results
@@ -398,11 +398,11 @@ def _f(v) -> float | None:
 
 
 async def _load_weights(db, agent_id: int) -> dict:
+    """维度权重 → {(interface_id, dimension_code): weight}（接口级 + 默认，评分按接口解析）。"""
     from app.models import AgentDimensionWeight
     rows = (await db.execute(select(AgentDimensionWeight).where(
-        AgentDimensionWeight.agent_id == agent_id,
-        AgentDimensionWeight.interface_id == 0))).scalars().all()
-    return {r.dimension_code: float(r.weight) for r in rows}
+        AgentDimensionWeight.agent_id == agent_id))).scalars().all()
+    return {(r.interface_id, r.dimension_code): float(r.weight) for r in rows}
 
 
 async def _load_targets(db, agent_id: int) -> dict:
@@ -429,6 +429,15 @@ def _resolve_targets(targets: dict, interface_id: int) -> dict:
     for (iid, dcode), t in targets.items():
         if iid == 0:
             resolved.setdefault(dcode, t)
+    return resolved
+
+
+def _resolve_weights(weights: dict, interface_id: int) -> dict:
+    """interface 级权重优先，缺省回退 agent 默认（interface_id=0 哨兵），与 _resolve_targets 同口径。"""
+    resolved = {dcode: w for (iid, dcode), w in weights.items() if iid == interface_id}
+    for (iid, dcode), w in weights.items():
+        if iid == 0:
+            resolved.setdefault(dcode, w)
     return resolved
 
 

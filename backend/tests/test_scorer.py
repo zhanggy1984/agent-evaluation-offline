@@ -9,8 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.runner.scorer import (
-    _aggregate_precomputed, _enabled_dims, _resolve_targets, _score_executed_results,
-    _total_cost, _unified, score_case,
+    _aggregate_precomputed, _enabled_dims, _resolve_targets, _resolve_weights,
+    _score_executed_results, _total_cost, _unified, score_case,
 )
 
 # 断言算子输出的最小形态（实际由 run_assertions 产出）
@@ -188,6 +188,32 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(_resolve_targets(targets, 9),
                          {"completeness": 60.0, "tool_usage": 50.0})
 
+    def test_resolve_weights_interface_override(self):
+        # 与 _resolve_targets 同口径：接口级权重优先，缺省回退 interface_id=0 哨兵默认
+        weights = {(0, "completeness"): 0.3, (0, "tool_usage"): 0.2,
+                   (5, "completeness"): 0.9, (5, "factuality"): 0.7}
+        self.assertEqual(_resolve_weights(weights, 5),
+                         {"completeness": 0.9, "factuality": 0.7, "tool_usage": 0.2})
+        self.assertEqual(_resolve_weights(weights, 9),
+                         {"completeness": 0.3, "tool_usage": 0.2})
+        # 空接口匹配：全回退默认
+        self.assertEqual(_resolve_weights({(0, "completeness"): 0.3}, 5),
+                         {"completeness": 0.3})
+
+    def test_score_case_uses_interface_weights(self):
+        # 接口 5 覆盖 completeness 0.9（默认 0.3）；tool_usage 用默认 0.2。
+        # 若 _load_weights 仍硬编码 interface_id==0，此处会按 0.3 加权 → 80 分，断言 90.91 即证明接口级权重生效。
+        weights = _resolve_weights(
+            {(0, "completeness"): 0.3, (0, "tool_usage"): 0.2, (5, "completeness"): 0.9}, 5)
+        r = _base(assertion_results=[
+            {"dimension": "completeness", "pass": True},
+            {"dimension": "completeness", "pass": True},   # completeness 100
+            {"dimension": "tool_usage", "pass": True},
+            {"dimension": "tool_usage", "pass": False},    # tool_usage 50
+        ], weights=weights)
+        # (100*0.9 + 50*0.2) / (0.9+0.2) = 110/1.1 = 90.91
+        self.assertAlmostEqual(r.score_total, 90.91, places=2)
+
     def test_unified_uses_last_attempt(self):
         r = SimpleNamespace(answer="a", reasoning="r", tool_calls=[{"name": "t"}],
                             usage=[{"prompt_tokens": 1}, {"prompt_tokens": 2}])
@@ -249,14 +275,17 @@ class TestRunLevelAggregation(unittest.TestCase):
         """跑 _score_executed_results，返回 (run, 是否有评分异常)。
 
         run 级聚合是核心断言目标，run 由测试构造传入。
+        weights 按 _load_weights 契约传 tuple-key（interface_id, dimension_code），
+        与 targets 的 tuple-key 口径一致；评分按接口 0 解析即退化为全局默认。
         """
         db = AsyncMock()
         db.get.return_value = SimpleNamespace(snapshot=snapshot)
         db.commit.return_value = None
         run = self._run()
+        weight_rows = {(0, d): w for d, w in DEF_WEIGHTS.items()}
         async def _go():
-            ok = await _score_executed_results(db, run, results,
-                                               DEF_WEIGHTS, targets or {}, {}, {})
+            ok = await _score_executed_results(db, run, results, weight_rows,
+                                               targets or {}, {}, {})
             return ok
         ok = asyncio.run(_go())
         return run, ok
