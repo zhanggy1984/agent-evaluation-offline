@@ -39,6 +39,15 @@ export const useAuthStore = defineStore('auth', {
       localStorage.setItem('username', this.username)
       localStorage.setItem('must_change_password', String(this.must_change_password))
     },
+    // P2-B1 refresh 轮换成功后仅更新 token/role：refresh 响应不含 username/must_change_password，
+    // 复用 setSession 会把强制改密标记误清（首登改密中 token 过期 refresh 后应仍强制改密）
+    applyRefreshedTokens(data) {
+      this.$patch({ access_token: data.access_token, refresh_token: data.refresh_token })
+      if (data.role) this.role = data.role
+      localStorage.setItem('access_token', this.access_token)
+      localStorage.setItem('refresh_token', this.refresh_token)
+      localStorage.setItem('role', this.role)
+    },
     async fetchMe() {
       const data = await authApi.me()
       this.username = data.username
