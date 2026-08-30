@@ -35,6 +35,11 @@ services:
       JUDGE_API_KEY: ${JUDGE_API_KEY:-}
       # 空库重建 admin 初始密码（seed 优先取此值；首登仍强制改密）
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # P2-D18：demo 账号密码透传（seed 缺 env 不建；验证脚本登录也读这里）
+      DEMO_EVALUATOR_PASSWORD: ${DEMO_EVALUATOR_PASSWORD:-}
+      DEMO_VIEWER_PASSWORD: ${DEMO_VIEWER_PASSWORD:-}
+      # P2-D18：verify_fresh_start 改密后统一密码（容器内跑验证脚本用）
+      SMOKE_PASSWORD: ${SMOKE_PASSWORD:-}
       # P2-D17：被评 agent 调用凭证（JSON，key=agent name；缺省按匿名处理，seed_data 不含明文）
       AGENT_AUTH_SECRETS: ${AGENT_AUTH_SECRETS:-}
     # P2-D12：后端不暴露宿主端口（对外唯一入口 = 前端 nginx → 网关，含 traceId/限流/防串线）。

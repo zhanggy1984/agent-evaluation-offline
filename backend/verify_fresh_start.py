@@ -47,7 +47,8 @@ DEMO_CREDS = {
     "viewer": os.environ.get("DEMO_VIEWER_PASSWORD"),
 }
 # 冒烟改密测试密码（首登强制改密闭环用；跑完库内账号密码变为该值，docstring 已注明非幂等）
-SMOKE_PASSWORD = os.environ.get("SMOKE_PASSWORD", "Verify#Reset2026")
+# P2-D18：compose 用 `:-` 注入空串（未设时），空串也算未设——`or` 兜底默认，不能用 get 的 default 参数
+SMOKE_PASSWORD = os.environ.get("SMOKE_PASSWORD") or "Verify#Reset2026"
 
 
 def _seed_config_count() -> int:

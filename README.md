@@ -195,7 +195,11 @@ cp .env.example .env
 #   AGENT_AUTH_SECRETS=xxx # P2-D17：被评 agent 调用凭证（JSON，key=agent name；
 #                          #   如 {"customer-service":{"username":"admin","password":"…"}}；
 #                          #   缺省则被评 agent 按匿名调用，seed_data 不含明文）
+#   DEMO_EVALUATOR_PASSWORD=xxx / DEMO_VIEWER_PASSWORD=xxx  # P2-D18：seed 建 demo 账号密码（缺省不建）
+#   SMOKE_PASSWORD=xxx     # P2-D18：verify_fresh_start 改密后统一密码（验证脚本运行期）
 ```
+
+> **P2-D18 验证脚本凭据约定**：`backend/` 下验收/监控脚本（`verify_*.py`、`trigger_*.py`、`expand_*.py`、`monitor_run.py` 等）一律不入库、不写死凭据——登录密码从对应 env 读取（evaluator→`DEMO_EVALUATOR_PASSWORD`、viewer→`DEMO_VIEWER_PASSWORD`、admin→`ADMIN_PASSWORD`；DB 直连→`DB_PASSWORD`），缺 env 即 fail-fast。宿主跑读项目根 `.env`，容器内跑读 compose 注入的同一批 env。
 
 ### 第 2 步：启动应用容器（backend + frontend）
 
