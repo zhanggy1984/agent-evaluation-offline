@@ -5,13 +5,17 @@ fake adapter/client 喂模拟响应，不触真实网络。
 """
 import asyncio
 import json
+import os
 import types
 import unittest
 
 import httpx
 
 from app.adapters.base import RequestSpec
-from app.core.probe import _check_sse, _check_sync, _usage_ok, probe_interface
+from app.core.probe import (
+    _check_sse, _check_sync, _is_input_error, _usage_ok, probe_interface,
+    validate_probe_input,
+)
 from app.core.sse_parser import SSEParser
 
 USAGE = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
@@ -56,8 +60,11 @@ class _FakeAdapter:
         self.contract_type = contract_type
         self.interface = types.SimpleNamespace(id=1)
         self._fail_prepare: str | None = None
+        self._fail_prepare_exc: Exception | None = None
 
     async def prepare(self, case, client=None):
+        if self._fail_prepare_exc is not None:
+            raise self._fail_prepare_exc
         if self._fail_prepare:
             raise RuntimeError(self._fail_prepare)
 
@@ -255,6 +262,86 @@ class TestProbeSync(unittest.TestCase):
                                   _FakeClient(req=httpx.Response(200, json=self._resp())), case=None))
         self.assertGreaterEqual(pr.elapsed_ms, 0)
         self.assertIn("answer", pr.raw_sample)
+
+
+# ---------------- Q4：输入构造错误分类（样例文件缺失 vs 契约不达标） ----------------
+
+class TestInputErrorClassification(unittest.TestCase):
+    def test_file_not_found_is_input_error(self):
+        self.assertTrue(_is_input_error(FileNotFoundError("no such file")))
+
+    def test_uploads_path_rejected_is_input_error(self):
+        # _assert_inside_uploads 白名单拒绝固定消息（含 uploads 字样）
+        self.assertTrue(_is_input_error(ValueError("文件路径不在 uploads 目录内: /etc/passwd")))
+
+    def test_prepare_http_failure_not_input_error(self):
+        # agent 契约类错误（上传被拒 / 登录失败）不算输入错误
+        self.assertFalse(_is_input_error(RuntimeError("prepare.upload HTTP 400: bad pdf")))
+
+    def test_network_error_not_input_error(self):
+        self.assertFalse(_is_input_error(httpx.RequestError("connect failed")))
+
+
+class TestValidateProbeInput(unittest.TestCase):
+    """前置校验：文件型（file_path 键）存在性 + uploads 白名单。"""
+
+    def setUp(self):
+        import tempfile
+        from app.adapters import base as base_mod
+        from app.core import probe as probe_mod
+        self.tmp = tempfile.TemporaryDirectory()
+        self._probe_mod = probe_mod
+        self._old_uploads = base_mod._UPLOADS_DIR
+        base_mod._UPLOADS_DIR = os.path.realpath(self.tmp.name)
+        probe_mod._UPLOADS_DIR = base_mod._UPLOADS_DIR  # 报错消息里的目录同样指向 tmp
+
+    def tearDown(self):
+        from app.adapters import base as base_mod
+        base_mod._UPLOADS_DIR = self._old_uploads
+        self._probe_mod._UPLOADS_DIR = self._old_uploads
+        self.tmp.cleanup()
+
+    def test_non_file_input_passes(self):
+        self.assertIsNone(validate_probe_input({"content": "hello"}))
+        self.assertIsNone(validate_probe_input(None))
+        self.assertIsNone(validate_probe_input(["not", "dict"]))
+
+    def test_existing_file_passes(self):
+        f = os.path.join(self.tmp.name, "sample.pdf")
+        with open(f, "wb") as fh:
+            fh.write(b"pdf")
+        self.assertIsNone(validate_probe_input({"file_path": f}))
+
+    def test_missing_file_reported(self):
+        err = validate_probe_input({"file_path": os.path.join(self.tmp.name, "gone.pdf")})
+        self.assertIsNotNone(err)
+        self.assertIn("样例文件不存在", err)
+
+    def test_outside_uploads_rejected(self):
+        # 路径跳出 uploads（../ 逃逸）→ 白名单拒绝，不是「不存在」
+        evil = os.path.join(self.tmp.name + "_evil", "..", "..", "x.pdf")
+        err = validate_probe_input({"file_path": evil})
+        self.assertIsNotNone(err)
+        self.assertIn("不在 uploads 目录内", err)
+
+
+class TestProbeInputErrorFlag(unittest.TestCase):
+    """probe_interface 里输入类错误标 input_error，契约类错误不标。"""
+
+    def test_prepare_file_missing_sets_input_error(self):
+        adapter = _FakeAdapter("sse")
+        adapter._fail_prepare_exc = FileNotFoundError("no such file")
+        pr = _run(probe_interface(adapter, _FakeClient(), case=None))
+        self.assertFalse(pr.ok)
+        self.assertTrue(pr.input_error)
+        self.assertTrue(any("prepare" in e for e in pr.errors))
+
+    def test_prepare_http_failure_not_input_error(self):
+        adapter = _FakeAdapter("sse")
+        adapter._fail_prepare = "prepare.upload HTTP 400"
+        pr = _run(probe_interface(adapter, _FakeClient(), case=None))
+        self.assertFalse(pr.ok)
+        self.assertFalse(pr.input_error)
 
 
 if __name__ == "__main__":

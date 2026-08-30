@@ -16,10 +16,11 @@ import pytest
 pytest.importorskip("aiomysql")
 
 from app.api import scaffold
+from app.api.agents import ProbeBody, probe_agent
 from app.api.scaffold import AdapterConfirmBody, confirm_adapter, discover_agent
 from app.core.errors import ApiError
 from app.models import Agent
-from helpers import make_agent
+from helpers import make_agent, make_interface
 
 VALID_V2 = {
     "agent": "demo", "contract_version": "2.0",
@@ -198,3 +199,37 @@ async def test_discover_v1_runtime_with_snapshot_drift_hint(db, env, monkeypatch
     resp = await discover_agent(agent.id, _=object(), db=db)
     assert resp["data"]["ok"] is True
     assert any("无 contract 段" in e for e in resp["data"]["adapter_drift"])
+
+
+# ---------------- Q4：probe 文件型输入前置校验（短路，不触发 HTTP） ----------------
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_probe_input_error_short_circuits(db, env, monkeypatch, tmp_path):
+    """文件型探测输入缺样例文件 → input_error=true 短路，不真发请求（省无效探测调用）。"""
+    from app.adapters import base as base_mod
+
+    monkeypatch.setattr(base_mod, "_UPLOADS_DIR", str(tmp_path))
+    agent = make_agent(name="it-q4-probe")
+    agent.adapter_config = {
+        "contract_type": "sync",
+        "request": {"path": "/v1/chat", "method": "POST",
+                    "body": {"content": "{case.input.content}"}},
+    }
+    db.add(agent)
+    await db.flush()
+    env.agents.append(agent)
+    iface = make_interface(agent.id, "it-q4-iface")
+    iface.contract_type = "sync"
+    db.add(iface)
+    await db.flush()
+    env.interfaces.append(iface)
+    await db.commit()
+
+    resp = await probe_agent(agent.id, body=ProbeBody(
+        input={"file_path": str(tmp_path / "__q4_missing.pdf")}), _=object(), db=db)
+    data = resp["data"]
+    assert data["ok"] is False
+    assert data["input_error"] is True
+    for itf in data["interfaces"]:
+        assert itf["input_error"] is True
+        assert any("样例文件不存在" in e for e in itf["errors"])

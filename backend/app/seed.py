@@ -178,6 +178,39 @@ async def _seed_agents(db) -> None:
                     spec["name"], len(spec["interfaces"]), len(suite["cases"]))
 
 
+def _verify_sample_files() -> None:
+    """Q4：seed 校验文件型 agent 样例文件已放置，缺失明确报错（把「人工预置」变「显式契约」）。
+
+    文件引用来源：adapter_config.probe.input.file_path（通用声明）+ sample_suite 用例
+    input.file_path（seed 示例用例）。文件须在平台 uploads 目录内且可读（接入标准：
+    文件型 agent 用 file_path 键声明 uploads 内样例文件）。
+    """
+    from app.adapters.base import _UPLOADS_DIR, _assert_inside_uploads
+    from app.seed_data import SEED_AGENTS
+
+    missing: list[str] = []
+    for spec in SEED_AGENTS:
+        paths: set[str] = set()
+        probe_in = (spec.get("adapter_config") or {}).get("probe", {}).get("input")
+        if isinstance(probe_in, dict) and probe_in.get("file_path"):
+            paths.add(str(probe_in["file_path"]))
+        for c in spec.get("sample_suite", {}).get("cases", []):
+            inp = c.get("input")
+            if isinstance(inp, dict) and inp.get("file_path"):
+                paths.add(str(inp["file_path"]))
+        for p in sorted(paths):
+            try:
+                ok_ = os.path.isfile(_assert_inside_uploads(p))
+            except ValueError:
+                ok_ = False
+            if not ok_:
+                missing.append(f"{spec['name']}: {p}")
+    if missing:
+        raise RuntimeError(
+            "文件型 agent 样例文件缺失（需先放置到平台 uploads 目录，当前 "
+            f"UPLOADS_DIR={_UPLOADS_DIR}）：\n  - " + "\n  - ".join(missing))
+
+
 async def _backfill_gold_scores(db) -> None:
     """6.4 幂等补齐存量 is_gold 用例的 expected.judge_gold_scores（漂移检测数据源）。
 
@@ -398,6 +431,7 @@ async def seed() -> None:
         await _seed_system_config(db)
         await _seed_model_prices(db)
         await _seed_agents(db)
+        _verify_sample_files()  # Q4：文件型 agent 样例文件缺失立即报错（不静默 seed 后探测才暴露）
         await _backfill_gold_scores(db)
         await _seed_baseline_targets(db)
         await _seed_admin(db)

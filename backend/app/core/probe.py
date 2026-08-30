@@ -9,12 +9,15 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 
 import httpx
 
-from app.adapters.base import request_kwargs, send_request
+from app.adapters.base import (
+    _UPLOADS_DIR, _assert_inside_uploads, request_kwargs, send_request,
+)
 from app.core.sse_parser import SSEParseError
 
 logger = logging.getLogger(__name__)
@@ -33,6 +36,42 @@ class ProbeResult:
     fields: dict = field(default_factory=dict)   # 逐字段：是否到达/值
     errors: list[str] = field(default_factory=list)
     raw_sample: str | None = None                # 响应样本（截断，诊断用）
+    # Q4：输入构造错误（样例文件缺失/路径越界/白名单拒绝）与契约不达标区分——
+    # 探测者据此判断「先准备文件」vs「agent 契约有问题」
+    input_error: bool = False
+
+
+def _is_input_error(exc: Exception) -> bool:
+    """Q4：输入构造类错误判定（样例文件缺失/不可读/路径越界），与契约不达标区分。
+
+    契约不达标（HTTP 非 200/字段缺失/网络错误）不算输入错误；仅文件缺失、白名单
+    拒绝这类「平台侧准备不足」才标 input_error。
+    """
+    if isinstance(exc, (FileNotFoundError, IsADirectoryError, PermissionError)):
+        return True
+    if isinstance(exc, ValueError) and "uploads" in str(exc):
+        return True  # _assert_inside_uploads 白名单拒绝（base.py 固定消息含 uploads）
+    return False
+
+
+def validate_probe_input(probe_input: dict | None) -> str | None:
+    """Q4：文件型探测输入前置校验 → 错误消息或 None。
+
+    平台接入标准：文件型 agent 的探测输入用 `file_path` 键声明平台 uploads 内样例文件
+    （cc 类）。缺失/越界/不可读 → 返回可读错误（探测者据此先放文件，不再当契约问题
+    排查）；非文件型（无 file_path 键）→ None。
+    """
+    raw = probe_input.get("file_path") if isinstance(probe_input, dict) else None
+    if not raw:
+        return None
+    path = str(raw)
+    try:
+        rp = _assert_inside_uploads(path)
+    except ValueError as exc:
+        return str(exc)
+    if not os.path.isfile(rp):
+        return f"样例文件不存在: {path}（需先放置到平台 uploads 目录，当前 UPLOADS_DIR={_UPLOADS_DIR}）"
+    return None
 
 
 def _usage_ok(u) -> bool:
@@ -97,11 +136,13 @@ async def probe_interface(adapter, client, case, timeout_s: float = 120.0) -> Pr
         await adapter.prepare(case, client)
     except Exception as exc:
         pr.errors.append(f"prepare: {exc}")
+        pr.input_error = _is_input_error(exc)  # Q4：文件缺失/越界 → 输入错误
         return pr
     try:
         spec = adapter.build_request(case)
     except Exception as exc:
         pr.errors.append(f"build_request: {exc}")
+        pr.input_error = _is_input_error(exc)  # Q4
         return pr
 
     start = time.perf_counter()
@@ -162,6 +203,7 @@ async def probe_interface(adapter, client, case, timeout_s: float = 120.0) -> Pr
     except Exception as exc:  # 未知异常兜底：诊断类工具不抛
         logger.exception("probe interface %s 未知异常", pr.interface_id)
         pr.errors.append(f"未知异常: {exc}")
+        pr.input_error = _is_input_error(exc)  # Q4：multipart 读文件缺失等输入错误归位
 
     pr.elapsed_ms = int((time.perf_counter() - start) * 1000)
     pr.ok = not pr.errors and pr.http_status == 200

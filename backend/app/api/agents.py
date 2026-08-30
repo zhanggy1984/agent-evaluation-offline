@@ -19,7 +19,7 @@ from app.core.constants import ALLOWED_ADAPTER_TYPES, DEFAULT_WEIGHTS
 from app.core.db import get_db
 from app.core.errors import ApiError, E_CONFLICT, E_NOT_FOUND, E_VALIDATION
 from app.core.http import build_agent_client, validate_base_url
-from app.core.probe import probe_interface
+from app.core.probe import ProbeResult, probe_interface, validate_probe_input
 from app.core.response import ok
 from app.core.security import fernet_decrypt, fernet_encrypt
 from app.models import (
@@ -270,6 +270,15 @@ async def probe_agent(agent_id: int, suite_id: int | None = None, interface_id: 
     probe_input, _src = resolve_probe_input(body_input, agent.adapter_config, suite_input)
     if probe_input is None:
         raise ApiError(E_VALIDATION, "探测输入为空，无法构造探测请求", 400)
+    # Q4：文件型输入前置校验——样例文件缺失/越界直接短路（省一次无效探测调用，
+    # 且把「先准备文件」与「agent 契约不达标」区分开：input_error=true）
+    file_err = validate_probe_input(probe_input)
+    if file_err is not None:
+        return ok({"ok": False, "input_error": True,
+                   "interfaces": [asdict(ProbeResult(interface_id=i.id,
+                                                     contract_type=i.contract_type,
+                                                     input_error=True, errors=[file_err]))
+                                  for i in ifaces]})
     case = TestCase(input=probe_input)  # 不入库最小 case，仅作模板渲染源（{case.input.*}）
     # 单接口探测超时：读 scope=run 配置，缺省 120s
     timeout_s = 120.0

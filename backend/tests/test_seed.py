@@ -7,6 +7,8 @@
 Q3：另覆盖 manifest v2 单一真相源不变量——SEED_AGENTS 与 MANIFEST_SNAPSHOTS 一一对应、
 contract_version 统一 2.0、adapter_config 由快照派生、seed.py 写库注入 _manifest_v2 契约。
 """
+import pytest
+
 from app import seed_data
 from app.models.user import ROLE
 
@@ -129,3 +131,35 @@ def test_seed_injects_manifest_v2_contract():
         written = {**spec["adapter_config"], "_manifest_v2": seed_data.MANIFEST_SNAPSHOTS[name]}
         assert written["_manifest_v2"] == seed_data.MANIFEST_SNAPSHOTS[name]
         assert {k: v for k, v in written.items() if k != "_manifest_v2"} == spec["adapter_config"]
+
+
+# ---------------- Q4：seed 校验文件型 agent 样例文件 ----------------
+
+def test_verify_sample_files(monkeypatch, tmp_path):
+    """文件存在即通过、缺失即报错（把「人工预置」变「显式契约」）。
+
+    校验对象：adapter_config.probe.input.file_path（通用声明）+ sample_suite 用例
+    input.file_path（seed 示例用例）。
+    """
+    from app import seed_data
+    from app.adapters import base as base_mod
+    from app.seed import _verify_sample_files
+
+    monkeypatch.setattr(base_mod, "_UPLOADS_DIR", str(tmp_path))
+    (tmp_path / "real.pdf").write_bytes(b"pdf")
+    fake_agents = [
+        {"name": "file-agent",
+         "adapter_config": {"probe": {"input": {"file_path": str(tmp_path / "real.pdf")}}},
+         "sample_suite": {"cases": []}},
+        {"name": "text-agent",
+         "adapter_config": {"probe": {"input": {"content": "hi"}}},
+         "sample_suite": {"cases": []}},
+    ]
+    monkeypatch.setattr(seed_data, "SEED_AGENTS", fake_agents)
+    _verify_sample_files()  # 全部文件存在，不抛
+
+    # case input 引用缺失文件 → 报错（seed 示例用例路径也是校验对象）
+    fake_agents[0]["sample_suite"]["cases"] = [
+        {"name": "c1", "input": {"file_path": str(tmp_path / "missing.pdf")}}]
+    with pytest.raises(RuntimeError, match="样例文件缺失"):
+        _verify_sample_files()
