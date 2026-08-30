@@ -1,8 +1,11 @@
 # 构建阶段
 FROM node:20-alpine AS build
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci || npm install
+# P2-E10：lock 已入库，固定 npm ci 可复现构建——去掉 `|| npm install` 回退（回退会按
+# package.json 重新解析导致 lock 漂移，失去「可复现构建」保障）；lock 过期时构建暴露失败，
+# 强制先同步 lock（与 D13 后端依赖 lock 同一精神）
+COPY package.json package-lock.json ./
+RUN npm ci
 COPY . .
 RUN npm run build
 

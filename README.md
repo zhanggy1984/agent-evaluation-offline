@@ -220,6 +220,13 @@ curl localhost:8180/healthz       # {"status":"ok"}（经前端 nginx → 网关
 
 > 本 agent 只起应用容器；MySQL 在共享 infra（库 `ai_evaluation`）。
 
+> **P2-E8 Linux 部署上线检查**：容器以非 root（uid 10001）运行，落盘目录权限取决于宿主挂载目录。
+> Docker Desktop（Windows）挂载权限宽松无需处理；**Linux 部署需宿主先授权**，否则容器内上传/报告导出
+> 因无写权限失败：
+> ```bash
+> chown -R 10001:10001 uploads backend/exports   # uploads=用例附件、backend/exports=导出报告临时文件
+> ```
+
 **备份（P2-D14）**：`scripts/backup_db.ps1` 全库备份（共享 infra MySQL 容器内 mysqldump，`--single-transaction --no-tablespaces`，密码从 `../infra/.env` 读，不硬编码），滚动保留最近 14 份。
 
 ```powershell
@@ -392,11 +399,11 @@ docker compose exec backend python -m app.seed   # 初始化数据
 | 改后端代码不生效 | 容器挂载源码但 uvicorn 不自动重载：`docker compose restart backend` |
 | 跑真实评测 agent 连接失败 | 先确认被评 agent 服务在线（标准契约 + `POST /admin/reset` 就绪），宿主端口未被占用 |
 | 宿主跑 pytest 报 pytest_html 缺 py.xml | 加 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` + `-p pytest_asyncio.plugin` |
-| 集成测试连库失败（2003） | Windows 宿主无法直达 bridge IP；用 socat 转发容器（127.0.0.1:3307，DB_PORT 按实际转发端口）或容器内临时装 pytest 跑 |
+| 集成测试连库失败（2003） | 先确认共享 infra MySQL 已启动（`docker start shared-mysql`）；Windows 宿主直连 `127.0.0.1:33061` 即可，无需 socat |
 | httpx 报 localhost 502（后端无日志） | 宿主 Clash 系统代理写进注册表，httpx trust_env 读到 → 验证脚本一律 `trust_env=False` |
 | run 显示「完成」但有用例未达标 | 语义如此：`partial_failed` 只认执行/技术 error，`fail`（未达标）不改变终态；看黄色「N 未达标」tag |
 | 报告导出 token 泄露担忧 | token 明文仅返回一次、DB 存 sha256，导出走带鉴权的 /api/exports |
-| 数据库查数据 | `docker compose exec mysql mysql -uevaluation -p<密码> ai_evaluation` |
+| 数据库查数据 | 共享 infra MySQL 宿主直连：`mysql -h127.0.0.1 -P33061 -uevaluation -p<密码> ai_evaluation`（密码见 infra/.env `MYSQL_EVAL_PASSWORD`） |
 
 ---
 
