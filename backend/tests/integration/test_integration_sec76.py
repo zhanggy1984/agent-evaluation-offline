@@ -97,3 +97,35 @@ async def test_refresh_db_roundtrip_naive_expiry():
         async with SessionLocal() as sd:
             await sd.execute(delete(RefreshToken).where(RefreshToken.family_id == fam))
             await sd.commit()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_refresh_family_absolute_expiry():
+    """P2-D19：族级绝对过期——单个 token 仍有效（未过期未撤销）但建族已超 30 天 → 401 + 整族撤销。
+
+    换连接读回 naive created_at（同 naive expiry 教训：identity map 命中 aware 值会掩盖
+    D19 的 `now - created_at` naive/aware 比较）。
+    """
+    uid = await _admin_id()
+    fam = auth_mod.new_family_id()
+    t = auth_mod.new_token_value()
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=31)  # 建族超绝对期；单 token 本身未过期（expires_at 未来）
+    async with SessionLocal() as s0:
+        s0.add(RefreshToken(user_id=uid, token_hash=auth_mod._sha256(t), family_id=fam,
+                            expires_at=now + timedelta(days=7), revoked=False, created_at=old))
+        await s0.commit()
+    try:
+        async with SessionLocal() as s1:
+            with pytest.raises(ApiError) as ei:
+                await auth_mod.refresh(auth_mod.RefreshBody(refresh_token=t), s1)
+        assert ei.value.status_code == 401
+        assert "最长有效期" in ei.value.message, "应提示重新登录，而非 token 过期"
+        async with SessionLocal() as s2:
+            rows = (await s2.execute(select(RefreshToken).where(
+                RefreshToken.family_id == fam))).scalars().all()
+            assert rows and all(r.revoked for r in rows), "超绝对期后整族应全部撤销"
+    finally:
+        async with SessionLocal() as sd:
+            await sd.execute(delete(RefreshToken).where(RefreshToken.family_id == fam))
+            await sd.commit()

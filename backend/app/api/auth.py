@@ -32,6 +32,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 MAX_FAILED = 5
 LOCK_MINUTES = 15
+# P2-D19：refresh 有效期——单 token 轮换 7 天；族级绝对过期 30 天（超期必须重新登录，防无限续期）
+REFRESH_TOKEN_DAYS = 7
+REFRESH_ABSOLUTE_DAYS = 30
 
 
 class _LoginLimiter:
@@ -67,7 +70,7 @@ async def _issue_tokens(db: AsyncSession, user: User) -> dict:
         user_id=user.id,
         token_hash=_sha256(refresh_raw),
         family_id=family_id,
-        expires_at=datetime.utcnow() + timedelta(days=7),
+        expires_at=datetime.utcnow() + timedelta(days=REFRESH_TOKEN_DAYS),
     ))
     await db.commit()
     return {
@@ -151,6 +154,22 @@ async def refresh(body: RefreshBody, db: AsyncSession = Depends(get_db)):
         logger.warning("refresh reuse detected, family=%s revoked", row.family_id)
         raise ApiError(E_TOKEN_INVALID, "检测到 token 复用，整族已撤销", 401)
 
+    # P2-D19：族级绝对过期——family 从首次登录建族起最长 REFRESH_ABSOLUTE_DAYS 天，
+    # 超期必须重新登录（单 token 7 天可续，族级 30 天硬顶，防泄露 token 无限续期）。
+    oldest = (await db.execute(
+        select(RefreshToken).where(RefreshToken.family_id == row.family_id)
+        .order_by(RefreshToken.created_at.asc()).limit(1)
+    )).scalar_one()
+    if now - oldest.created_at > timedelta(days=REFRESH_ABSOLUTE_DAYS):
+        family_rows = (await db.execute(
+            select(RefreshToken).where(RefreshToken.family_id == row.family_id)
+        )).scalars().all()
+        for r in family_rows:
+            r.revoked = True
+        await db.commit()
+        logger.warning("refresh family 超绝对期, family=%s revoked", row.family_id)
+        raise ApiError(E_TOKEN_INVALID, "登录会话已超过最长有效期，请重新登录", 401)
+
     user = await db.get(User, row.user_id)
     if user is None or not user.enabled:
         raise ApiError(E_TOKEN_INVALID, "账号不可用", 401)
@@ -161,7 +180,7 @@ async def refresh(body: RefreshBody, db: AsyncSession = Depends(get_db)):
         user_id=row.user_id,
         token_hash=_sha256(new_refresh),
         family_id=row.family_id,  # 同族延续
-        expires_at=now + timedelta(days=7),
+        expires_at=now + timedelta(days=REFRESH_TOKEN_DAYS),
     ))
     await db.commit()
     return ok({
