@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_allow_change, require_role
+from app.core.config import settings
 from app.core.db import get_db
 from app.core.errors import ApiError, E_ACCOUNT_LOCKED, E_TOKEN_INVALID, E_VALIDATION
 from app.core.response import ok
@@ -32,8 +33,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 MAX_FAILED = 5
 LOCK_MINUTES = 15
-# P2-D19：refresh 有效期——单 token 轮换 7 天；族级绝对过期 30 天（超期必须重新登录，防无限续期）
-REFRESH_TOKEN_DAYS = 7
+# P2-D19：refresh 有效期——单 token 轮换 jwt_refresh_days（config 默认 7）；族级绝对过期 30 天
+# （超期必须重新登录，防无限续期）。P2-D20 收敛孤儿配置：原 config.jwt_refresh_days 定义未消费，现读它。
+REFRESH_TOKEN_DAYS = settings.jwt_refresh_days
 REFRESH_ABSOLUTE_DAYS = 30
 
 

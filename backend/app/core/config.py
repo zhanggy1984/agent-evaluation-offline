@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # ---- LLM profile 密钥（judge 用，OpenAI 兼容端点） ----
     judge_api_key: str = ""
 
+    # P2-D20：可信反向代理层数——X-Forwarded-For 从右数第 N 个取真实客户端 IP。
+    # 当前链路 前端 nginx + api-gateway 各 append 一次 → 2；链路变化时调整（audit._client_ip）
+    xff_trusted_proxy_count: int = 2
+
     @model_validator(mode="after")
     def _validate_secrets(self) -> "Settings":
         if self.app_env == "test":
