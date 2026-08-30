@@ -87,6 +87,15 @@ async def test_login_ok(db, auth_user):
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_login_unknown_user_401(db):
+    # P2-D15：不存在用户返回 401（与错密码同语义，dummy bcrypt 抹平时序侧信道由单测覆盖）
+    with pytest.raises(ApiError) as ei:
+        await auth_mod.login(
+            _login_body(f"nobody-{uuid.uuid4().hex[:8]}", "whatever"), _req("10.255.3.1"), db)
+    assert ei.value.status_code == 401
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_login_wrong_password_increments(db, auth_user):
     with pytest.raises(ApiError) as ei:
         await auth_mod.login(

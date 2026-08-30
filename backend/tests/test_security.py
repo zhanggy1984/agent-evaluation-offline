@@ -23,6 +23,13 @@ def test_verify_password_bad_hash():
     assert security.verify_password("x", "not-a-bcrypt-hash") is False
 
 
+def test_dummy_password_hash_valid_bcrypt_cost12():
+    # P2-D15：DUMMY_PASSWORD_HASH 必须是合法 cost=12 bcrypt——checkpw 不抛 ValueError
+    # （能跑），且 cost 与真实 hash 一致，才能抹平「用户名枚举」时序侧信道
+    assert security.DUMMY_PASSWORD_HASH.startswith("$2b$12$")
+    assert security.verify_password("whatever", security.DUMMY_PASSWORD_HASH) is False
+
+
 # ---------------- Fernet ----------------
 def test_fernet_roundtrip():
     raw = b"secret-token-bytes"

@@ -38,6 +38,12 @@ def fernet_decrypt(token: bytes) -> bytes:
 
 
 # ---------------- 密码 ----------------
+# P2-D15：固定 dummy bcrypt hash（cost=12，与真实 hash 同耗时）。
+# 登录时用户不存在/被禁用也会对它的 dummy hash 跑一次 checkpw，抹平「用户名枚举」
+# 时序侧信道（存在用户要 ~100-250ms，不存在瞬间返回）。明文是占位符，无任何账号使用。
+DUMMY_PASSWORD_HASH = "$2b$12$/LSL0FMQ.ObmrphY/K31J.IDnnodSRGpx4xjkAPALMhY9.IiOgMQ."
+
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
 

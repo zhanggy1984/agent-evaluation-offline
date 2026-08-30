@@ -22,7 +22,8 @@ from app.core.db import get_db
 from app.core.errors import ApiError, E_ACCOUNT_LOCKED, E_TOKEN_INVALID, E_VALIDATION
 from app.core.response import ok
 from app.core.security import (
-    create_access_token, hash_password, new_family_id, new_token_value, verify_password,
+    DUMMY_PASSWORD_HASH, create_access_token, hash_password, new_family_id,
+    new_token_value, verify_password,
 )
 from app.models.user import RefreshToken, User
 
@@ -98,6 +99,11 @@ async def login(body: LoginBody, request: Request, db: AsyncSession = Depends(ge
     ok_pwd = False
     if user is not None and user.enabled:
         ok_pwd = await asyncio.to_thread(verify_password, body.password, user.password_hash)
+    else:
+        # P2-D15：用户不存在/被禁用时也跑一次 dummy bcrypt（cost=12 与真实 hash 同耗时），
+        # 抹平「用户名枚举」时序侧信道——所有非成功路径都恰有一次 bcrypt 计算。
+        # 结果丢弃：dummy 明文无账号使用，即使 checkpw 碰巧返回 True 也照样走 401。
+        await asyncio.to_thread(verify_password, body.password, DUMMY_PASSWORD_HASH)
 
     if user is None or not ok_pwd:
         if user is not None:
