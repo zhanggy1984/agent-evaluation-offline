@@ -18,7 +18,7 @@ from app.api import (
     scaffold, uploads, users,
 )
 from app.core.db import SessionLocal
-from app.core.errors import register_error_handlers
+from app.core.errors import E_BODY_TOO_LARGE, register_error_handlers
 from app.core.logging import setup_logging, trace_id_var
 from app.judge.worker import judge_worker_loop
 from app.runner.scanner import scanner_loop
@@ -63,6 +63,31 @@ async def security_headers(request: Request, call_next):
     if request.url.path not in ("/docs", "/redoc", "/openapi.json"):
         response.headers.setdefault("Content-Security-Policy", "default-src 'none'")
     return response
+
+
+# P2-D16：请求体大小上限（backend 纵深防御）。普通 API 10 MiB；/api/uploads 豁免
+# （上传大小由 file_max_size 业务校验 + 前端 nginx client_max_body_size 50m 兜底）。
+# 对外唯一入口是前端 nginx，此处防内网直连 backend:8000 时大 body 耗尽内存。
+# chunked 无 Content-Length 时依赖 nginx 兜底（nginx 按实际传输长度限制），不做
+# 流式读取计数——避免消费 body 破坏 multipart 上传的流式处理（UploadFile spool 到临时文件）。
+BODY_LIMIT_BYTES = 10 * 1024 * 1024
+
+
+@app.middleware("http")
+async def body_size_limit(request: Request, call_next):
+    # 注册在中间件栈最外层（最先执行）：超限直接 413，不进入后续处理
+    if not request.url.path.startswith("/api/uploads"):
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                if int(cl) > BODY_LIMIT_BYTES:
+                    return JSONResponse(
+                        {"code": E_BODY_TOO_LARGE, "message": "请求体过大", "data": None},
+                        status_code=413,
+                    )
+            except ValueError:
+                pass  # 非法 Content-Length 不拦截，交给下游处理
+    return await call_next(request)
 
 
 app.include_router(auth.router, prefix="/api")

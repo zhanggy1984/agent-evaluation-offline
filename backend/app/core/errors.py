@@ -32,6 +32,8 @@ E_ALREADY_RUNNING = 3003
 E_FILE_TYPE = 4001
 E_FILE_SIZE = 4002
 E_FILE_PATH = 4003
+# P2-D16：请求体过大（body_size_limit 中间件 413，防内网直连时大 body 攻击）
+E_BODY_TOO_LARGE = 4004
 
 
 class ApiError(Exception):
