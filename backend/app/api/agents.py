@@ -196,13 +196,52 @@ async def set_agent_auth(agent_id: int, body: AgentAuthBody, _: User = Admin,
     return ok({"auth_configured": True})
 
 
+class ProbeBody(BaseModel):
+    """显式探测输入（三级来源第 1 级，override）。suite/interface 仍走 query 兼容。"""
+    input: dict | None = None
+
+
+def resolve_probe_input(body_input: dict | None, adapter_config: dict | None,
+                        existing_case_input: dict | None) -> tuple[dict | None, str]:
+    """探测输入三级来源选择 → (input, source)。
+
+    source ∈ {"explicit", "adapter_probe", "suite_case", ""}。空 dict / 非 dict 视为无效
+    输入不参与选择（避免空 input 渲染出空请求）；suite 用例 input 由调用方负责加载。
+    优先级：请求体显式 input → adapter_config.probe.input → suite 用例 input。
+    """
+    if isinstance(body_input, dict) and body_input:
+        return body_input, "explicit"
+    probe_cfg = (adapter_config or {}).get("probe") or {}
+    if isinstance(probe_cfg.get("input"), dict) and probe_cfg["input"]:
+        return probe_cfg["input"], "adapter_probe"
+    if isinstance(existing_case_input, dict) and existing_case_input:
+        return existing_case_input, "suite_case"
+    return None, ""
+
+
+async def _load_first_active_case(db, agent_id: int, suite_id: int | None) -> TestCase | None:
+    """加载 suite 首个 active case（三级来源第 3 级）。suite_id 指定时强校验归属。"""
+    if suite_id is not None:
+        suite = await db.get(TestSuite, suite_id)
+        if suite is None or suite.agent_id != agent_id:
+            raise ApiError(E_VALIDATION, "suite 不存在或不属于该 agent", 400)
+    else:
+        suite = (await db.execute(select(TestSuite).where(
+            TestSuite.agent_id == agent_id).order_by(TestSuite.id).limit(1))).scalar_one_or_none()
+        if suite is None:
+            return None
+    return (await db.execute(select(TestCase).where(
+        TestCase.suite_id == suite.id, TestCase.status == "active").order_by(TestCase.id).limit(1))).scalar_one_or_none()
+
+
 @router.post("/{agent_id}/probe")
 async def probe_agent(agent_id: int, suite_id: int | None = None, interface_id: int | None = None,
-                      _: User = Staff, db: AsyncSession = Depends(get_db)):
+                      body: ProbeBody | None = None, _: User = Staff, db: AsyncSession = Depends(get_db)):
     """契约探测（B.5）：对 agent 接口发真实请求，逐字段验证评测契约（§5.1/§5.2）。
 
-    探测输入 = suite 第一个 active case（真实请求需渲染 {case.input}）；interface_id 指定时
-    只探该接口，否则探 agent 全部 enabled interface。探测失败返回结果不抛错——工具是诊断用。
+    探测输入三级来源：请求体 input（显式 override）→ adapter_config.probe.input（声明式）
+    → suite 首个 active case（渲染 {case.input} 需真实输入）。interface_id 指定时只探该
+    接口，否则探 agent 全部 enabled interface。探测失败返回结果不抛错——工具是诊断用。
     """
     agent = await _get_agent(db, agent_id)
     if not agent.enabled:
@@ -218,20 +257,20 @@ async def probe_agent(agent_id: int, suite_id: int | None = None, interface_id: 
             AgentInterface.agent_id == agent_id, AgentInterface.enabled == True))).scalars().all()
     if not ifaces:
         raise ApiError(E_VALIDATION, "agent 无启用的评测接口", 400)
-    # 探测输入：suite 第一个 active case
-    if suite_id is not None:
-        suite = await db.get(TestSuite, suite_id)
-        if suite is None or suite.agent_id != agent_id:
-            raise ApiError(E_VALIDATION, "suite 不存在或不属于该 agent", 400)
-    else:
-        suite = (await db.execute(select(TestSuite).where(
-            TestSuite.agent_id == agent_id).order_by(TestSuite.id).limit(1))).scalar_one_or_none()
-        if suite is None:
-            raise ApiError(E_VALIDATION, "agent 无 suite，无法构造探测输入", 400)
-    case = (await db.execute(select(TestCase).where(
-        TestCase.suite_id == suite.id, TestCase.status == "active").order_by(TestCase.id).limit(1))).scalar_one_or_none()
-    if case is None:
-        raise ApiError(E_VALIDATION, f"suite({suite.id}) 无 active 用例，无法构造探测请求", 400)
+    # 探测输入：三级来源（显式 input → adapter_config.probe.input → suite 首个 active case）
+    body_input = body.input if body else None
+    probe_cfg = (agent.adapter_config or {}).get("probe") or {}
+    suite_input = None
+    if not body_input and not probe_cfg.get("input"):
+        scase = await _load_first_active_case(db, agent_id, suite_id)
+        if scase is None:
+            raise ApiError(E_VALIDATION,
+                           "无探测输入：请求体传 input、配置 adapter_config.probe.input 或创建 suite 用例", 400)
+        suite_input = scase.input
+    probe_input, _src = resolve_probe_input(body_input, agent.adapter_config, suite_input)
+    if probe_input is None:
+        raise ApiError(E_VALIDATION, "探测输入为空，无法构造探测请求", 400)
+    case = TestCase(input=probe_input)  # 不入库最小 case，仅作模板渲染源（{case.input.*}）
     # 单接口探测超时：读 scope=run 配置，缺省 120s
     timeout_s = 120.0
     cfg = await db.get(SystemConfig, "case_timeout")
