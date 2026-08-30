@@ -21,6 +21,28 @@ def test_seed_agents_four_and_unique():
     assert {"customer-service", "contract-check", "smart-procurement", "good-question"} <= set(names)
 
 
+def test_seed_agents_no_plaintext_credentials():
+    # P2-D17：被评 agent 凭证不得出现在 seed_data 源码（明文 → env 注入）
+    for spec in seed_data.SEED_AGENTS:
+        assert spec.get("auth_secrets") is None, f"{spec['name']} 含明文凭证"
+
+
+def test_load_agent_secrets(monkeypatch):
+    # P2-D17：凭证解析——缺 env / 坏 JSON → 匿名（空 dict）；合法 JSON → 按 agent name 提取
+    from app.seed import _load_agent_secrets  # conftest 兜底注入 security env，宿主可 import
+
+    monkeypatch.delenv("AGENT_AUTH_SECRETS", raising=False)
+    assert _load_agent_secrets() == {}
+
+    monkeypatch.setenv("AGENT_AUTH_SECRETS",
+                       '{"customer-service": {"username": "admin", "password": "x"}}')
+    got = _load_agent_secrets()
+    assert got["customer-service"]["password"] == "x"
+
+    monkeypatch.setenv("AGENT_AUTH_SECRETS", "{bad json")
+    assert _load_agent_secrets() == {}
+
+
 def test_each_agent_complete():
     for spec in seed_data.SEED_AGENTS:
         assert spec["base_url"] and spec["adapter_type"] == "config"

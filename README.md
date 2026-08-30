@@ -192,6 +192,9 @@ cp .env.example .env
 # 可选：
 #   JUDGE_API_KEY=xxx      # judge LLM API Key（语义维度评分必需）
 #   ADMIN_PASSWORD=xxx     # 空库重建 admin 初始密码
+#   AGENT_AUTH_SECRETS=xxx # P2-D17：被评 agent 调用凭证（JSON，key=agent name；
+#                          #   如 {"customer-service":{"username":"admin","password":"…"}}；
+#                          #   缺省则被评 agent 按匿名调用，seed_data 不含明文）
 ```
 
 ### 第 2 步：启动应用容器（backend + frontend）

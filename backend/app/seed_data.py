@@ -338,7 +338,7 @@ SEED_AGENTS = [
             {"name": "chat", "path": "/api/v1/sessions/{sid}/messages", "method": "POST",
              "contract_type": "sse", "contract_version": "1.0"},
         ],
-        "auth_secrets": {"username": "admin", "password": "admin123"},
+        "auth_secrets": None,  # P2-D17：凭证不入库明文，seed 时从 AGENT_AUTH_SECRETS env 注入
         "scenes": [
             {"tag": "greeting", "description": "问候与闲聊"},
             {"tag": "order_query", "description": "订单查询"},
@@ -409,7 +409,7 @@ SEED_AGENTS = [
             {"name": "chat", "path": "/api/v1/reviews/{review_id}/chat", "method": "POST",
              "contract_type": "sse", "contract_version": "1.0"},
         ],
-        "auth_secrets": {"username": "expert_01", "password": "Smart@2026"},
+        "auth_secrets": None,  # P2-D17：凭证不入库明文，seed 时从 AGENT_AUTH_SECRETS env 注入
         "scenes": [
             {"tag": "tech_scheme", "description": "技术方案评审"},
             {"tag": "price", "description": "报价评审"},
@@ -448,7 +448,7 @@ SEED_AGENTS = [
             {"name": "chat", "path": "/api/chat/{session_id}", "method": "POST",
              "contract_type": "sse", "contract_version": "1.0"},
         ],
-        "auth_secrets": {"username": "admin", "password": "admin123"},
+        "auth_secrets": None,  # P2-D17：凭证不入库明文，seed 时从 AGENT_AUTH_SECRETS env 注入
         "scenes": [
             {"tag": "greeting", "description": "问候与闲聊"},
             {"tag": "doc_qa", "description": "文档检索问答"},

@@ -35,6 +35,8 @@ services:
       JUDGE_API_KEY: ${JUDGE_API_KEY:-}
       # 空库重建 admin 初始密码（seed 优先取此值；首登仍强制改密）
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # P2-D17：被评 agent 调用凭证（JSON，key=agent name；缺省按匿名处理，seed_data 不含明文）
+      AGENT_AUTH_SECRETS: ${AGENT_AUTH_SECRETS:-}
     # P2-D12：后端不暴露宿主端口（对外唯一入口 = 前端 nginx → 网关，含 traceId/限流/防串线）。
     # 需要宿主直连调试时临时加：ports: ["127.0.0.1:8100:8000"]（用后移除）。
     # 7.6 C5 多 worker：默认 1 保持现状；置 BACKEND_WORKERS=2 可验证多 worker 互斥

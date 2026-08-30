@@ -5,6 +5,7 @@
 缺显式配置直接失败——随机生成的密码不可恢复，会产生无法登录的 admin）。
 """
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -83,6 +84,24 @@ async def _seed_judge_rubrics(db) -> None:
         logger.info("seed judge_rubric %s v%s", dim, entry["version"])
 
 
+def _load_agent_secrets() -> dict:
+    """P2-D17：被评 agent 凭证从 AGENT_AUTH_SECRETS env（JSON）读，缺省匿名。
+
+    生产默认无已知口令（同 P0-3 demo 口径）：缺 env / JSON 非法 → 空 dict，
+    所有被评 agent 按匿名调用（contract-check 已有 None 先例）。
+    JSON key = Agent.name（如 customer-service），value = {username, password}。
+    """
+    raw = os.environ.get("AGENT_AUTH_SECRETS")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        logger.warning("AGENT_AUTH_SECRETS JSON 解析失败，被评 agent 凭证按匿名处理")
+        return {}
+
+
 async def _seed_agents(db) -> None:
     """四家自研 agent 幂等 seed（含 interface / Fernet 凭证 / 默认权重 / 示例 suite+case）。
 
@@ -97,6 +116,8 @@ async def _seed_agents(db) -> None:
     )
     from app.seed_data import SEED_AGENTS
 
+    # P2-D17：凭证 env-only——seed_data 不再含明文，运行时从 AGENT_AUTH_SECRETS 注入
+    env_secrets = _load_agent_secrets()
     for spec in SEED_AGENTS:
         exists = (await db.execute(select(Agent.id).where(Agent.name == spec["name"]))).first()
         if exists:
@@ -107,7 +128,8 @@ async def _seed_agents(db) -> None:
             adapter_type=spec["adapter_type"], adapter_config=spec["adapter_config"],
             contract_version=spec["contract_version"],
         )
-        secrets_ = spec.get("auth_secrets")
+        # P2-D17：凭证来自 env（seed_data 的 auth_secrets 已全部置 None）
+        secrets_ = env_secrets.get(spec["name"])
         if secrets_:
             agent.auth_config = fernet_encrypt(
                 _json.dumps(secrets_, ensure_ascii=False).encode("utf-8"))
