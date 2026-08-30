@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.agents import _get_agent, _get_allowlist_cidrs
 from app.api.deps import get_current_user, require_role
 from app.core.contracts import diff_manifest, parse_manifest, unique_name
+from app.core.contracts_v2 import AdapterDraft, build_adapter_config, parse_manifest_v2
 from app.core.db import get_db
 from app.core.errors import ApiError, E_NOT_FOUND, E_VALIDATION
 from app.core.http import build_agent_client
@@ -78,6 +79,26 @@ async def discover_agent(agent_id: int, _: User = Staff, db: AsyncSession = Depe
         return ok({"ok": False, "agent_id": agent_id, "base_url": agent.base_url,
                    "errors": ["标准端点响应不是 JSON"], "raw_sample": _truncate(resp.text)})
 
+    # ---- v2 路径（Q2）：contract 段存在即 v2，附带 adapter 草案（软语义：校验失败不抛）----
+    if _is_v2_manifest(payload):
+        manifest, errors = parse_manifest_v2(payload)
+        if manifest is None:
+            return ok({"ok": False, "agent_id": agent_id, "base_url": agent.base_url,
+                       "errors": errors, "raw_sample": _truncate(resp.text)})
+        existing = (await db.execute(select(AgentInterface).where(
+            AgentInterface.agent_id == agent_id))).scalars().all()
+        diff = diff_manifest(manifest, [_iface_to_dict(i) for i in existing])
+        return ok({
+            "ok": True, "agent_id": agent_id, "base_url": agent.base_url,
+            "agent": manifest.agent, "contract_version": manifest.contract_version,
+            "manifest_version": "2.0",
+            "scenes": [s.model_dump() for s in manifest.scenes],
+            "interfaces": [i.model_dump() for i in manifest.interfaces],
+            "adapter": _adapter_block(payload),
+            **diff,
+        })
+
+    # ---- v1 路径（零改动）----
     manifest, errors = parse_manifest(payload)
     if manifest is None:
         return ok({"ok": False, "agent_id": agent_id, "base_url": agent.base_url,
@@ -139,6 +160,61 @@ async def sync_interfaces(agent_id: int, body: InterfaceSyncBody, _: User = Admi
             renamed.append({"from": item.name, "to": name, "path": item.path})
     await db.commit()
     return ok({"created": created, "skipped": skipped, "renamed": renamed})
+
+
+# ---------------- v2 manifest 支持（Q2：adapter 草案生成 + 确认落库） ----------------
+
+def _is_v2_manifest(payload) -> bool:
+    """contract 段存在即视为 v2。契约版本号不强制 "2.0"——4 家现有 agent Q3 才升。
+
+    防御非 dict：discover 里 payload 来自 agent 端点 resp.json()，可能是 list/string/null；
+    非 dict 一律按 v1 走（parse_manifest 抛 pydantic ValidationError → ok=false 不 5xx）。
+    """
+    return isinstance(payload, dict) and isinstance(payload.get("contract"), dict)
+
+
+def _adapter_block(payload: dict) -> dict:
+    """v2 payload → discover 响应的 adapter 块。软语义：硬错误返回 valid=false 不抛（诊断用）。"""
+    draft, errs = build_adapter_config(payload)
+    if draft is None:
+        return {"valid": False, "draft": None, "input_fields": [],
+                "requires_auth": False, "warnings": [], "errors": errs}
+    return {"valid": True, "draft": draft.adapter_config,
+            "input_fields": draft.input_fields, "requires_auth": draft.requires_auth,
+            "warnings": draft.warnings, "errors": []}
+
+
+def _confirm_adapter_check(manifest: dict) -> tuple[AdapterDraft | None, list[str]]:
+    """/agents/{id}/adapter 纯校验部分：无 contract 段或 build 硬错误 → (None, errors)。"""
+    if not isinstance(manifest.get("contract"), dict):
+        return None, ["manifest 无 contract 段（v1），无法生成 adapter；v1 adapter_config 请手工配置"]
+    return build_adapter_config(manifest)
+
+
+class AdapterConfirmBody(BaseModel):
+    manifest: dict  # 完整 v2 manifest（含 contract 段），前端可编辑后回传
+
+
+@router.post("/agents/{agent_id}/adapter")
+async def confirm_adapter(agent_id: int, body: AdapterConfirmBody, _: User = Admin,
+                          db: AsyncSession = Depends(get_db)):
+    """确认 v2 manifest → 服务端权威生成 adapter_config 落库（快捷接入 Q2）。
+
+    body 收完整 v2 manifest（真相源），adapter_config 由 build_adapter_config 生成，
+    Q1 硬错误校验在此兜底（防坏 adapter 入库）；manifest 快照内嵌
+    adapter_config._manifest_v2（ConfigEngine 按 key 读取忽略未知键），为 Q3 单一真相源铺路。
+    """
+    agent = await _get_agent(db, agent_id)
+    draft, errs = _confirm_adapter_check(body.manifest)
+    if draft is None:
+        raise ApiError(E_VALIDATION, "; ".join(errs), 400)
+    agent.adapter_config = {**draft.adapter_config, "_manifest_v2": body.manifest}
+    agent.contract_version = (body.manifest.get("contract_version") or "2.0")[:32]
+    await db.commit()
+    return ok({"agent_id": agent_id, "contract_version": agent.contract_version,
+               "requires_auth": draft.requires_auth,
+               "input_fields": draft.input_fields,
+               "warnings": draft.warnings})
 
 
 # ---------------- 场景清单 ----------------
