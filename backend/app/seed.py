@@ -114,7 +114,7 @@ async def _seed_agents(db) -> None:
     from app.models import (
         Agent, AgentDimensionWeight, AgentInterface, CaseScene, SceneCatalog, TestCase, TestSuite,
     )
-    from app.seed_data import SEED_AGENTS
+    from app.seed_data import MANIFEST_SNAPSHOTS, SEED_AGENTS
 
     # P2-D17：凭证 env-only——seed_data 不再含明文，运行时从 AGENT_AUTH_SECRETS 注入
     env_secrets = _load_agent_secrets()
@@ -125,7 +125,11 @@ async def _seed_agents(db) -> None:
             continue
         agent = Agent(
             name=spec["name"], base_url=spec["base_url"],
-            adapter_type=spec["adapter_type"], adapter_config=spec["adapter_config"],
+            adapter_type=spec["adapter_type"],
+            # Q3：manifest 快照内嵌 adapter_config._manifest_v2（单一真相源，
+            # discover 漂移 diff 读取；ConfigEngine 按 key 读取忽略未知键）
+            adapter_config={**spec["adapter_config"],
+                            "_manifest_v2": MANIFEST_SNAPSHOTS.get(spec["name"], {})},
             contract_version=spec["contract_version"],
         )
         # P2-D17：凭证来自 env（seed_data 的 auth_secrets 已全部置 None）

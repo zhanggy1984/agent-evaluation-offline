@@ -149,3 +149,52 @@ async def test_discover_v2_non_dict_payload_no_500(db, env, monkeypatch):
     resp = await discover_agent(agent.id, _=object(), db=db)
     assert resp["data"]["ok"] is False
     assert resp["data"]["errors"]  # 非空可读错误
+
+
+# ---------------- Q3：discover adapter_drift ----------------
+
+async def _seed_agent_with_snapshot(env, db, payload: dict) -> Agent:
+    """seed 一个带 _manifest_v2 快照的 agent（模拟 Q3 落库形态）。"""
+    agent = make_agent(name="it-q3-drift")
+    agent.adapter_config = {"_manifest_v2": payload}
+    db.add(agent)
+    await db.flush()
+    env.agents.append(agent)
+    await db.commit()
+    return agent
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_discover_v2_drift_empty_when_snapshot_matches(db, env, monkeypatch):
+    """运行时 contract 与已落库快照一致 → adapter_drift=[]。"""
+    agent = await _seed_agent_with_snapshot(env, db, VALID_V2)
+    _patch_http(monkeypatch, VALID_V2)
+    resp = await discover_agent(agent.id, _=object(), db=db)
+    assert resp["data"]["ok"] is True
+    assert resp["data"]["adapter_drift"] == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_discover_v2_drift_reports_agent_change(db, env, monkeypatch):
+    """agent 运行时 contract 多出快照外段 → adapter_drift 报漂移（不阻断）。"""
+    agent = await _seed_agent_with_snapshot(env, db, VALID_V2)
+    drifted = json.loads(json.dumps(VALID_V2))
+    drifted["contract"]["timeout"] = 999
+    drifted["contract"]["extra_segment"] = 1
+    _patch_http(monkeypatch, drifted)
+    resp = await discover_agent(agent.id, _=object(), db=db)
+    assert resp["data"]["ok"] is True  # 漂移提示不阻断发现
+    assert any("多出平台快照外段" in e and "extra_segment" in e
+               for e in resp["data"]["adapter_drift"])
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_discover_v1_runtime_with_snapshot_drift_hint(db, env, monkeypatch):
+    """agent 回退 v1（无 contract 段）+ 平台有快照 → drift 提示「无 contract 段」。"""
+    agent = await _seed_agent_with_snapshot(env, db, VALID_V2)
+    v1 = {k: v for k, v in VALID_V2.items() if k != "contract"}
+    v1["contract_version"] = "1.0"
+    _patch_http(monkeypatch, v1)
+    resp = await discover_agent(agent.id, _=object(), db=db)
+    assert resp["data"]["ok"] is True
+    assert any("无 contract 段" in e for e in resp["data"]["adapter_drift"])

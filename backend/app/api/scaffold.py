@@ -3,7 +3,8 @@
 - POST /agents/{id}/discover（Staff）：调 agent 标准端点 GET /api/contracts → parse →
   diff 现有 agent_interface，返回候选与差异。网络/非200/非JSON/校验失败返回
   `200 + ok=false + errors[] + raw_sample`（诊断用，不抛 5xx）；仅入参错（agent 不存在/
-  停用/SSRF 白名单）抛错。
+  停用/SSRF 白名单）抛错。v2 附带 adapter 草案块（Q2）+ adapter_drift（Q3：运行时
+  contract 段 vs 已落库 _manifest_v2 快照的顶层 key diff，提示漂移不阻断）。
 - POST /agents/{id}/interfaces/sync（Admin）：人工确认后批量补录，幂等按 (method,path)
   skipped；同 agent name 冲突自动改名 _2/_3。
 - POST/GET /agents/{id}/scenes（Admin/登录）：场景清单写读，幂等按 uk_scene。
@@ -79,6 +80,10 @@ async def discover_agent(agent_id: int, _: User = Staff, db: AsyncSession = Depe
         return ok({"ok": False, "agent_id": agent_id, "base_url": agent.base_url,
                    "errors": ["标准端点响应不是 JSON"], "raw_sample": _truncate(resp.text)})
 
+    # Q3：adapter 漂移对比（运行时 contract vs 已落库 _manifest_v2 快照；无快照/无
+    # contract 段返回诊断提示而非硬错误）
+    adapter_drift = _adapter_drift(payload, agent.adapter_config)
+
     # ---- v2 路径（Q2）：contract 段存在即 v2，附带 adapter 草案（软语义：校验失败不抛）----
     if _is_v2_manifest(payload):
         manifest, errors = parse_manifest_v2(payload)
@@ -95,10 +100,11 @@ async def discover_agent(agent_id: int, _: User = Staff, db: AsyncSession = Depe
             "scenes": [s.model_dump() for s in manifest.scenes],
             "interfaces": [i.model_dump() for i in manifest.interfaces],
             "adapter": _adapter_block(payload),
+            "adapter_drift": adapter_drift,
             **diff,
         })
 
-    # ---- v1 路径（零改动）----
+    # ---- v1 路径（零改动 + adapter_drift 诊断）----
     manifest, errors = parse_manifest(payload)
     if manifest is None:
         return ok({"ok": False, "agent_id": agent_id, "base_url": agent.base_url,
@@ -112,6 +118,7 @@ async def discover_agent(agent_id: int, _: User = Staff, db: AsyncSession = Depe
         "agent": manifest.agent, "contract_version": manifest.contract_version,
         "scenes": [s.model_dump() for s in manifest.scenes],
         "interfaces": [i.model_dump() for i in manifest.interfaces],
+        "adapter_drift": adapter_drift,
         **diff,
     })
 
@@ -182,6 +189,42 @@ def _adapter_block(payload: dict) -> dict:
     return {"valid": True, "draft": draft.adapter_config,
             "input_fields": draft.input_fields, "requires_auth": draft.requires_auth,
             "warnings": draft.warnings, "errors": []}
+
+
+def _contract_drift(runtime_contract, snapshot_contract) -> list[str]:
+    """contract 段漂移：agent 运行时 manifest vs 平台已落库快照的 contract 顶层 key diff（Q3）。
+
+    返回可读消息列表；无差异返回 []。只做顶层 key diff（防过度敏感），prepare 步骤名 /
+    request path 等细粒度语义由快照 build 的 adapter 兜底（行为以平台为准）。
+    """
+    if not isinstance(snapshot_contract, dict):
+        return ["平台无 manifest 快照（手工配置 adapter 或非 v2 seed），无法对比漂移"]
+    if not isinstance(runtime_contract, dict):
+        return [f"agent 运行时 manifest 无 contract 段（类型 {type(runtime_contract).__name__}）"]
+    missing = sorted(set(snapshot_contract) - set(runtime_contract))
+    added = sorted(set(runtime_contract) - set(snapshot_contract))
+    out = []
+    if missing:
+        out.append(f"agent 运行时 contract 缺少平台快照段: {missing}")
+    if added:
+        out.append(f"agent 运行时 contract 多出平台快照外段: {added}")
+    return out
+
+
+def _adapter_drift(payload, stored_config) -> list[str]:
+    """discover 时对比：payload 运行时 contract vs 已落库 adapter_config._manifest_v2 快照。
+
+    无快照返回提示而非硬错误（可经确认端点重新落库覆盖）；无 contract 段（v1）视为漂移。
+    防御非 dict（agent 端点返回 list/string）：payload 或 stored_config 非 dict 时按
+    「无 contract 段 / 无快照」处理，绝不 500。
+    """
+    runtime_contract = payload.get("contract") if isinstance(payload, dict) else None
+    if isinstance(stored_config, dict):
+        snapshot_contract = stored_config.get("_manifest_v2", {}).get("contract") \
+            if isinstance(stored_config.get("_manifest_v2", {}), dict) else None
+    else:
+        snapshot_contract = None
+    return _contract_drift(runtime_contract, snapshot_contract)
 
 
 def _confirm_adapter_check(manifest: dict) -> tuple[AdapterDraft | None, list[str]]:

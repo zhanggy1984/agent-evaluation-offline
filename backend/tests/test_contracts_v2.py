@@ -7,8 +7,9 @@
 4. 元信息输出（input_fields / requires_auth / warnings）
 5. v1 兼容：现有 parse_manifest 对 v2 payload 透明
 
-4 家 v1 manifest + v2 contract 段内联自 verify_manifest_v2.py（转正后该脚本可删，
-测试自包含）。expected 直接从 app.seed_data 引用（单一真相源）。
+4 家完整 v2 manifest 直接引用 seed_data.MANIFEST_SNAPSHOTS（Q3 单一真相源，杜绝内联双维护），
+`_payload` 深拷贝防止测试原地修改污染快照。迁移回归见 test_seed_data_legacy.py
+（派生 adapter_config == 迁移前手写值，逐字符）。
 """
 import copy
 
@@ -17,141 +18,12 @@ import pytest
 from app.core.contracts import parse_manifest
 from app.core.contracts_v2 import build_adapter_config, parse_manifest_v2
 from app.seed_data import (
-    CC_ADAPTER_CFG, CS_ADAPTER_CFG, GQ_ADAPTER_CFG, GQ_LIBRARY_ID,
+    CC_ADAPTER_CFG, CS_ADAPTER_CFG, GQ_ADAPTER_CFG, MANIFEST_SNAPSHOTS,
     SP_ADAPTER_CFG,
 )
 
-# ---------------- 4 家 v1 manifest（内联自 4 家 agent contracts.py） ----------------
-
-V1_MANIFESTS = {
-    "customer-service": {
-        "agent": "customer-service", "contract_version": "1.0",
-        "interfaces": [
-            {"name": "chat", "path": "/api/v1/sessions/{sid}/messages", "method": "POST",
-             "contract_type": "sse", "llm": True, "description": "客服会话对话"},
-            {"name": "login", "path": "/api/v1/auth/login", "method": "POST",
-             "llm": False, "description": "会话鉴权"},
-        ],
-        "scenes": [
-            {"tag": "greeting", "description": "问候与闲聊"},
-            {"tag": "order_query", "description": "订单查询"},
-        ],
-    },
-    "contract-check": {
-        "agent": "contract-check", "contract_version": "1.0",
-        "interfaces": [
-            {"name": "result", "path": "/api/tasks/{task_id}/result", "method": "GET",
-             "contract_type": "sync", "llm": True, "description": "合同校验结果"},
-            {"name": "upload", "path": "/api/files/upload", "method": "POST",
-             "llm": False, "description": "上传合同文件"},
-        ],
-        "scenes": [
-            {"tag": "missing_date", "description": "缺失生效日期"},
-            {"tag": "single_party", "description": "单方签署"},
-        ],
-    },
-    "smart-procurement": {
-        "agent": "smart-procurement", "contract_version": "1.0",
-        "interfaces": [
-            {"name": "chat", "path": "/api/v1/reviews/{review_id}/chat", "method": "POST",
-             "contract_type": "sse", "llm": True, "description": "评审对话"},
-            {"name": "score", "path": "/api/v1/reviews/{review_id}/score", "method": "POST",
-             "contract_type": "sse", "llm": True, "description": "AI 评分"},
-            {"name": "login", "path": "/api/v1/auth/login", "method": "POST",
-             "llm": False, "description": "专家/管理员鉴权"},
-        ],
-        "scenes": [
-            {"tag": "tech_scheme", "description": "技术方案评审"},
-            {"tag": "price", "description": "报价评审"},
-        ],
-    },
-    "good-question": {
-        "agent": "good-question", "contract_version": "1.0",
-        "interfaces": [
-            {"name": "chat", "path": "/api/chat/{session_id}", "method": "POST",
-             "contract_type": "sse", "llm": True, "description": "知识问答"},
-            {"name": "login", "path": "/api/auth/login", "method": "POST",
-             "llm": False, "description": "会话鉴权"},
-        ],
-        "scenes": [
-            {"tag": "greeting", "description": "问候与闲聊"},
-            {"tag": "doc_qa", "description": "文档检索问答"},
-        ],
-    },
-}
-
-# ---------------- 4 家 v2 contract 段（内联自 verify_manifest_v2.py，由 seed_data ADAPTER_CFG 反写） ----------------
-
-V2_CONTRACTS = {
-    "customer-service": {
-        "type": "sse", "timeout": 120,
-        "prepare": [
-            {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
-             "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
-             "extract": {"token": "access_token"}},
-            {"name": "session", "method": "POST", "path": "/api/v1/sessions",
-             "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
-             "extract": {"id": "session_id"}},
-        ],
-        "request": {
-            "path": "/api/v1/sessions/{{prepare.session.id}}/messages", "method": "POST",
-            "headers": {"Authorization": "Bearer {{prepare.login.token}}",
-                        "Content-Type": "application/json"},
-            "body": {"content": "{{input.content}}"},
-        },
-    },
-    "contract-check": {
-        "type": "sync", "timeout": 300,
-        "prepare": [
-            {"name": "upload", "method": "POST", "path": "/api/files/upload",
-             "files": {"file": "{{input.file_path}}"},
-             "extract": {"task_id": "task_id"}},
-            {"name": "wait_done", "poll": {
-                "path": "/api/tasks/{{prepare.upload.task_id}}",
-                "until": {"status": ["WAITING_REVIEW", "SUCCESS", "FAILED", "CANCELLED"]},
-                "interval": 2, "timeout": 300}},
-        ],
-        "request": {"path": "/api/tasks/{{prepare.upload.task_id}}/result", "method": "GET"},
-    },
-    "smart-procurement": {
-        "type": "sse", "timeout": 120,
-        "prepare": [
-            {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
-             "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
-             "extract": {"token": "access_token"}},
-            {"name": "review", "method": "POST", "path": "/api/v1/reviews",
-             "headers": {"Authorization": "Bearer {{prepare.login.token}}",
-                         "Content-Type": "application/json"},
-             "body": {"bid_id": "{{input.bid_id}}", "dimension_id": "{{input.dimension_id}}"},
-             "extract": {"review_id": "review_id"}},
-        ],
-        "request": {
-            "path": "/api/v1/reviews/{{prepare.review.review_id}}/chat", "method": "POST",
-            "headers": {"Authorization": "Bearer {{prepare.login.token}}",
-                        "Content-Type": "application/json"},
-            "body": {"question": "{{input.question}}"},
-        },
-    },
-    "good-question": {
-        "type": "sse", "timeout": 180,
-        "prepare": [
-            {"name": "login", "method": "POST", "path": "/api/auth/login",
-             "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
-             "extract": {"token": "access_token"}},
-            {"name": "session", "method": "POST", "path": "/api/sessions",
-             "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
-             "body": {"library_id": GQ_LIBRARY_ID},
-             "extract": {"id": "id"}},
-        ],
-        "request": {
-            "path": "/api/chat/{{prepare.session.id}}", "method": "POST",
-            "headers": {"Authorization": "Bearer {{prepare.login.token}}",
-                        "Content-Type": "application/json"},
-            "body": {"content": "{{input.content}}", "stream": True},
-        },
-        "sse": {"field_map": {"token": "answer"}},
-    },
-}
+# ---------------- 4 家完整 v2 manifest（单一真相源 = seed_data.MANIFEST_SNAPSHOTS） ----------------
+# 快照含 interfaces + scenes + contract 段，与 4 家 agent 侧 GET /api/contracts 同构（Q3）。
 
 EXPECTED = {
     "customer-service": CS_ADAPTER_CFG,
@@ -162,8 +34,8 @@ EXPECTED = {
 
 
 def _payload(name: str) -> dict:
-    # 深拷贝：测试内对 payload 的原地修改（del request / 改 type 等）不得污染共享样例
-    return {**copy.deepcopy(V1_MANIFESTS[name]), "contract": copy.deepcopy(V2_CONTRACTS[name])}
+    # 深拷贝：测试内对 payload 的原地修改（del request / 改 type 等）不得污染共享快照
+    return copy.deepcopy(MANIFEST_SNAPSHOTS[name])
 
 
 # ---------------- 1. schema 模型校验 ----------------
@@ -341,5 +213,5 @@ def test_v1_parse_manifest_accepts_v2_payload():
         m, errs = parse_manifest(_payload(name))
         assert errs == [], f"{name}: v2 payload 被 v1 parse_manifest 拒绝 → {errs}"
         assert m is not None
-        assert len(m.interfaces) == len(V1_MANIFESTS[name]["interfaces"])
-        assert [s.tag for s in m.scenes] == [s["tag"] for s in V1_MANIFESTS[name]["scenes"]]
+        assert len(m.interfaces) == len(MANIFEST_SNAPSHOTS[name]["interfaces"])
+        assert [s.tag for s in m.scenes] == [s["tag"] for s in MANIFEST_SNAPSHOTS[name]["scenes"]]

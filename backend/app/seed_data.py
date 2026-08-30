@@ -1,8 +1,9 @@
-"""4.2 seed 数据：四家自研 agent 的声明式 adapter_config 单一来源。
+"""4.2 seed 数据：四家自研 agent 的 v2 manifest 快照（单一真相源）+ 派生 adapter_config。
 
-adapter_type="config" 的 adapter_config 由 ConfigEngine（app/adapters/engine.py）解释，
-模板域：{case.input.*} / {auth.*} / {prepare.*}。四家契约已在 4.1 逐家真实 run 验证
-（cs run30 / cc run31 / gq run32）。
+Q3 起真相源 = MANIFEST_SNAPSHOTS（与 agent 侧 /api/contracts 同构的 v2 manifest，含
+contract 段）。adapter_config 由 build_adapter_config 派生（Q1 等价性：与迁移前手写值
+逐字符相等），seed.py 写库时内嵌 _manifest_v2 快照，discover 时与 agent 运行时对比
+contract 段抓漂移（scaffold._adapter_drift）。模板域：{case.input.*} / {auth.*} / {prepare.*}。
 
 用途：
 - seed.py::_seed_agents 按 SEED_AGENTS 幂等建 agent + interface + Fernet 凭证 + 示例 suite/case
@@ -13,6 +14,8 @@ adapter_type="config" 的 adapter_config 由 ConfigEngine（app/adapters/engine.
 """
 
 from datetime import datetime
+
+from app.core.contracts_v2 import build_adapter_config
 
 # 结构维度指标（judge 增强后语义维度开启：factuality/reasoning_quality 由 judge 判分；
 # 键名必须用标准维度码 reasoning_quality，曾误写 "reasoning" 导致该维度被静默跳过）
@@ -239,92 +242,181 @@ REF_SP_BID024 = """第一章  公司概况
 
 合同争议解决方式、适用法律及管辖约定，我方同意按合同条款执行。我方将按合同约定的免责条款执行，因不可抗力等法定情形导致的延误按约定处理。"""
 
-# ── customer-service：SSE，login→建 session→messages，事件名已统一（无需 field_map）──
-CS_ADAPTER_CFG = {
-    "contract_type": "sse",
-    "timeout": 120,
-    "prepare": [
-        {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
-         "body": {"username": "{auth.username}", "password": "{auth.password}"},
-         "extract": {"token": "access_token"}},
-        # cs 建 session 返回 {session_id}（非 id）：extract 指定映射
-        {"name": "session", "method": "POST", "path": "/api/v1/sessions",
-         "headers": {"Authorization": "Bearer {prepare.login.token}"},
-         "extract": {"id": "session_id"}},
-    ],
-    "request": {
-        "path": "/api/v1/sessions/{prepare.session.id}/messages", "method": "POST",
-        "headers": {"Authorization": "Bearer {prepare.login.token}",
-                    "Content-Type": "application/json"},
-        "body": {"content": "{case.input.content}"},
-    },
-}
+# ====================================================================
+# 单一真相源：4 家 v2 manifest 快照 + 派生 adapter_config（Q3）
+# 快照与 agent 侧 GET /api/contracts 同构（agent + contract_version + interfaces +
+# scenes + contract 段）。adapter_config 由 build_adapter_config 派生（Q1 等价性回归
+# 锁住与迁移前手写值逐字符相等），seed.py 写库时内嵌 _manifest_v2，discover 时与 agent
+# 运行时 contract 段对比抓漂移（scaffold._adapter_drift）。
+# ====================================================================
 
-# ── contract-check：同步 JSON，multipart 上传→轮询 WAITING_REVIEW→取 result，无鉴权 ──
-CC_ADAPTER_CFG = {
-    "contract_type": "sync",
-    "timeout": 300,
-    "prepare": [
-        {"name": "upload", "method": "POST", "path": "/api/files/upload",
-         "files": {"file": "{case.input.file_path}"},
-         "extract": {"task_id": "task_id"}},
-        # 决策 #41：不 resume，取 WAITING_REVIEW 时的 result 打分（不产生假 review 记录）
-        {"name": "wait_done", "poll": {
-            "path": "/api/tasks/{prepare.upload.task_id}",
-            "until": {"status": ["WAITING_REVIEW", "SUCCESS", "FAILED", "CANCELLED"]},
-            "interval": 2, "timeout": 300}},
-    ],
-    "request": {"path": "/api/tasks/{prepare.upload.task_id}/result", "method": "GET"},
-}
-
-# ── good-question：SSE，login→建 session→chat，token 事件需 field_map 映射为 answer ──
 GQ_LIBRARY_ID = 3  # 现存空文档库（无文档，检索空亦合法）；原 6 迁移后 id 漂移不存在，2026-08-25 修正
-GQ_ADAPTER_CFG = {
-    "contract_type": "sse",
-    "timeout": 180,
-    "prepare": [
-        {"name": "login", "method": "POST", "path": "/api/auth/login",
-         "body": {"username": "{auth.username}", "password": "{auth.password}"},
-         "extract": {"token": "access_token"}},
-        {"name": "session", "method": "POST", "path": "/api/sessions",
-         "headers": {"Authorization": "Bearer {prepare.login.token}"},
-         "body": {"library_id": GQ_LIBRARY_ID},
-         "extract": {"id": "id"}},
-    ],
-    "request": {
-        "path": "/api/chat/{prepare.session.id}", "method": "POST",
-        "headers": {"Authorization": "Bearer {prepare.login.token}",
-                    "Content-Type": "application/json"},
-        "body": {"content": "{case.input.content}", "stream": True},
+
+MANIFEST_SNAPSHOTS = {
+    # ── customer-service：SSE，login→建 session→messages，事件名已统一（无需 field_map）──
+    "customer-service": {
+        "agent": "customer-service", "contract_version": "2.0",
+        "interfaces": [
+            {"name": "chat", "path": "/api/v1/sessions/{sid}/messages", "method": "POST",
+             "contract_type": "sse", "llm": True,
+             "description": "客服会话对话（SSE 流式，透出 token/usage/done；token 事件含 content+delta 双字段，平台 field_map 可映射 answer）"},
+            {"name": "login", "path": "/api/v1/auth/login", "method": "POST",
+             "llm": False, "description": "会话鉴权（辅助接口）"},
+        ],
+        "scenes": [
+            {"tag": "greeting", "description": "问候与闲聊"},
+            {"tag": "order_query", "description": "订单查询"},
+            {"tag": "after_sales", "description": "售后服务（退换/退款等）"},
+            {"tag": "human_handoff", "description": "转人工客服"},
+        ],
+        "contract": {
+            "type": "sse", "timeout": 120,
+            "prepare": [
+                {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
+                 "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
+                 "extract": {"token": "access_token"}},
+                # cs 建 session 返回 {session_id}（非 id）：extract 指定映射
+                {"name": "session", "method": "POST", "path": "/api/v1/sessions",
+                 "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
+                 "extract": {"id": "session_id"}},
+            ],
+            "request": {
+                "path": "/api/v1/sessions/{{prepare.session.id}}/messages", "method": "POST",
+                "headers": {"Authorization": "Bearer {{prepare.login.token}}",
+                            "Content-Type": "application/json"},
+                "body": {"content": "{{input.content}}"},
+            },
+        },
     },
-    "sse": {"field_map": {"token": "answer"}},  # gq 终答事件名是 token 非 answer
+    # ── contract-check：同步 JSON，multipart 上传→轮询 WAITING_REVIEW→取 result，无鉴权 ──
+    "contract-check": {
+        "agent": "contract-check", "contract_version": "2.0",
+        "interfaces": [
+            {"name": "result", "path": "/api/tasks/{task_id}/result", "method": "GET",
+             "contract_type": "sync", "llm": True,
+             "description": "合同校验结果（同步 JSON，透出 answer/usage/timing/tool_calls）"},
+            {"name": "upload", "path": "/api/files/upload", "method": "POST",
+             "llm": False, "description": "上传合同文件（辅助接口）"},
+        ],
+        "scenes": [
+            {"tag": "missing_date", "description": "缺失生效日期"},
+            {"tag": "single_party", "description": "单方签署"},
+            {"tag": "scanned_pdf", "description": "扫描件识别"},
+            {"tag": "conflict", "description": "条款冲突"},
+            {"tag": "genuine", "description": "合规合同"},
+        ],
+        "contract": {
+            "type": "sync", "timeout": 300,
+            "prepare": [
+                {"name": "upload", "method": "POST", "path": "/api/files/upload",
+                 "files": {"file": "{{input.file_path}}"},
+                 "extract": {"task_id": "task_id"}},
+                # 决策 #41：不 resume，取 WAITING_REVIEW 时的 result 打分（不产生假 review 记录）
+                {"name": "wait_done", "poll": {
+                    "path": "/api/tasks/{{prepare.upload.task_id}}",
+                    "until": {"status": ["WAITING_REVIEW", "SUCCESS", "FAILED", "CANCELLED"]},
+                    "interval": 2, "timeout": 300}},
+            ],
+            "request": {"path": "/api/tasks/{{prepare.upload.task_id}}/result", "method": "GET"},
+        },
+    },
+    # ── smart-procurement：SSE，login→建评审→chat；answer{delta}/usage(全名)/done 口径一致 ──
+    "smart-procurement": {
+        "agent": "smart-procurement", "contract_version": "2.0",
+        "interfaces": [
+            {"name": "chat", "path": "/api/v1/reviews/{review_id}/chat", "method": "POST",
+             "contract_type": "sse", "llm": True,
+             "description": "评审对话（SSE 流式，透出 answer/usage/done）"},
+            {"name": "score", "path": "/api/v1/reviews/{review_id}/score", "method": "POST",
+             "contract_type": "sse", "llm": True,
+             "description": "AI 评分（SSE，含 tool_call knowledge_retrieval；报价维度走 price_calc，run 前需用例规避）"},
+            {"name": "login", "path": "/api/v1/auth/login", "method": "POST",
+             "llm": False, "description": "专家/管理员鉴权（辅助接口）"},
+        ],
+        "scenes": [
+            {"tag": "tech_scheme", "description": "技术方案评审"},
+            {"tag": "price", "description": "报价评审"},
+            {"tag": "conflict_interest", "description": "利益冲突检测"},
+            {"tag": "collusion", "description": "围串标检测"},
+        ],
+        "contract": {
+            "type": "sse", "timeout": 120,
+            "prepare": [
+                {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
+                 "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
+                 "extract": {"token": "access_token"}},
+                # 评审需 FROZEN 标书 + 专家账号（display_name==expert.name 反查 expert_id）
+                # review 每次新建会堆积（prepare 无幂等），测试环境定期清库（决策 58）
+                {"name": "review", "method": "POST", "path": "/api/v1/reviews",
+                 "headers": {"Authorization": "Bearer {{prepare.login.token}}",
+                             "Content-Type": "application/json"},
+                 "body": {"bid_id": "{{input.bid_id}}", "dimension_id": "{{input.dimension_id}}"},
+                 "extract": {"review_id": "review_id"}},
+            ],
+            "request": {
+                "path": "/api/v1/reviews/{{prepare.review.review_id}}/chat", "method": "POST",
+                "headers": {"Authorization": "Bearer {{prepare.login.token}}",
+                            "Content-Type": "application/json"},
+                "body": {"question": "{{input.question}}"},
+            },
+            # sse 无需 field_map：sp 的 answer{delta} / usage{prompt,completion,total_tokens} /
+            # done{content} 与统一口径一致
+        },
+    },
+    # ── good-question：SSE，login→建 session→chat，token 事件需 field_map 映射为 answer ──
+    "good-question": {
+        "agent": "good-question", "contract_version": "2.0",
+        "interfaces": [
+            {"name": "chat", "path": "/api/chat/{session_id}", "method": "POST",
+             "contract_type": "sse", "llm": True,
+             "description": "知识问答（SSE 流式，LLM 自主决定是否检索，检索经 tool_call/sources 事件回传；token 事件经 field_map 映射 answer）"},
+            {"name": "login", "path": "/api/auth/login", "method": "POST",
+             "llm": False, "description": "会话鉴权（辅助接口）"},
+        ],
+        "scenes": [
+            {"tag": "greeting", "description": "问候与闲聊"},
+            {"tag": "doc_qa", "description": "文档检索问答"},
+            {"tag": "no_hit", "description": "无命中/意图不明兜底（检索空时如实回复或引导澄清）"},
+            {"tag": "summarize", "description": "文档内容总结"},
+        ],
+        "contract": {
+            "type": "sse", "timeout": 180,
+            "prepare": [
+                {"name": "login", "method": "POST", "path": "/api/auth/login",
+                 "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
+                 "extract": {"token": "access_token"}},
+                {"name": "session", "method": "POST", "path": "/api/sessions",
+                 "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
+                 "body": {"library_id": GQ_LIBRARY_ID},
+                 "extract": {"id": "id"}},
+            ],
+            "request": {
+                "path": "/api/chat/{{prepare.session.id}}", "method": "POST",
+                "headers": {"Authorization": "Bearer {{prepare.login.token}}",
+                            "Content-Type": "application/json"},
+                "body": {"content": "{{input.content}}", "stream": True},
+            },
+            "sse": {"field_map": {"token": "answer"}},  # gq 终答事件名是 token 非 answer
+        },
+    },
 }
 
-# ── smart-procurement：SSE，login→建评审→chat；answer{delta}/usage(全名)/done 口径一致 ──
-SP_ADAPTER_CFG = {
-    "contract_type": "sse",
-    "timeout": 120,
-    "prepare": [
-        {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
-         "body": {"username": "{auth.username}", "password": "{auth.password}"},
-         "extract": {"token": "access_token"}},
-        # 评审需 FROZEN 标书 + 专家账号（display_name==expert.name 反查 expert_id）
-        # review 每次新建会堆积（prepare 无幂等），测试环境定期清库（决策 58）
-        {"name": "review", "method": "POST", "path": "/api/v1/reviews",
-         "headers": {"Authorization": "Bearer {prepare.login.token}",
-                     "Content-Type": "application/json"},
-         "body": {"bid_id": "{case.input.bid_id}", "dimension_id": "{case.input.dimension_id}"},
-         "extract": {"review_id": "review_id"}},
-    ],
-    "request": {
-        "path": "/api/v1/reviews/{prepare.review.review_id}/chat", "method": "POST",
-        "headers": {"Authorization": "Bearer {prepare.login.token}",
-                    "Content-Type": "application/json"},
-        "body": {"question": "{case.input.question}"},
-    },
-    # sse 无需 field_map：sp 的 answer{delta} / usage{prompt,completion,total_tokens} /
-    # done{content} 与统一口径一致
-}
+
+def _derive_adapter(name: str) -> dict:
+    """manifest 快照 → adapter_config（原始，不含 _manifest_v2；快照由 seed.py 写库时内嵌）。
+
+    派生失败（快照与 build_adapter_config 契约不符）属于代码 bug，import 即炸而非运行时静默。
+    """
+    draft, errs = build_adapter_config(MANIFEST_SNAPSHOTS[name])
+    if draft is None:
+        raise RuntimeError(f"seed manifest 快照生成 adapter 失败: {name} -> {errs}")
+    return draft.adapter_config
+
+
+CS_ADAPTER_CFG = _derive_adapter("customer-service")
+CC_ADAPTER_CFG = _derive_adapter("contract-check")
+SP_ADAPTER_CFG = _derive_adapter("smart-procurement")
+GQ_ADAPTER_CFG = _derive_adapter("good-question")
 
 # ── 四家完整 seed 定义（seed.py::_seed_agents 消费）──
 SEED_AGENTS = [
@@ -333,10 +425,10 @@ SEED_AGENTS = [
         "base_url": "http://host.docker.internal:8000",
         "adapter_type": "config",
         "adapter_config": CS_ADAPTER_CFG,
-        "contract_version": "1.0",
+        "contract_version": "2.0",
         "interfaces": [
             {"name": "chat", "path": "/api/v1/sessions/{sid}/messages", "method": "POST",
-             "contract_type": "sse", "contract_version": "1.0"},
+             "contract_type": "sse", "contract_version": "2.0"},
         ],
         "auth_secrets": None,  # P2-D17：凭证不入库明文，seed 时从 AGENT_AUTH_SECRETS env 注入
         "scenes": [
@@ -373,10 +465,10 @@ SEED_AGENTS = [
         "base_url": "http://host.docker.internal:8001",
         "adapter_type": "config",
         "adapter_config": CC_ADAPTER_CFG,
-        "contract_version": "1.0",
+        "contract_version": "2.0",
         "interfaces": [
             {"name": "result", "path": "/api/tasks/{task_id}/result", "method": "GET",
-             "contract_type": "sync", "contract_version": "1.0"},
+             "contract_type": "sync", "contract_version": "2.0"},
         ],
         "auth_secrets": None,
         "scenes": [
@@ -404,10 +496,10 @@ SEED_AGENTS = [
         "base_url": "http://host.docker.internal:8002",
         "adapter_type": "config",
         "adapter_config": SP_ADAPTER_CFG,
-        "contract_version": "1.0",
+        "contract_version": "2.0",
         "interfaces": [
             {"name": "chat", "path": "/api/v1/reviews/{review_id}/chat", "method": "POST",
-             "contract_type": "sse", "contract_version": "1.0"},
+             "contract_type": "sse", "contract_version": "2.0"},
         ],
         "auth_secrets": None,  # P2-D17：凭证不入库明文，seed 时从 AGENT_AUTH_SECRETS env 注入
         "scenes": [
@@ -443,10 +535,10 @@ SEED_AGENTS = [
         "base_url": "http://host.docker.internal:8080",
         "adapter_type": "config",
         "adapter_config": GQ_ADAPTER_CFG,
-        "contract_version": "1.0",
+        "contract_version": "2.0",
         "interfaces": [
             {"name": "chat", "path": "/api/chat/{session_id}", "method": "POST",
-             "contract_type": "sse", "contract_version": "1.0"},
+             "contract_type": "sse", "contract_version": "2.0"},
         ],
         "auth_secrets": None,  # P2-D17：凭证不入库明文，seed 时从 AGENT_AUTH_SECRETS env 注入
         "scenes": [
