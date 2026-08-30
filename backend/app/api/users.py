@@ -40,6 +40,9 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
 ):
     page_size = min(max(page_size, 1), 100)
+    # P2-E1：page_num 钳制下限 1——负值/0 产生负 offset，MySQL `LIMIT -120, 20` 语法错误 500；
+    # 超大 page_num 无害（返回空页，只多查一次 count）
+    page_num = max(page_num, 1)
     stmt = select(User)
     if role:
         stmt = stmt.where(User.role == role)
