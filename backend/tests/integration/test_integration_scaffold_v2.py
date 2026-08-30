@@ -126,6 +126,7 @@ async def test_discover_v2_returns_adapter_block(db, env, monkeypatch):
     assert resp["data"]["adapter"]["valid"] is True
     assert resp["data"]["adapter"]["draft"]["request"]["body"] == {"content": "{case.input.content}"}
     assert resp["data"]["interfaces"]  # diff 数据照常返回
+    assert resp["data"]["manifest"] == VALID_V2  # Q7：原始 manifest（前端编辑回传）
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -250,6 +251,7 @@ async def test_skeleton_returns_suite_cases(db, env):
     assert len(data["cases"]) == 1  # VALID_V2: 1 llm 接口 + 1 scene
     c = data["cases"][0]
     assert c["name"] == "greeting-chat"
+    assert c["interface_name"] == "chat"  # Q7：落库按名匹配 AgentInterface.id
     assert c["input_type"] == "text"
     assert c["input"]["content"] == "你好"  # probe_input merge
     assert c["expected"] == {}  # 业务知识留空

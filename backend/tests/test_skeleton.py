@@ -65,6 +65,8 @@ def test_case_defaults_expected_empty():
 def test_case_name_scene_interface():
     sk = build_case_skeleton(["content"], interface_name="chat", scene_tag="greeting")
     assert sk["name"] == "greeting-chat"
+    assert sk["interface_name"] == "chat"  # Q7：落库时按名匹配 AgentInterface.id
+    assert sk["scene_tag"] == "greeting"   # Q7：落库时 CaseCreate.scenes 打标
 
 
 def test_case_fresh_lists_not_shared():

@@ -102,6 +102,7 @@ async def discover_agent(agent_id: int, _: User = Staff, db: AsyncSession = Depe
             "interfaces": [i.model_dump() for i in manifest.interfaces],
             "adapter": _adapter_block(payload),
             "adapter_drift": adapter_drift,
+            "manifest": payload,  # Q7：原始 manifest（前端 Step3 编辑回传 confirmAdapter）
             **diff,
         })
 

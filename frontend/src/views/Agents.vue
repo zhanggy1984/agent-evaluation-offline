@@ -7,6 +7,8 @@
     <!-- 列表 -->
     <div class="toolbar">
       <el-button v-if="isAdmin" type="primary" @click="openCreate">新建 Agent</el-button>
+      <!-- Q7：快捷接入向导入口（Admin-only：createAgent/adapter 确认/凭证/sync 后端均 Admin 闸门） -->
+      <el-button v-if="isAdmin" type="success" @click="router.push('/agents/onboarding')">快捷接入</el-button>
       <el-button :loading="loading" @click="load">刷新</el-button>
     </div>
     <el-table :data="agents" border size="small" v-loading="loading">

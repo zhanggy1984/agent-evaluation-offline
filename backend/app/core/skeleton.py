@@ -68,6 +68,8 @@ def build_case_skeleton(input_fields: list[str], probe_input: dict | None = None
         name = f"{scene_tag}-{interface_name}"
     return {
         "name": name,
+        "interface_name": interface_name,  # Q7：落库时按名匹配 AgentInterface.id
+        "scene_tag": scene_tag,            # Q7：落库时 CaseCreate.scenes 打标
         "input_type": _input_type(input_),
         "input": input_,
         "expected": {},
