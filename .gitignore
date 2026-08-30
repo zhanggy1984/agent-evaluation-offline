@@ -28,6 +28,8 @@ __pycache__/
 backend/verify_*.py
 # 例外：verify_fresh_start.py 是空库重建冒烟矩阵（官方验证脚本，凭据走 env 不入库），纳入版本控制
 !backend/verify_fresh_start.py
+# 例外：verify_manifest_v2.py 是「URL 即接入」manifest v2 方案可行性验证（保留待转正，转正后并入 tests）
+!backend/verify_manifest_v2.py
 backend/run_*.py
 backend/trigger_*.py
 backend/expand_*.py
