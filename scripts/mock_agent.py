@@ -18,7 +18,35 @@ def now_ts() -> int:
     return int(time.time() * 1000)
 
 
+# Q6：v2 manifest 标准端点（GET /api/contracts），供 verify_agent.py / wizard 自测消费。
+# 仿 customer-service 简化版：SSE、无 prepare、input 域仅 content。
+MANIFEST = {
+    "agent": "mock", "contract_version": "2.0",
+    "interfaces": [
+        {"name": "chat", "path": "/v1/chat", "method": "POST",
+         "contract_type": "sse", "llm": True, "description": "对话评测接口（mock SSE）"},
+    ],
+    "scenes": [{"tag": "greeting", "description": "问候与闲聊"}],
+    "contract": {
+        "type": "sse", "timeout": 120,
+        "request": {"path": "/v1/chat", "method": "POST",
+                    "body": {"query": "{{input.content}}"}},
+    },
+}
+
+
 class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/api/contracts":
+            self.send_error(404)
+            return
+        body = json.dumps(MANIFEST, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         if self.path != "/v1/chat":
             self.send_error(404)
@@ -42,15 +70,18 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         emit("meta", {"agent": "mock", "model": "mock-model", "interface": "/v1/chat",
-                      "contract_version": "1.0", "git_sha": "mock-sha", "knowledge_version": "kv-1",
+                      "contract_version": "2.0", "git_sha": "mock-sha", "knowledge_version": "kv-1",
                       "ts": now_ts()})
         time.sleep(0.1)
-        emit("reasoning", {"delta": "先分析用户问题，检索相关文档。", "ts": now_ts()})
+        # §3.3：reasoning/answer 双字段（content+delta）并存，单帧流式相等
+        emit("reasoning", {"content": "先分析用户问题，检索相关文档。",
+                           "delta": "先分析用户问题，检索相关文档。", "ts": now_ts()})
         emit("tool_call", {"id": "t-1", "name": "search", "args": {"q": query},
                            "result": {"hits": ["doc-1", "doc-2"]}, "status": "ok", "ts": now_ts()})
-        emit("answer", {"delta": "你好，", "ts": now_ts()})
+        emit("answer", {"content": "你好，", "delta": "你好，", "ts": now_ts()})
         time.sleep(0.05)
-        emit("answer", {"delta": "这是 mock agent 的最终回答。", "ts": now_ts()})
+        emit("answer", {"content": "这是 mock agent 的最终回答。",
+                        "delta": "这是 mock agent 的最终回答。", "ts": now_ts()})
         emit("usage", {"prompt_tokens": 12, "completion_tokens": 9,
                        "total_tokens": 21, "ts": now_ts()})
         emit("done", {"ts": now_ts()})

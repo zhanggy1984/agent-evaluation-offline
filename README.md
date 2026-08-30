@@ -76,7 +76,7 @@ agent 提测上线前，质量缺乏系统化量化与呈现：
 ## 三、技术闪光点
 
 ### 1. 强契约驱动 + 平台定标准（agent 只适配，平台零特判）
-平台定义标准契约（SSE 变体：`meta`/`usage`/`done` 必选 + `id:` 帧 + data 内 `ts`；同步变体：`usage`/`timing`/`meta`，不验 done），接入方 agent 按标准收敛改造（标准契约 + `POST /admin/reset` 造数重置接口 + 鉴权 env 开关）。**平台侧禁止 `if agent` 特判**——发现/校验只认标准契约信号，契约探测不达标直接拦截报错，保证任意新 agent 接入即用。
+平台定义标准契约（SSE 变体：`usage`/`done` 必选 + `meta` 建议首事件 + `id:` 帧 + data 内 `ts`；同步变体：`answer`/`usage`/`timing` 必选，不验 done；判定口径以 `backend/app/core/probe.py` 为准），接入方 agent 按标准收敛改造（标准契约 + `POST /admin/reset` 造数重置接口 + 鉴权 env 开关）。**平台侧禁止 `if agent` 特判**——发现/校验只认标准契约信号，契约探测不达标直接拦截报错，保证任意新 agent 接入即用。
 
 ### 2. 规则 + LLM-judge 混合评分
 - **确定性断言**：结构/文本/工具/检索四类断言算子（白名单插件注册），扣分制不否决，维度内精评；
@@ -270,6 +270,8 @@ open http://localhost:8180        # 浏览器前端
 | 鉴权开关 | 评测环境鉴权走 env 开关旁路，方便编排压测 |
 
 > agent 侧契约改造与回归在各 agent 仓库完成，不在本仓库。契约探测不达标 → run 直接 partial_failed（硬拦截），接入即用。
+>
+> **新 agent 接入指南**：v2 manifest 写法 + SSE §5.1 / 同步 §5.2 达标细节 + 通用自测工具（`scripts/verify_agent.py`），见 **[docs/接入指南.md](docs/接入指南.md)**。
 
 ---
 
