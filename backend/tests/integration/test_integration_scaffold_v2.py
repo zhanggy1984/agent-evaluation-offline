@@ -17,7 +17,7 @@ pytest.importorskip("aiomysql")
 
 from app.api import scaffold
 from app.api.agents import ProbeBody, probe_agent
-from app.api.scaffold import AdapterConfirmBody, confirm_adapter, discover_agent
+from app.api.scaffold import AdapterConfirmBody, SkeletonBody, case_skeleton, confirm_adapter, discover_agent
 from app.core.errors import ApiError
 from app.models import Agent
 from helpers import make_agent, make_interface
@@ -154,9 +154,9 @@ async def test_discover_v2_non_dict_payload_no_500(db, env, monkeypatch):
 
 # ---------------- Q3：discover adapter_drift ----------------
 
-async def _seed_agent_with_snapshot(env, db, payload: dict) -> Agent:
+async def _seed_agent_with_snapshot(env, db, payload: dict, name: str = "it-q3-drift") -> Agent:
     """seed 一个带 _manifest_v2 快照的 agent（模拟 Q3 落库形态）。"""
-    agent = make_agent(name="it-q3-drift")
+    agent = make_agent(name=name)
     agent.adapter_config = {"_manifest_v2": payload}
     db.add(agent)
     await db.flush()
@@ -233,3 +233,37 @@ async def test_probe_input_error_short_circuits(db, env, monkeypatch, tmp_path):
     for itf in data["interfaces"]:
         assert itf["input_error"] is True
         assert any("样例文件不存在" in e for e in itf["errors"])
+
+
+# ---------------- Q5：POST /agents/{id}/skeleton（用例骨架，不落库） ----------------
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_skeleton_returns_suite_cases(db, env):
+    """v2 快照 → 骨架：每 scene×llm 接口一个 case，probe_input merge，expected 留空。"""
+    agent = await _seed_agent_with_snapshot(env, db, VALID_V2, name="it-q5-skeleton")
+    resp = await case_skeleton(agent.id, SkeletonBody(probe_input={"content": "你好"}),
+                               _=object(), db=db)
+    data = resp["data"]
+    assert data["agent_id"] == agent.id
+    assert data["agent_name"] == "it-q5-skeleton"
+    assert data["suite"]["name"] == "it-q5-skeleton 接入示例"
+    assert len(data["cases"]) == 1  # VALID_V2: 1 llm 接口 + 1 scene
+    c = data["cases"][0]
+    assert c["name"] == "greeting-chat"
+    assert c["input_type"] == "text"
+    assert c["input"]["content"] == "你好"  # probe_input merge
+    assert c["expected"] == {}  # 业务知识留空
+    assert c["assertions"]  # 可跑最小集
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_skeleton_no_snapshot_400(db, env):
+    """无 v2 快照（手工配置 adapter）→ 400 提示，不生成。"""
+    agent = make_agent(name="it-q5-nosnap")
+    db.add(agent)
+    await db.flush()
+    env.agents.append(agent)
+    await db.commit()
+    with pytest.raises(ApiError) as exc:
+        await case_skeleton(agent.id, SkeletonBody(), _=object(), db=db)
+    assert "无 v2 manifest 快照" in exc.value.message

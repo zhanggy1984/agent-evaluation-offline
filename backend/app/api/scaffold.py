@@ -22,6 +22,7 @@ from app.api.agents import _get_agent, _get_allowlist_cidrs
 from app.api.deps import get_current_user, require_role
 from app.core.contracts import diff_manifest, parse_manifest, unique_name
 from app.core.contracts_v2 import AdapterDraft, build_adapter_config, parse_manifest_v2
+from app.core.skeleton import build_suite_skeleton
 from app.core.db import get_db
 from app.core.errors import ApiError, E_NOT_FOUND, E_VALIDATION
 from app.core.http import build_agent_client
@@ -258,6 +259,34 @@ async def confirm_adapter(agent_id: int, body: AdapterConfirmBody, _: User = Adm
                "requires_auth": draft.requires_auth,
                "input_fields": draft.input_fields,
                "warnings": draft.warnings})
+
+
+# ---------------- Q5：用例骨架半自动（不落库，待确认） ----------------
+class SkeletonBody(BaseModel):
+    probe_input: dict | None = None  # 冒烟成功那次的探测输入（可选，半自动值来源）
+
+
+@router.post("/agents/{agent_id}/skeleton")
+async def case_skeleton(agent_id: int, body: SkeletonBody | None = None, _: User = Staff,
+                        db: AsyncSession = Depends(get_db)):
+    """Q5：v2 manifest → suite/case 骨架（不落库，待确认）。
+
+    body.probe_input 可选传冒烟成功那次的探测输入，merge 到骨架 input（半自动核心）；
+    缺失字段空串补全。expected/golden_answer/reference_docs 留空（业务知识，永远人工）。
+    前端确认骨架后走现有 POST /suites + POST /suites/{id}/cases 落库（Q7 wizard 编排）。
+    """
+    agent = await _get_agent(db, agent_id)
+    snapshot = (agent.adapter_config or {}).get("_manifest_v2")
+    if not isinstance(snapshot, dict):
+        raise ApiError(E_VALIDATION,
+                       "该 agent 无 v2 manifest 快照（非 v2 seed 或手工配置 adapter），无法生成骨架",
+                       400)
+    probe_input = body.probe_input if body else None
+    skeleton, errs = build_suite_skeleton(snapshot, agent_name=agent.name,
+                                          probe_input=probe_input)
+    if skeleton is None:
+        raise ApiError(E_VALIDATION, "; ".join(errs), 400)
+    return ok({**skeleton, "agent_id": agent_id})
 
 
 # ---------------- 场景清单 ----------------
