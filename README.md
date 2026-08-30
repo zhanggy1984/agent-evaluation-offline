@@ -265,7 +265,7 @@ open http://localhost:8180        # 浏览器前端
 
 | 接入要求 | 说明 |
 |---------|------|
-| 标准契约 | SSE 变体（`meta`/`usage`/`done` 必选 + `id:` 帧 + data 内 `ts`）或同步变体（`usage`/`timing`/`meta`，不验 done）二选一 |
+| 标准契约 | SSE 变体（`usage`/`done` 必选 + `meta` 建议首事件 + `id:` 帧 + data 内 `ts`）或同步变体（`answer`/`usage`/`timing`，不验 done）二选一，判定口径以 `backend/app/core/probe.py` 为准 |
 | 造数重置 | 提供 `POST /admin/reset`，跑前重置业务数据，保证用例可重复 |
 | 鉴权开关 | 评测环境鉴权走 env 开关旁路，方便编排压测 |
 
