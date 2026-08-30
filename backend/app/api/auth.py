@@ -42,15 +42,27 @@ REFRESH_ABSOLUTE_DAYS = 30
 class _LoginLimiter:
     """IP+用户名 双维度滑动窗口限速（内存实现，单进程部署适用）。"""
 
-    def __init__(self, window_s: int = 60, max_hits: int = 10):
+    def __init__(self, window_s: int = 60, max_hits: int = 10, max_keys: int = 10_000):
         self._window = window_s
         self._max = max_hits
+        self._max_keys = max_keys
         self._hits: dict[str, list[float]] = {}
+
+    def _prune(self, now: float) -> None:
+        # P2-E5：_hits 只增不删——攻击者换不同 IP/用户名可无界占内存。超过 max_keys 后
+        # 清理整个窗口内无活动的陈旧 key（list 全为窗口外时间戳），使 _hits 有界。
+        if len(self._hits) <= self._max_keys:
+            return
+        stale = [k for k, lst in self._hits.items()
+                 if not any(now - t < self._window for t in lst)]
+        for k in stale:
+            del self._hits[k]
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
         lst = [t for t in self._hits.get(key, []) if now - t < self._window]
         self._hits[key] = lst
+        self._prune(now)
         return len(lst) < self._max
 
     def hit(self, key: str) -> None:

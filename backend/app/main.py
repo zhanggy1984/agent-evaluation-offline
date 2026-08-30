@@ -6,6 +6,7 @@
 """
 import asyncio
 import logging
+import re
 import uuid
 
 from fastapi import FastAPI, Request
@@ -17,6 +18,7 @@ from app.api import (
     agents, annotations, auth, cases, config, dashboard, exports, meta, runs,
     scaffold, uploads, users,
 )
+from app.core.config import settings
 from app.core.db import SessionLocal
 from app.core.errors import E_BODY_TOO_LARGE, register_error_handlers
 from app.core.logging import setup_logging, trace_id_var
@@ -28,24 +30,40 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Agent 评测系统", version="0.1.0")
 
-# 前端跨域（前端 nginx 同源部署时其实不需要；开发期 vite 直连需要）
-# 宿主端口迁移后：8080 已让给 good-question，容器前端走 8180
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:8180"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# P2-E6：CORS 允许源改为 config（cors_origins 逗号分隔，可配 CORS_ORIGINS= 置空关闭）。
+# 默认保留开发期 vite 直连（5173）+ 容器前端（8180）；生产同源部署建议置空收紧。
+# 注：同源部署时跨域请求到不了后端，CORS 仅对前端直连 backend 场景生效。
+def _parse_cors_origins(value: str) -> list[str]:
+    """逗号分隔 CORS 源 → 去空白去空项（独立函数便于单测）。"""
+    return [o.strip() for o in value.split(",") if o.strip()]
+
+
+_cors_origins = _parse_cors_origins(settings.cors_origins)
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 register_error_handlers(app)
+
+
+# P2-E4：trace_id 格式白名单。正常链路网关强制覆盖 X-Request-ID（nginx $request_id，32 hex），
+# 但直连 backend 时客户端可传任意值——控制字符会污染日志/响应头（日志注入），超长值撑爆响应头。
+# 非安全格式一律重生成 uuid（合法 uuid 天然匹配）。
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 @app.middleware("http")
 async def trace_middleware(request: Request, call_next):
     """链路追踪：取网关透传的 X-Request-ID（无则生成 uuid），写入 contextvar 供日志
     filter 使用，并在响应头回传（经网关时网关会隐藏后端重复头，无副作用）。"""
-    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    rid = request.headers.get("X-Request-ID") or ""
+    if not _TRACE_ID_RE.fullmatch(rid):
+        rid = uuid.uuid4().hex
     trace_id_var.set(rid)
     response = await call_next(request)
     response.headers.setdefault("X-Request-ID", rid)

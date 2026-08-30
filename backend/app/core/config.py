@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # 当前链路 前端 nginx + api-gateway 各 append 一次 → 2；链路变化时调整（audit._client_ip）
     xff_trusted_proxy_count: int = 2
 
+    # P2-E6：CORS 允许源（逗号分隔）。默认保留开发期 vite 直连（5173）+ 容器前端（8180）；
+    # 生产同源部署可配 CORS_ORIGINS= 置空（不注册 CORS 中间件，跨域被浏览器默认拦截）
+    cors_origins: str = "http://localhost:5173,http://localhost:8180"
+
     @model_validator(mode="after")
     def _validate_secrets(self) -> "Settings":
         if self.app_env == "test":

@@ -5,6 +5,7 @@
 - pdf 魔数兜底（%PDF）；其余类型按扩展名放宽（task.md 验收口径）
 """
 import logging
+import os
 import uuid
 from pathlib import Path
 
@@ -25,7 +26,9 @@ router = APIRouter(prefix="/uploads", tags=["uploads"])
 
 Staff = Depends(require_role("admin", "evaluator"))
 
-UPLOAD_DIR = Path("/app/uploads")
+# P2-E2：与 adapters/base.py 的 multipart 路径白名单同源（都读 UPLOADS_DIR env）——
+# 否则 base.py 白名单用 env 路径而这里仍硬编码 /app/uploads，env 一改上传全被白名单拒绝。
+UPLOAD_DIR = Path(os.path.realpath(os.environ.get("UPLOADS_DIR", "/app/uploads")))
 
 
 async def _max_bytes(db: AsyncSession) -> int:

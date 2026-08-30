@@ -169,4 +169,7 @@ async def download_export(token: str, request: Request,
     await db.commit()
     logger.debug("export download out: run_id=%s format=%s", row.run_id, row.format)
     filename = f"eval_report_run{row.run_id}.{row.format}"
-    return FileResponse(path, media_type=_MEDIA[row.format], filename=filename)
+    # P2-E3：DB enum 声明含 xlsx 但实现仅支持 pdf——下载对未知 format 兜底为 pdf，
+    # 防残留/人为写入的 xlsx token 走 `_MEDIA[row.format]` 抛 KeyError 500。
+    media_type = _MEDIA.get(row.format, "application/pdf")
+    return FileResponse(path, media_type=media_type, filename=filename)
