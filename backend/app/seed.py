@@ -354,10 +354,8 @@ DEFAULT_SYSTEM_CONFIG = {
                      "meta": {"type": "int", "min": 1, "max": 86400}},
     "scoring_timeout": {"value": 3600, "scope": "run", "is_hot": True,   # scoring 超时（秒）：超时 → scoring_failed 兜底
                         "meta": {"type": "int", "min": 1, "max": 604800}},
-    "contract_check_timeout": {"value": 300, "scope": "run", "is_hot": True,
-                               "meta": {"type": "int", "min": 1, "max": 86400}},
-    "sse_idle_timeout": {"value": 60, "scope": "run", "is_hot": True,
-                         "meta": {"type": "int", "min": 1, "max": 86400}},
+    # C1：contract_check_timeout/sse_idle_timeout 死配置已删（全仓仅 seed 命中，从未消费）——
+    # 「配置即真相」不留展示无效项。存量库需运维 DELETE（见上线待办）。
     "run_timeout": {"value": None, "scope": "run", "is_hot": True,   # None → orchestrator.estimate_run_timeout 估算（7.4）
                     "meta": {"type": "int", "min": 1, "max": 604800, "nullable": True}},
     "perf_repeat_count": {"value": 5, "scope": "run", "is_hot": True,
@@ -368,8 +366,7 @@ DEFAULT_SYSTEM_CONFIG = {
                            "meta": {"type": "int", "min": 1, "max": 3600}},
     "judge_na_threshold": {"value": 0.3, "scope": "run", "is_hot": True,
                            "meta": {"type": "number", "min": 0.0, "max": 1.0}},
-    "error_rate_block": {"value": 0.1, "scope": "run", "is_hot": True,
-                         "meta": {"type": "number", "min": 0.0, "max": 1.0}},
+    # C1：error_rate_block 死配置已删（名似「错误率熔断」但从未消费，全仓仅 seed 命中）。
     # P2-8：assertion_penalty 已移除（产品意图「语义维度断言扣分」未落地，见 solution_detail §七评审）。
     # scorer 从未消费；删除注册避免「配置即真相」误导。存量库需执行 DELETE（seed insert-if-missing 不清行）。
     "judge_max_retries": {"value": 2, "scope": "run", "is_hot": True,
@@ -380,10 +377,8 @@ DEFAULT_SYSTEM_CONFIG = {
                                   "meta": {"type": "int", "min": 1, "max": 1000}},
     "breaker_open_duration": {"value": 60, "scope": "run", "is_hot": True,
                               "meta": {"type": "int", "min": 1, "max": 86400}},
-    "breaker_half_open_probe": {"value": 1, "scope": "run", "is_hot": True,
-                                "meta": {"type": "int", "min": 1, "max": 100}},
-    "retry_backoff_max": {"value": 10, "scope": "run", "is_hot": True,
-                          "meta": {"type": "int", "min": 1, "max": 3600}},
+    # C1：breaker_half_open_probe/retry_backoff_max 死配置已删（熔断/重试只消费
+    # breaker_failure_threshold/breaker_open_duration/max_retries，这俩从未被读）。
     "max_retries": {"value": 1, "scope": "run", "is_hot": True,
                     "meta": {"type": "int", "min": 0, "max": 100}},
     # 进程级（global）

@@ -112,3 +112,14 @@ def test_timing_entry_uses_done_when_present():
     assert te["end_ts"] == 0.8
     assert te["start_ts"] is not None
     assert te["first_token_ts"] is None
+
+
+def test_answer_overflow_raises_contract():
+    """C7：answer 累积超 16MB 上限 → 契约错误（agent 异常流提前拦截）。"""
+    import pytest
+    from app.core.assembler import MAX_ANSWER_CHARS
+    from app.core.sse_parser import SSEParseError
+
+    a = ResultAssembler()
+    with pytest.raises(SSEParseError):
+        a.on_event(_ev("answer", {"delta": "x" * (MAX_ANSWER_CHARS + 1)}, eid="a1"), 0.1)

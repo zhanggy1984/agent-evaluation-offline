@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.engine import ConfigEngine
 from app.api.deps import get_current_user, require_role
 from app.core.audit import write_audit
-from app.core.constants import ALLOWED_ADAPTER_TYPES, DEFAULT_WEIGHTS, SEMANTIC_DIMENSIONS
+from app.core.constants import ACCURACY_DIMENSIONS, ALLOWED_ADAPTER_TYPES, DEFAULT_WEIGHTS, \
+    SEMANTIC_DIMENSIONS
 from app.core.db import get_db
 from app.core.errors import ApiError, E_CONFLICT, E_NOT_FOUND, E_VALIDATION
 from app.core.http import build_agent_client, validate_base_url
@@ -80,6 +81,25 @@ class TargetsBody(BaseModel):
 class AgentModel(BaseModel):
     class Config:
         from_attributes = True
+
+
+def _validated_weight(dim: str, w) -> float:
+    """B4 权重维度/值域校验：非法维度或非数值 → 400（防静默吞掉合法性问题 + 未捕获 500）。
+
+    scorer 只消费 accuracy 维权重（非 accuracy 现状被静默忽略）；权重接受 0-100 或 0-1
+    任一量纲（默认 DEFAULT_WEIGHTS 为 0-1），越界是配置错，拒绝写入。
+    """
+    if dim not in ACCURACY_DIMENSIONS:
+        raise ApiError(E_VALIDATION,
+                       f"非法维度 {dim}，合法维度: {', '.join(ACCURACY_DIMENSIONS)}", 400)
+    try:
+        val = float(w)
+    except (TypeError, ValueError):
+        raise ApiError(E_VALIDATION, f"权重值非法（{dim}={w!r}），需为数字", 400)
+    if not 0.0 <= val <= 100.0:
+        raise ApiError(E_VALIDATION,
+                       f"权重需在 0-100 或 0-1 量纲内（{dim}={w}），合法维度: {', '.join(ACCURACY_DIMENSIONS)}", 400)
+    return val
 
 
 async def _get_agent(db: AsyncSession, agent_id: int) -> Agent:
@@ -360,6 +380,7 @@ async def set_agent_weights(agent_id: int, body: WeightsBody, request: Request,
     await _get_agent(db, agent_id)
     dims = {}
     for dim, w in body.weights.items():
+        w = _validated_weight(dim, w)  # B4：维度/值域校验
         row = (await db.execute(select(AgentDimensionWeight).where(
             AgentDimensionWeight.agent_id == agent_id,
             AgentDimensionWeight.interface_id == 0,
@@ -393,6 +414,7 @@ async def set_interface_weights(agent_id: int, iid: int, body: WeightsBody, requ
     await _get_agent(db, agent_id)
     dims = {}
     for dim, w in body.weights.items():
+        w = _validated_weight(dim, w)  # B4：维度/值域校验
         row = (await db.execute(select(AgentDimensionWeight).where(
             AgentDimensionWeight.agent_id == agent_id,
             AgentDimensionWeight.interface_id == iid,
@@ -435,6 +457,10 @@ async def set_targets(
     await _get_agent(db, agent_id)
     dims = {}
     for dim, score in body.target_scores.items():
+        # B4：target 维度合法性（未知维度入库但评分忽略 = 配置错被静默吞）
+        if dim not in ACCURACY_DIMENSIONS:
+            raise ApiError(E_VALIDATION,
+                           f"非法维度 {dim}，合法维度: {', '.join(ACCURACY_DIMENSIONS)}", 400)
         # #2 档位化前提：target 必须是合法分值域（负数/超界会让 int(target//20) 语义未定义）
         if not 0.0 <= float(score) <= 100.0:
             raise ApiError(E_VALIDATION, f"target_score 需在 0-100 范围内（{dim}={score}）", 400)

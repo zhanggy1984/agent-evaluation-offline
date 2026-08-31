@@ -294,3 +294,64 @@ class TestBuildBaseline(unittest.TestCase):
         out = build_baseline(results, {}, {}, [self._iface(1, "a")])
         self.assertEqual(out, [])
 
+
+# ============ B7：DB 编排层（以下用例 mock DB，验证 SQL 结构；与上方纯逻辑单测分区） ============
+import pytest
+from unittest.mock import AsyncMock
+
+from app.api.dashboard import _agent_dim_series, gate
+
+
+class _Exec:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+def _fake_db(runs, results):
+    """按表分派：eval_run → runs，其余 → results（测试数据空时两者皆 []）。"""
+    calls = []
+
+    def _exec(stmt):
+        calls.append(stmt)
+        name = stmt.get_final_froms()[0].name
+        return _Exec(runs if name == "eval_run" else results)
+
+    db = AsyncMock()
+    db.execute.side_effect = _exec
+    return db, calls
+
+
+class TestB7DbQueries:
+    @pytest.mark.asyncio
+    async def test_agent_dim_series_batch_in(self):
+        """B7：N+1 → 单次 in_ 批量；按 run 分组维度均值（顺序/归属与逐 run 一致）。"""
+        from types import SimpleNamespace
+        runs = [SimpleNamespace(id=1), SimpleNamespace(id=2)]
+        results = [
+            (1, [{"code": "completeness", "value": 0.8, "na": None}]),
+            (2, [{"code": "completeness", "value": 0.9, "na": None}]),
+        ]
+        db, calls = _fake_db(runs, results)
+        out = await _agent_dim_series(db, 1)
+        assert out == {"completeness": [0.8, 0.9]}
+        assert len(calls) == 2  # run 查询 + 一次批量（替代 N+1）
+        batch = str(calls[1].compile())
+        assert "eval_result" in batch and "IN" in batch  # 批量列投影 + in_
+
+    @pytest.mark.asyncio
+    async def test_gate_filters_terminal_status(self):
+        """B7：终态过滤下推 SQL（build_gate_cards Python 层已过滤，纯性能下推）。"""
+        from types import SimpleNamespace
+        db, calls = _fake_db([], [])
+        out = await gate(db=db, user=SimpleNamespace(username="u"))
+        assert out["data"] == []
+        run_stmt = next(c for c in calls if c.get_final_froms()[0].name == "eval_run")
+        sql = str(run_stmt.compile())
+        assert "eval_run" in sql and "IN" in sql  # 含 status IN (TERMINAL_STATUS)
+

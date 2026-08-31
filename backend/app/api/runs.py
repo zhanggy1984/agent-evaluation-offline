@@ -279,7 +279,8 @@ async def list_runs(agent_id: int | None = None, limit: int = 50, offset: int = 
     stmt = select(EvalRun).order_by(EvalRun.id.desc())
     if agent_id is not None:
         stmt = stmt.where(EvalRun.agent_id == agent_id)
-    rows = (await db.execute(stmt.limit(min(limit, 200)).offset(max(offset, 0)))).scalars().all()
+    # C6：limit 补下界（offset 已有 max(offset,0)；limit=-50 会生成 LIMIT -50，MySQL 行为不定）
+    rows = (await db.execute(stmt.limit(max(0, min(limit, 200))).offset(max(offset, 0)))).scalars().all()
     # P2-D8：批量查 agent owner → owner 对 held_out run 裁剪聚合结果。列表不能逐条 404
     #（会破坏分页语义），run 记录保留、结果型字段置 None。
     owner_map = {}

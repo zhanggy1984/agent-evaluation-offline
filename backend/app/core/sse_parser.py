@@ -7,6 +7,10 @@ data 可多行（每行 `data: ` 前缀），按 \n 拼接。
 import json
 from typing import Any
 
+# C7：单事件无换行数据累积上限。SSE 事件行不该大到这个量级——超过即非 SSE 流/流协议崩坏，
+# 防恶意或异常流把 _buf 撑到无界（内存耗尽）。超限抛 SSEParseError（executor 归 sse_parse_error，可重试）。
+MAX_BUF_BYTES = 64 * 1024
+
 
 class SSEParseError(Exception):
     """SSE 解析失败（error_type=sse_parse_error）。"""
@@ -35,6 +39,9 @@ class SSEParser:
     def feed(self, chunk: bytes) -> list[SSEEvent]:
         """喂入字节，返回新解析出的完整事件。"""
         self._buf.extend(chunk)
+        # C7：累积超上限且无换行（不是大事件的跨 chunk 半帧）→ 契约错误，防 _buf 无界增长
+        if len(self._buf) > MAX_BUF_BYTES and self._buf.find(b"\n") < 0:
+            raise SSEParseError(f"SSE 无换行数据累积超 {MAX_BUF_BYTES} 字节上限，疑似非 SSE 流")
         events: list[SSEEvent] = []
         while True:
             nl = self._buf.find(b"\n")

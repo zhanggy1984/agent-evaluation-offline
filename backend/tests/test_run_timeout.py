@@ -60,6 +60,12 @@ class TestEstimateRunTimeout(unittest.TestCase):
         # 超大值封顶 7200
         self.assertEqual(_est(n_cases=1000, repeat=5, max_iface_timeout=300), RUN_TIMEOUT_CAP_S)
 
+    def test_cap_warning(self):
+        # C8 封顶命中打 warning：兜底文案提示显式配 run_timeout 或调小 perf_repeat_count
+        with self.assertLogs("app.runner.orchestrator", level="WARNING") as cm:
+            self.assertEqual(_est(n_cases=1000, repeat=5, max_iface_timeout=300), RUN_TIMEOUT_CAP_S)
+        self.assertTrue(any("超封顶" in m for m in cm.output), cm.output)
+
     def test_cap_exact_boundary(self):
         # 恰在封顶内不截断：3600 保持
         self.assertEqual(_est(), 3600)

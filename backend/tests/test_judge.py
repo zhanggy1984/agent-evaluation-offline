@@ -3,7 +3,10 @@
 覆盖：verdict 解析（合法/包裹/非法）、prompt 组装（注入防护 + schema 约束）、
 allowlist 校验、rubric 模板完整性、退避计算、scorer 建任务/结果组装辅助函数。
 """
+import asyncio
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from app.judge.client import (
     JudgeError, _validate_allowlist, build_messages, extract_verdict, is_configured,
@@ -271,6 +274,69 @@ class TestScorerHelpers(unittest.TestCase):
         self.assertEqual(out[1][0]["score"], 80.0)
         self.assertEqual(out[1][0]["reason"], "答案准确")
         self.assertNotIn("repeats", out[1][0])  # 只取消费端字段
+
+
+class TestProcessOneNonJudgeError(unittest.TestCase):
+    """C4：aggregate_verdicts 抛非 JudgeError（真实 bug）→ 外层 logger.exception 完整栈可见，
+    attempts 按现有重试/标 failed 逻辑推进（不静默当单次判分失败）。"""
+
+    def _scenario(self, max_retries, with_logs=False):
+        from contextlib import nullcontext
+
+        from app.judge import worker
+
+        async def _run():
+            db = AsyncMock()
+            db.add = Mock()  # 普通方法（_process_one 只 add 不 await）
+            result = SimpleNamespace(answer="a", reasoning="", tool_calls=None,
+                                     case_id=1, case_version_id=2)
+            db.execute.return_value = SimpleNamespace(
+                scalars=lambda: SimpleNamespace(first=lambda: result))
+            db.get.return_value = SimpleNamespace(snapshot={"input": "x"})
+
+            class _SL:  # SessionLocal 假 async 上下文（函数内 import 解析时被 patch）
+                async def __aenter__(self):
+                    return db
+
+                async def __aexit__(self, *a):
+                    return False
+
+            client = Mock()
+            client.judge = AsyncMock(return_value=SimpleNamespace(level=4))
+
+            t = SimpleNamespace(run_id=1, case_id=1, dimension_code="factuality",
+                                attempts=0, status="processing",
+                                claim_id="c", lease_until=None, result=None)
+
+            logs_ctx = (self.assertLogs("app.judge.worker", level="ERROR") if with_logs
+                        else nullcontext())
+            with patch("app.core.db.SessionLocal", _SL), \
+                 patch.object(worker, "load_rubric", new=AsyncMock(return_value={"instruction": "x"})), \
+                 patch.object(worker, "_rubric_version", new=AsyncMock(return_value="1.0")), \
+                 patch.object(worker, "aggregate_verdicts",
+                              side_effect=ValueError("aggregate 内部 bug（非 JudgeError）")), \
+                 logs_ctx as logs:
+                await worker._process_one(
+                    t, {"judge_repeat": 1, "judge_max_retries": max_retries},
+                    interface_id=0, client=client)
+            return t, (logs if with_logs else None)
+
+        return asyncio.run(_run())
+
+    def test_aggregate_non_judge_error_over_limit_failed(self):
+        # 非 JudgeError 不被静默当单次判分失败：attempts 照常推进，超限标 failed
+        t, logs = self._scenario(max_retries=1, with_logs=True)
+        self.assertEqual(t.attempts, 1)
+        self.assertEqual(t.status, "failed")
+        # logger.exception（ERROR 级）完整栈可见（原 logger.warning 只打 e，改后附 traceback）
+        self.assertTrue(any("judge 重试 1 次仍失败" in m for m in logs.output),
+                        f"应记录 logger.exception，实际 logs={logs.output}")
+
+    def test_aggregate_non_judge_error_under_limit_pending(self):
+        # attempts 未达上限 → 回 pending 重试（终态保护不破坏；该路径不打 ERROR 日志）
+        t, _ = self._scenario(max_retries=3)
+        self.assertEqual(t.attempts, 1)
+        self.assertEqual(t.status, "pending")
 
 
 if __name__ == "__main__":

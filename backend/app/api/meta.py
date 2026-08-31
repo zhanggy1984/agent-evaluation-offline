@@ -30,7 +30,9 @@ async def trigger_cleanup(request: Request, user: User = Staff,
     from app.runner.cleanup_rules import run_cleanup
     logger.debug("trigger_cleanup in: user=%s", user.username)
     result = await run_cleanup(db)
-    await write_audit(db, user, request, "data_cleanup", "eval_run", "-",
+    # C2：target_id "-"→None（对照 scanner.py:132-135 同 data_cleanup 已修——"-" 非 ID 属语义占位，
+    # 未来数值比较 CAST 会 1292；None 才是「无目标」正解）
+    await write_audit(db, user, request, "data_cleanup", "eval_run", None,
                       detail={"purged": result["purged"], "retain": result["retain"]})
     await db.commit()
     logger.debug("trigger_cleanup out: %s", result)

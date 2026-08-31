@@ -10,6 +10,7 @@
 import asyncio
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -48,6 +49,22 @@ class ExportCreate(BaseModel):
 
 def _iso(dt) -> str | None:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else None
+
+
+def _cleanup_stale_exports() -> None:
+    """B5 惰性清理：删除 EXPORT_DIR 中 mtime 超过 TTL 的文件（低流量系统随 create/download 触发）。"""
+    if not EXPORT_DIR.exists():
+        return
+    try:
+        cutoff = time.time() - EXPORT_TTL_HOURS * 3600
+        for p in EXPORT_DIR.iterdir():
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass  # 单个文件清理失败不中断（可能正在被读/无权限）
+    except OSError:
+        logger.exception("导出文件惰性清理失败")
 
 
 async def _build_payload(db: AsyncSession, run: EvalRun, results: list[EvalResult]) -> dict:
@@ -107,6 +124,7 @@ async def create_export(run_id: int, body: ExportCreate, request: Request,
                         db: AsyncSession = Depends(get_db), user: User = Staff):
     """异步生成报告（线程渲染不阻塞 event loop）→ 落一次性下载 token（viewer 403）。"""
     logger.debug("export in: run_id=%s format=%s", run_id, body.format)
+    _cleanup_stale_exports()  # B5 惰性清理过期文件（create 也触发，不阻塞主流程）
     run = await db.get(EvalRun, run_id)
     if run is None:
         raise ApiError(E_NOT_FOUND, "run 不存在", 404)
@@ -149,8 +167,10 @@ async def download_export(token: str, request: Request,
     if user.role == ROLE_VIEWER:
         raise ApiError(E_NO_PERMISSION, "viewer 无权下载报告", 403)
     token_hash = sha256(token.encode()).hexdigest()
+    # B5：with_for_update 锁定读——并发同 token 两次下载串行化，第二个醒来读到
+    # used=True 命中 :156 校验（一次性语义防绕过）；与 B6 refresh 同款。
     row = (await db.execute(select(ExportToken).where(
-        ExportToken.token_hash == token_hash))).scalars().first()
+        ExportToken.token_hash == token_hash).with_for_update())).scalars().first()
     if row is None:
         raise ApiError(E_NOT_FOUND, "导出链接无效", 404)
     if row.used:
@@ -164,6 +184,7 @@ async def download_export(token: str, request: Request,
     if not path.exists():
         raise ApiError(E_NOT_FOUND, "导出文件不存在", 404)
     row.used = True
+    _cleanup_stale_exports()  # B5 惰性清理过期文件
     await write_audit(db, user, request, "export.download", "eval_run", row.run_id,
                       {"format": row.format})
     await db.commit()

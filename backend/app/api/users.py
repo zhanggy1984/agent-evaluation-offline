@@ -1,6 +1,5 @@
 """用户管理（admin）：列表/创建/改角色/禁用。"""
 import asyncio
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -12,7 +11,7 @@ from app.core.db import get_db
 from app.core.errors import ApiError, E_CONFLICT, E_NOT_FOUND
 from app.core.response import ok, page
 from app.core.security import hash_password
-from app.models.user import ROLE, User
+from app.models.user import ROLE, RefreshToken, User
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -87,7 +86,13 @@ async def update_user(
         user.enabled = body.enabled
     if body.password:
         user.password_hash = await asyncio.to_thread(hash_password, body.password)
-        user.password_changed_at = datetime.now(timezone.utc)
+        # B1：admin 重置 = 给临时密码首登必须改（对齐 create_user 保持 None 的强制改密机制）；
+        # 同时撤销该用户全部 refresh token，防攻击者旧 refresh 族仍可换 token 进系统（复刻 change_password）。
+        user.password_changed_at = None
+        rows = (await db.execute(
+            select(RefreshToken).where(RefreshToken.user_id == user.id))).scalars().all()
+        for r in rows:
+            r.revoked = True
     await db.commit()
     return ok({"id": user.id, "username": user.username, "role": user.role, "enabled": user.enabled})
 

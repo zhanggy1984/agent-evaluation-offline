@@ -57,8 +57,9 @@ class _Case:
 
 
 class _ScalarResult:
-    def __init__(self, rows):
+    def __init__(self, rows, rowcount=1):
         self._rows = rows
+        self.rowcount = rowcount  # A1 原子条件 UPDATE：默认影响 1 行（正常流程），防 AttributeError
 
     def scalars(self):
         return self

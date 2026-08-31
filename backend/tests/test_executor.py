@@ -17,7 +17,8 @@ from app.adapters.base import RequestSpec
 from app.core.sse_parser import SSEParseError, SSEParser
 from app.runner import executor
 from app.runner.executor import ERROR_CONNECT, ERROR_CONTRACT, ERROR_HTTP, \
-    ERROR_NO_DONE, ERROR_NO_USAGE, ERROR_SSE_PARSE, ERROR_TIMEOUT, execute_case
+    ERROR_HTTP_CLIENT, ERROR_NO_DONE, ERROR_NO_USAGE, ERROR_SSE_PARSE, ERROR_TIMEOUT, \
+    execute_case
 
 
 def _sse_bytes(*frames) -> bytes:
@@ -224,10 +225,22 @@ def test_sync_parse_error():
 
 
 def test_sync_http_error():
+    # B2：4xx 业务错 → http_client_error（不在 RETRYABLE_ERRORS，不重试不熔断）
     async def main():
         async with _client(lambda req: httpx.Response(403, text="forbidden")) as c:
             out = await execute_case(_SyncAdapter(), c, _case())
+        assert not out.ok and out.error_type == ERROR_HTTP_CLIENT
+        assert "403" in out.error_detail
+    asyncio.run(main())
+
+
+def test_sync_http_5xx_retryable():
+    # B2：5xx 临时服务故障 → http_error（可重试 + 熔断累计），与 4xx 分流
+    async def main():
+        async with _client(lambda req: httpx.Response(503, text="busy")) as c:
+            out = await execute_case(_SyncAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_HTTP
+        assert "503" in out.error_detail
     asyncio.run(main())
 
 

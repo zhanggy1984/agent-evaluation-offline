@@ -182,7 +182,10 @@ async def _process_one(t: JudgeTask, run_cfg: dict, interface_id: int, client: J
                         rubric_version=version,
                     )
                     verdicts.append(verdict)
-                except (JudgeError, Exception) as e:
+                except JudgeError as e:
+                    # C4：内层只收单次判分失败。client.judge 已把 httpx 超时/连接错等全部异常
+                    # 包成 JudgeError（client.py:200-201），无裸异常逃逸——aggregate_verdicts/DB 等
+                    # 非判分错误不再被当作单次失败静默吞掉，真实 bug 走外层完整栈。
                     last_error = e
                     logger.warning("run %s case %s %s 第 %d/%d 次判分失败: %s",
                                    t.run_id, t.case_id, t.dimension_code, i + 1, repeat, e)
@@ -201,15 +204,17 @@ async def _process_one(t: JudgeTask, run_cfg: dict, interface_id: int, client: J
             raise JudgeError(f"成功采样 {len(verdicts)}/{repeat} < done 阈值 {done_threshold}"
                              + (f"；最后错误: {last_error}" if last_error else ""))
         except (JudgeError, Exception) as e:
-            # 判分失败：重试或标 failed（done/failed 均属终态，不阻塞 run 收尾）
+            # C4：JudgeError（判分失败）与非 JudgeError 真实 bug（aggregate_verdicts/DB 等）统一
+            # 按 attempts 重试/标 failed——logger.exception 保证后者完整栈可见，不再被静默掩盖。
+            # done/failed 均属终态，不阻塞 run 收尾。
             t.attempts = (t.attempts or 0) + 1
             t.claim_id = None
             t.lease_until = None
             if t.attempts >= max_retries:
                 t.status = "failed"
                 await db.commit()
-                logger.warning("run %s case %s %s judge 重试 %d 次仍失败 → failed: %s",
-                               t.run_id, t.case_id, t.dimension_code, t.attempts, e)
+                logger.exception("run %s case %s %s judge 重试 %d 次仍失败 → failed: %s",
+                                 t.run_id, t.case_id, t.dimension_code, t.attempts, e)
             else:
                 t.status = "pending"
                 t.next_retry_at = _now() + timedelta(seconds=backoff_seconds(t.attempts))

@@ -21,12 +21,16 @@ logger = logging.getLogger(__name__)
 ERROR_NO_DONE = "no_done"          # SSE 流未收到 done
 ERROR_NO_USAGE = "no_usage"        # 未收到 usage（契约违反）
 ERROR_TIMEOUT = "timeout"          # 单用例超时
-ERROR_HTTP = "http_error"          # 非 2xx
+ERROR_HTTP = "http_error"          # 非 2xx（3xx/5xx，可重试技术失败）
+ERROR_HTTP_CLIENT = "http_client_error"  # HTTP 4xx 业务错（重试无益，不重试不熔断）
 ERROR_CONNECT = "connect_error"    # 建连/网络错误
 ERROR_SSE_PARSE = "sse_parse_error"
 ERROR_CONTRACT = "contract_error"  # 其他契约/解析异常
 
-# 可重试的技术失败（指数退避重试适用；HTTP 4xx 业务错不重试）。
+# 可重试的技术失败（指数退避重试适用）。B2：HTTP 4xx 业务错（ERROR_HTTP_CLIENT）不在
+# 此集——400 参数错/401 未授权/404 不存在重试不会改善（agent bug/配置错），且不累计熔断
+# （对齐 orchestrator「契约类错误是 agent bug，不熔断以免修契约前全被打死」语义）；5xx/3xx
+# 走 ERROR_HTTP 属临时服务故障，可重试 + 熔断累计。
 # 7.5c：no_done（SSE 断流）纳入——断流=没收到 done，续推失败后整 case 重试兜底。
 RETRYABLE_ERRORS = {ERROR_TIMEOUT, ERROR_CONNECT, ERROR_SSE_PARSE, ERROR_HTTP, ERROR_NO_DONE}
 
@@ -89,7 +93,8 @@ async def execute_case(
                     status_code = resp.status_code
                     if status_code != 200:
                         body = (await resp.aread()).decode("utf-8", errors="replace")[:200]
-                        return _fail(ERROR_HTTP, f"HTTP {status_code}: {body}")
+                        err = ERROR_HTTP_CLIENT if 400 <= status_code < 500 else ERROR_HTTP
+                        return _fail(err, f"HTTP {status_code}: {body}")
                     async for chunk in resp.aiter_bytes():
                         elapsed = time.perf_counter() - start
                         for ev in adapter.parse_stream_chunk(chunk):
@@ -106,7 +111,8 @@ async def execute_case(
             resp = await send_request(client, spec, timeout=timeout_s)
             status_code = resp.status_code
             if status_code != 200:
-                return _fail(ERROR_HTTP, f"HTTP {status_code}: {resp.text[:200]}")
+                err = ERROR_HTTP_CLIENT if 400 <= status_code < 500 else ERROR_HTTP
+                return _fail(err, f"HTTP {status_code}: {resp.text[:200]}")
             try:
                 unified = adapter.parse_sync(resp.json())
             except Exception as exc:
