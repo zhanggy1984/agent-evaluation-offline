@@ -165,7 +165,7 @@ class RunOrchestrator:
                     n_cases=len(cases), active_runs=active_runs, repeat=repeat,
                     max_iface_timeout=max_iface_timeout, max_retries=max_retries,
                     semantic_tasks=semantic_tasks,
-                    judge_repeat=int(run_config.get("judge_repeat", 2)),
+                    judge_repeat=int(run_config.get("judge_repeat", 3)),
                     judge_concurrency=int(run_config.get("judge_concurrency", 4)),
                     judge_call_timeout=int(run_config.get("judge_call_timeout", 120)))
 

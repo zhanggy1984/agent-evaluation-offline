@@ -11,7 +11,7 @@ from app.judge.client import (
 from app.judge.rubric import (
     RATINGS, anchors_of, fallback_rubric,
 )
-from app.judge.worker import backoff_seconds
+from app.judge.worker import backoff_seconds, done_threshold_for
 from app.runner.scorer import _enabled_semantic_dims, _judge_results_by_case
 
 DIM = "factuality"
@@ -184,6 +184,15 @@ class TestWorkerBackoff(unittest.TestCase):
     def test_cap(self):
         self.assertEqual(backoff_seconds(10), 30)
 
+    def test_done_threshold_never_single_sample_for_repeat_gt1(self):
+        # P0-1 补强：repeat>1 时多数决至少需 2 个成功样本（repeat=2 不退化单样本对冲）
+        self.assertEqual(done_threshold_for(1), 1)   # repeat=1 显式单次判分（关闭对冲）
+        self.assertEqual(done_threshold_for(2), 2)   # 修复点：不退化
+        self.assertEqual(done_threshold_for(3), 2)
+        self.assertEqual(done_threshold_for(4), 2)
+        self.assertEqual(done_threshold_for(5), 3)
+        self.assertEqual(done_threshold_for(10), 5)
+
 
 class TestScorerHelpers(unittest.TestCase):
     def test_enabled_semantic_dims_all(self):
@@ -216,6 +225,25 @@ class TestScorerHelpers(unittest.TestCase):
         self.assertEqual(len(out[1]), 2)               # case1 两维度都有
         self.assertEqual(len(out[2]), 1)               # case2 failed 维度被跳过
         self.assertEqual(out[2][0]["dimension"], "reasoning_quality")
+
+    def test_judge_results_by_case_new_majority_structure(self):
+        # P0-1：result 带 repeat/repeats 的聚合结构 → 顶层 score/reason 仍被提取
+        # （消费端零改动：_judge_results_by_case 只读顶层，repeats 不进 case 分维度结果）
+        from types import SimpleNamespace
+        tasks = [
+            SimpleNamespace(
+                status="done", case_id=1, dimension_code="factuality",
+                result={"dimension": "factuality", "level": 4, "score": 80.0,
+                        "reason": "答案准确", "rubric_version": "1.2",
+                        "repeat": 3,
+                        "repeats": [{"level": 4, "score": 80.0},
+                                    {"level": 4, "score": 80.0},
+                                    {"level": 3, "score": 60.0}]}),
+        ]
+        out = _judge_results_by_case(tasks)
+        self.assertEqual(out[1][0]["score"], 80.0)
+        self.assertEqual(out[1][0]["reason"], "答案准确")
+        self.assertNotIn("repeats", out[1][0])  # 只取消费端字段
 
 
 if __name__ == "__main__":

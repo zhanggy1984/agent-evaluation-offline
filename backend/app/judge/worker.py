@@ -22,14 +22,16 @@ from sqlalchemy import or_, select
 
 # 注意：SessionLocal / settings / models 在函数内延迟导入 —— 保持顶层零 DB 依赖，
 # 宿主单测可直接 import（无需 aiomysql）。与 scorer.py 同模式。
-from app.judge.client import JudgeClient, JudgeError, is_configured
+from app.judge.aggregate import aggregate_verdicts
+from app.judge.client import JudgeClient, JudgeError, JudgeVerdict, is_configured
 from app.judge.rubric import BUILTIN_RUBRIC_VERSION, load_rubric
 from app.runner.scorer import score_run
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 5        # 轮询间隔（秒）：任务入队后 ≤5s 开始判分
-_DEFAULT_LEASE = 180      # 认领默认租约（秒）；process 前按 run 的 judge_call_timeout 复核
+_DEFAULT_LEASE = 600      # 认领默认租约（秒）；P0-1 单 task 最坏 repeat×judge_call_timeout=360s，
+                          # 默认值只兜崩溃回收，_process_one 内再按该 run 配置精确放大 lease_until
 _MAX_BACKOFF = 30         # 重试退避上限（秒）：min(30, 2^attempts)
 _RECLAIM_BATCH = 50       # 一轮回收 processing 超时任务上限
 
@@ -42,6 +44,16 @@ def _now() -> datetime:
 def backoff_seconds(attempt: int, max_backoff: int = _MAX_BACKOFF) -> int:
     """指数退避：attempt=1 → 2s，2 → 4s...封顶 max_backoff。纯函数（单测）。"""
     return min(max_backoff, 2 ** max(attempt, 1))
+
+
+def done_threshold_for(repeat: int) -> int:
+    """多数决 done 阈值：成功采样 ≥ 该值才聚合判 done。纯函数（单测）。
+
+    repeat>1 时必须 ≥2——多数决最少需 2 个成功样本才有「多数」可言；
+    repeat=2 若退化为 1，1 成功 1 失败会静默单样本 done，对冲失效（评审 P1-1 补强）。
+    repeat=1 显式单次判分（用户关闭对冲），阈值 1。
+    """
+    return max(2, (repeat + 1) // 2) if repeat > 1 else 1
 
 
 async def _load_global_cfg(db) -> dict:
@@ -112,14 +124,27 @@ async def _rubric_version(db, dimension_code: str, interface_id: int) -> str:
 
 
 async def _process_one(t: JudgeTask, run_cfg: dict, interface_id: int, client: JudgeClient) -> None:
-    """判分单个任务：成功 done + result；异常 → 重试或 failed。"""
+    """判分单个任务：同一 (case, 维度) 判 repeat 次 → 档位多数决聚合（P0-1）。
+
+    - repeat = run_cfg.judge_repeat（默认 3）；done 阈值 = done_threshold_for(repeat)
+      （repeat>1 时 ≥2，多数决最少需 2 个成功样本）——成功采样不足 → 整 task 重采样重试，
+      防止 judge 失败率高（噪声大）时退化为单样本对冲失效
+    - 单次判分失败不中止循环（partial 也聚合）；成功采样 < 阈值 → 整 task 重采样重试
+    - result 顶层保持 dimension/level/score/reason/rubric_version（scorer 零改动兼容），
+      新增 repeat（实际采样数，evidence 可识别退化多数决）+ repeats（各次明细）
+    """
     from app.core.db import SessionLocal
     from app.models import CaseVersion, EvalResult, JudgeTask
     max_retries = int(run_cfg.get("judge_max_retries", 2))
+    repeat = max(1, int(run_cfg.get("judge_repeat", 3)))
+    done_threshold = done_threshold_for(repeat)
+    # 租约覆盖单 task 最坏时长（repeat × judge_call_timeout），崩溃回收不丢已做样本
+    call_timeout = max(float(run_cfg.get("judge_call_timeout", 120)), 1)
     async with SessionLocal() as db:
         try:
             # t 来自认领 session（detached），须 add 回当前 session 修改才能持久化
             db.add(t)
+            t.lease_until = _now() + timedelta(seconds=repeat * call_timeout + 60)
             result = (await db.execute(select(EvalResult).where(
                 EvalResult.run_id == t.run_id,
                 EvalResult.case_id == t.case_id))).scalars().first()
@@ -136,26 +161,38 @@ async def _process_one(t: JudgeTask, run_cfg: dict, interface_id: int, client: J
             snapshot = cv.snapshot if cv else {}
             template = await load_rubric(db, t.dimension_code, interface_id)
             version = await _rubric_version(db, t.dimension_code, interface_id)
-            verdict = await client.judge(
-                dimension=t.dimension_code,
-                template=template,
-                case_input=snapshot.get("input"),
-                golden_answer=(snapshot.get("expected") or {}).get("golden_answer"),
-                reference_docs=(snapshot.get("expected") or {}).get("reference_docs"),
-                agent_output=result.answer,
-                rubric_version=version,
-            )
-            t.status = "done"
-            t.result = {
-                "dimension": t.dimension_code, "level": verdict.level,
-                "score": verdict.score, "reason": verdict.reason,
-                "rubric_version": verdict.rubric_version,
-            }
-            t.claim_id = None
-            t.lease_until = None
-            await db.commit()
-            logger.info("run %s case %s %s done score=%s", t.run_id, t.case_id,
-                        t.dimension_code, verdict.score)
+            verdicts: list[JudgeVerdict] = []
+            last_error: Exception | None = None
+            for i in range(repeat):
+                try:
+                    verdict = await client.judge(
+                        dimension=t.dimension_code,
+                        template=template,
+                        case_input=snapshot.get("input"),
+                        golden_answer=(snapshot.get("expected") or {}).get("golden_answer"),
+                        reference_docs=(snapshot.get("expected") or {}).get("reference_docs"),
+                        agent_output=result.answer,
+                        rubric_version=version,
+                    )
+                    verdicts.append(verdict)
+                except (JudgeError, Exception) as e:
+                    last_error = e
+                    logger.warning("run %s case %s %s 第 %d/%d 次判分失败: %s",
+                                   t.run_id, t.case_id, t.dimension_code, i + 1, repeat, e)
+            if len(verdicts) >= done_threshold:
+                agg = aggregate_verdicts(verdicts)
+                t.status = "done"
+                t.result = agg
+                t.claim_id = None
+                t.lease_until = None
+                await db.commit()
+                logger.info("run %s case %s %s done score=%s (repeat=%d/%d)",
+                            t.run_id, t.case_id, t.dimension_code, agg["score"],
+                            len(verdicts), repeat)
+                return
+            # 成功采样 < done 阈值（含全失败）：整 task 重采样重试，走现有 attempts/退避
+            raise JudgeError(f"成功采样 {len(verdicts)}/{repeat} < done 阈值 {done_threshold}"
+                             + (f"；最后错误: {last_error}" if last_error else ""))
         except (JudgeError, Exception) as e:
             # 判分失败：重试或标 failed（done/failed 均属终态，不阻塞 run 收尾）
             t.attempts = (t.attempts or 0) + 1

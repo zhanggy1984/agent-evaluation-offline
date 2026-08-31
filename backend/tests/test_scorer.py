@@ -105,6 +105,31 @@ class TestGate(unittest.TestCase):
             targets={"ttft": 1000.0})  # 性能维度不在门禁范围
         self.assertEqual(r.pass_fail, "pass")
 
+    def test_gate_uses_aggregated_majority_score(self):
+        # P0-1：judge 多次采样聚合 result（顶层 score=多数档 80 + repeats 明细）
+        # → 门禁 value<target 按聚合分判，不因 repeats 键存在偏移
+        agg = {
+            "dimension": "factuality", "level": 4, "score": 80.0,
+            "reason": "答案准确", "rubric_version": "1.2", "repeat": 3,
+            "repeats": [
+                {"level": 4, "score": 80.0, "reason": "答案准确"},
+                {"level": 4, "score": 80.0, "reason": "与参考一致"},
+                {"level": 3, "score": 60.0, "reason": "有明显缺陷"},
+            ],
+        }
+        common = {"completeness": [{"dimension": "completeness", "pass": True}],
+                  "tool_usage": [{"dimension": "tool_usage", "pass": True}]}
+        # 2:1 多数决聚合 80 < target 85 → fail（悬崖：只有 100 能过 85，硬伤 P1-2）
+        r_fail = _base(assertion_results=common["completeness"] + common["tool_usage"],
+                       judge_results=[agg], targets={"factuality": 85.0})
+        self.assertEqual(r_fail.pass_fail, "fail")
+        self.assertTrue(r_fail.gate_failed)
+        # 同分 target 80（80 ≥ 80）→ pass
+        r_pass = _base(assertion_results=common["completeness"] + common["tool_usage"],
+                       judge_results=[agg], targets={"factuality": 80.0})
+        self.assertEqual(r_pass.pass_fail, "pass")
+        self.assertFalse(r_pass.gate_failed)
+
 
 class TestJudgeIncomplete(unittest.TestCase):
     def test_semantic_na_weight_ratio(self):

@@ -370,7 +370,7 @@ DEFAULT_SYSTEM_CONFIG = {
                           "meta": {"type": "int", "min": 0, "max": 100}},
     "judge_max_retries": {"value": 2, "scope": "run", "is_hot": True,
                           "meta": {"type": "int", "min": 0, "max": 10}},
-    "judge_repeat": {"value": 2, "scope": "run", "is_hot": True,
+    "judge_repeat": {"value": 3, "scope": "run", "is_hot": True,
                      "meta": {"type": "int", "min": 1, "max": 10}},
     "breaker_failure_threshold": {"value": 5, "scope": "run", "is_hot": True,
                                   "meta": {"type": "int", "min": 1, "max": 1000}},
