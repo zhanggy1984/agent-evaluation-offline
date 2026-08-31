@@ -84,10 +84,10 @@ class AgentModel(BaseModel):
 
 
 def _validated_weight(dim: str, w) -> float:
-    """B4 权重维度/值域校验：非法维度或非数值 → 400（防静默吞掉合法性问题 + 未捕获 500）。
+    """B4 权重维度/值域校验：非法维度、非数值、越界（非 0-1）→ 400（防静默吞掉合法性问题 + 未捕获 500）。
 
-    scorer 只消费 accuracy 维权重（非 accuracy 现状被静默忽略）；权重接受 0-100 或 0-1
-    任一量纲（默认 DEFAULT_WEIGHTS 为 0-1），越界是配置错，拒绝写入。
+    scorer 只消费 accuracy 维权重（非 accuracy 现状被静默忽略）；权重为 0-1 量纲
+    （对齐 DB Numeric(5,4) 与 DEFAULT_WEIGHTS），越界是配置错，拒绝写入。
     """
     if dim not in ACCURACY_DIMENSIONS:
         raise ApiError(E_VALIDATION,
@@ -96,9 +96,9 @@ def _validated_weight(dim: str, w) -> float:
         val = float(w)
     except (TypeError, ValueError):
         raise ApiError(E_VALIDATION, f"权重值非法（{dim}={w!r}），需为数字", 400)
-    if not 0.0 <= val <= 100.0:
+    if not 0.0 <= val <= 1.0:
         raise ApiError(E_VALIDATION,
-                       f"权重需在 0-100 或 0-1 量纲内（{dim}={w}），合法维度: {', '.join(ACCURACY_DIMENSIONS)}", 400)
+                       f"权重需在 0-1 量纲内（{dim}={w}），合法维度: {', '.join(ACCURACY_DIMENSIONS)}", 400)
     return val
 
 

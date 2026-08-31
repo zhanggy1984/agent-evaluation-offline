@@ -153,6 +153,26 @@ class TestWeightsValidation:
         assert out["data"] == {"completeness": 0.5}
 
     @pytest.mark.asyncio
+    async def test_agent_weights_over_1_rejected_400(self):
+        # Bug #1 修复点：>1 权重与 DB Numeric(5,4)（max 9.9999）冲突。原实现 0-100 上限
+        # 放过 99 → MySQL DataError → 500；收紧 0-1 后 400 拒收
+        for bad in (99, 1.5, 10.0):
+            db = _db_with_row(None)
+            with pytest.raises(ApiError) as ei:
+                await set_agent_weights(1, SimpleNamespace(weights={"factuality": bad}),
+                                        _req(), _user(), db)
+            assert ei.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_agent_weights_0_1_boundaries_ok(self):
+        # 0-1 闭区间合法：下界 0、上界 1 均接受（对齐 scorer 0-1 量纲）
+        for good in (0.0, 1.0):
+            db = _db_with_row(None)
+            out = await set_agent_weights(1, SimpleNamespace(weights={"factuality": good}),
+                                          _req(), _user(), db)
+            assert out["data"]["factuality"] == good
+
+    @pytest.mark.asyncio
     async def test_targets_invalid_dimension_400(self):
         # target 同理：未知维度入库但评分忽略 = 配置错被静默吞
         db = _db_with_row(None)
