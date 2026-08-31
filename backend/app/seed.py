@@ -252,9 +252,10 @@ async def _seed_baseline_targets(db) -> None:
     """6.3 默认达标分：seed 四家 agent accuracy 四维 agent 级默认（interface_id=0 哨兵）。
 
     幂等（联合主键 agent+interface+dimension）；已存在不覆盖（保留人工标定）。
-    初始值 70（百分制），approval_status=auto（手动改才进双签流程）。
+    初始值：规则维度 70 / 语义维度 60（#11 对齐 judge 20 分档——语义维度 70 在
+    _gate_met 档位化下等价 60 档，改 60 仅对齐展示值，门禁行为不变），approval_status=auto。
     """
-    from app.core.constants import ACCURACY_DIMENSIONS
+    from app.core.constants import ACCURACY_DIMENSIONS, SEMANTIC_DIMENSIONS
     from app.models import Agent, BaselineTarget
     from app.seed_data import SEED_AGENTS
 
@@ -270,10 +271,13 @@ async def _seed_baseline_targets(db) -> None:
                 BaselineTarget.dimension_code == dim))).first()
             if exists:
                 continue
+            target_score = 60 if dim in SEMANTIC_DIMENSIONS else 70
             db.add(BaselineTarget(agent_id=agent_id, interface_id=0, dimension_code=dim,
-                                  target_score=70, calibration_source="手动",
+                                  target_score=target_score,
+                                  calibration_source="手动",
                                   approval_status="auto"))
-            logger.info("seed baseline_target agent=%s dim=%s target=70", spec["name"], dim)
+            logger.info("seed baseline_target agent=%s dim=%s target=%s",
+                        spec["name"], dim, target_score)
 
 
 async def _seed_admin(db) -> None:

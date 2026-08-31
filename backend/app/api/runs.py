@@ -25,8 +25,8 @@ from app.core.errors import ApiError, E_NOT_FOUND, E_RUN_MUTEX, E_VALIDATION
 from app.core.lock import agent_mutex
 from app.core.response import ok
 from app.models import (
-    Agent, AgentInterface, BaselineTarget, EvalResult, EvalRun, SystemConfig, TestCase,
-    TestSuite,
+    Agent, AgentInterface, BaselineTarget, EvalResult, EvalRun, JudgeTask, SystemConfig,
+    TestCase, TestSuite,
 )
 from app.models.user import User
 from app.runner.orchestrator import orchestrator
@@ -119,11 +119,63 @@ async def _is_held_out_hidden(db: AsyncSession, run: EvalRun, user: User) -> boo
     return not is_held_out_visible(run.trigger_type, user, agent.owner_id if agent else None)
 
 
-def _run_out(r: EvalRun, *, redact: bool = False) -> dict:
+# #12 进度估算默认值：scoring 阶段按 judge 配置快照的最坏时长估剩余（未配置用保守默认）
+_JUDGE_EST_DEFAULTS = {"judge_call_timeout": 120, "judge_repeat": 3, "judge_concurrency": 1}
+
+
+def _estimate_remaining_sec(run: EvalRun, done: int, judge: int, now) -> int | None:
+    """#12 预计剩余秒数（None=无法估算）。
+
+    running：已执行耗时按完成比例线性外推（同 agent 并发 N>1 时并行吞吐比串行快，
+    该外推是上界）；scoring：judge 队列数 × 单 task 最坏时长（call_timeout×repeat）÷ 并发。
+    """
+    total = run.total_case or 0
+    if run.status == "running" and total and done:
+        elapsed = max(0.0, (now - run.started_at).total_seconds())
+        return max(1, int(elapsed * (total - done) / done))
+    if run.status == "scoring" and judge:
+        cfg = {**_JUDGE_EST_DEFAULTS, **(run.run_config or {})}
+        call_s = float(cfg.get("judge_call_timeout") or _JUDGE_EST_DEFAULTS["judge_call_timeout"])
+        repeat = int(cfg.get("judge_repeat") or _JUDGE_EST_DEFAULTS["judge_repeat"])
+        conc = int(cfg.get("judge_concurrency") or _JUDGE_EST_DEFAULTS["judge_concurrency"])
+        return max(1, int(judge * call_s * repeat / max(conc, 1)))
+    return None
+
+
+def _result_stage(pass_fail: str, judge_status: str | None) -> str:
+    """#12 单 case 状态流（纯数据推断，不加表字段）：error 优先，judge 未 done 归 judging。"""
+    if pass_fail == "error":
+        return "error"
+    if judge_status in ("pending", "processing"):
+        return "judging"
+    if judge_status == "failed":
+        return "judge_failed"
+    return "completed"
+
+
+def _case_stage(pass_fail: str, statuses: list[str] | None) -> str:
+    """#12 单 case 状态流（多维度聚合）：error 优先；任一 judge 未 done → judging。
+
+    同一 case 多语义维度（factuality+reasoning_quality）有多个 JudgeTask
+    （PK=run_id+case_id+dimension_code），按 case 聚合状态列表而非 last-write-wins——
+    任一维度仍在判分即 case 整体 judging，防一个维度 done 另一个 processing 被误标 completed。
+    """
+    if pass_fail == "error":
+        return "error"
+    statuses = statuses or []
+    if any(s in ("pending", "processing") for s in statuses):
+        return "judging"
+    if any(s == "failed" for s in statuses):
+        return "judge_failed"
+    return "completed"
+
+
+def _run_out(r: EvalRun, *, redact: bool = False, progress: dict | None = None) -> dict:
     """run 摘要。redact=True：裁剪结果型字段（P2-D8 owner 对 held_out run 隐藏聚合结果）。
 
     owner 不可见留出集复测的分数/通过数/延迟，但 run 记录本身保留——它占用 agent
     执行槽位（create_run 互斥 409），owner 需知情。状态型元数据不裁剪。
+    progress（#12）：活跃 run 的 {done, judge, remaining}，终态 run 为 None。
     """
     return {
         "id": r.id, "agent_id": r.agent_id, "suite_id": r.suite_id, "version": r.version,
@@ -140,6 +192,12 @@ def _run_out(r: EvalRun, *, redact: bool = False) -> dict:
         "ttft_p50": None if redact else (float(r.ttft_p50) if r.ttft_p50 is not None else None),
         "e2e_p50": None if redact else (float(r.e2e_p50) if r.e2e_p50 is not None else None),
         "case_ids": None if redact else r.case_ids,  # #3 子集（redact 裁剪留出集内容指纹）
+        # #12 进度（仅活跃 run 提供；终态 run 三个字段全 None）
+        "done_case": progress["done"] if progress else None,
+        "judge_queue": progress["judge"] if progress else None,
+        "estimate_remaining_sec": progress["remaining"] if progress else None,
+        # P2-9 评测态追溯：知识版本（agent SSE meta 回填，库级文档时间戳锚；held_out 作为元数据保留）
+        "knowledge_version": (r.env_snapshot or {}).get("knowledge_version"),
     }
 
 
@@ -207,8 +265,29 @@ async def list_runs(agent_id: int | None = None, limit: int = 50, offset: int = 
         owner_map = {a.id: a.owner_id for a in (await db.execute(
             select(Agent.id, Agent.owner_id).where(
                 Agent.id.in_({r.agent_id for r in rows})))).all()}
-    return ok([_run_out(r, redact=not is_held_out_visible(r.trigger_type, user, owner_map.get(r.agent_id)))
-               for r in rows])
+    # #12 进度：只对活跃 run 批量聚合已完成 case 数 + judge 队列（避免逐条 N+1）。
+    # 已完成 case = eval_result 行数（每 case 执行完即落库）；judge 队列 = pending/processing 任务数。
+    now = datetime.utcnow()
+    active = [r for r in rows if r.status in ("pending", "running", "scoring")]
+    done_map, judge_map = {}, {}
+    if active:
+        ids = [r.id for r in active]
+        done_map = {rid: n for rid, n in (await db.execute(
+            select(EvalResult.run_id, func.count()).where(
+                EvalResult.run_id.in_(ids)).group_by(EvalResult.run_id))).all()}
+        judge_map = {rid: n for rid, n in (await db.execute(
+            select(JudgeTask.run_id, func.count()).where(
+                JudgeTask.run_id.in_(ids),
+                JudgeTask.status.in_(("pending", "processing"))).group_by(JudgeTask.run_id))).all()}
+    out = []
+    for r in rows:
+        prog = None
+        if r.status in ("pending", "running", "scoring"):
+            d, j = done_map.get(r.id, 0), judge_map.get(r.id, 0)
+            prog = {"done": d, "judge": j, "remaining": _estimate_remaining_sec(r, d, j, now)}
+        out.append(_run_out(r, redact=not is_held_out_visible(r.trigger_type, user, owner_map.get(r.agent_id)),
+                            progress=prog))
+    return ok(out)
 
 
 @router.get("/{run_id}")
@@ -217,7 +296,17 @@ async def get_run(run_id: int, user: User = Depends(get_current_user), db: Async
     if run is None:
         raise ApiError(E_NOT_FOUND, "run 不存在", 404)
     # P2-D8：owner 对 held_out run 裁剪聚合结果（记录可见、结果不可见；run_results 同源判定）
-    return ok(_run_out(run, redact=await _is_held_out_hidden(db, run, user)))
+    # #12 进度：详情页同源提供 done/judge/remaining（单 run 不批量）
+    prog = None
+    if run.status in ("pending", "running", "scoring"):
+        done = (await db.execute(select(func.count()).select_from(EvalResult).where(
+            EvalResult.run_id == run_id))).scalar() or 0
+        judge = (await db.execute(select(func.count()).select_from(JudgeTask).where(
+            JudgeTask.run_id == run_id,
+            JudgeTask.status.in_(("pending", "processing"))))).scalar() or 0
+        prog = {"done": done, "judge": judge,
+                "remaining": _estimate_remaining_sec(run, done, judge, datetime.utcnow())}
+    return ok(_run_out(run, redact=await _is_held_out_hidden(db, run, user), progress=prog))
 
 
 @router.post("/{run_id}/cancel")
@@ -304,10 +393,16 @@ async def run_results(run_id: int, user: User = Depends(get_current_user),
                EvalResult.score_total, EvalResult.score_per_dimension,
                EvalResult.error_type, EvalResult.error_detail,
                func.left(EvalResult.answer, _ANSWER_PREVIEW + 1).label("answer_preview"),
-               EvalResult.assertion_results, EvalResult.judge_results)
+               EvalResult.assertion_results, EvalResult.judge_results, EvalResult.usage)
         .where(EvalResult.run_id == run_id))).all()
     if not rows:
         return ok([])
+    # #12 单 case 状态流：批量取该 run 各 case 的 judge_task 状态（数据推断，无新字段）。
+    # 聚合为 case→[status...]：多语义维度 case 有多个 JudgeTask，按 case 聚合避免 last-write-wins 丢维度
+    judge_state: dict[int, list[str]] = {}
+    for c, s in (await db.execute(
+            select(JudgeTask.case_id, JudgeTask.status).where(JudgeTask.run_id == run_id))).all():
+        judge_state.setdefault(c, []).append(s)
     cases = {c.id: c for c in (await db.execute(select(TestCase).where(
         TestCase.id.in_([r.case_id for r in rows])))).scalars().all()}
     ifaces = {i.id: i.name for i in (await db.execute(
@@ -320,6 +415,8 @@ async def run_results(run_id: int, user: User = Depends(get_current_user),
         if r.case_id in cases else "",
         "input_type": cases[r.case_id].input_type if r.case_id in cases else "",
         "pass_fail": r.pass_fail,
+        # #12 单 case 状态流：error / judging（judge 队列未 done）/ judge_failed / completed
+        "stage": _case_stage(r.pass_fail, judge_state.get(r.case_id)),
         "score_total": float(r.score_total) if r.score_total is not None else None,
         "score_per_dimension": r.score_per_dimension or [],
         "error_type": r.error_type, "error_detail": r.error_detail,
@@ -330,6 +427,8 @@ async def run_results(run_id: int, user: User = Depends(get_current_user),
         "judge_results": ([{"dimension": j.get("dimension"), "score": j.get("score"),
                             "reason": j.get("reason")} for j in (r.judge_results or [])]
                           if sees_full else None),
+        # P2-9 缓存命中标识：agent 应用层问答缓存（gq usage.cached=True；真实流式无该键恒 False）
+        "cache_hit": any(u and u.get("cached") for u in (r.usage or [])),
     } for r in rows]
     out.sort(key=lambda x: (PF_ORDER.get(x["pass_fail"], 9),
                             -(x["score_total"] or -1)))

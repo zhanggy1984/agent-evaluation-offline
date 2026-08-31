@@ -26,7 +26,7 @@ class TestSetTargetsFlow(unittest.TestCase):
         p.update(kw)
         return SimpleNamespace(**p)
 
-    def _call(self, user, row):
+    def _call(self, user, row, dim="completeness", score=80.0):
         db = AsyncMock()
         db.get.return_value = SimpleNamespace(id=1, enabled=True)  # _get_agent
 
@@ -34,7 +34,7 @@ class TestSetTargetsFlow(unittest.TestCase):
             def scalar_one_or_none(self):
                 return row
         db.execute.return_value = _Exec()
-        body = SimpleNamespace(target_scores={"completeness": 80.0})
+        body = SimpleNamespace(target_scores={dim: score})
         request = SimpleNamespace(headers={}, client=SimpleNamespace(host="10.0.0.1"))
         asyncio.run(set_targets(1, 2, body, request, user, db))
         return db
@@ -75,6 +75,26 @@ class TestSetTargetsFlow(unittest.TestCase):
         self._call(self._user(1, "admin"), row)
         self.assertEqual(row.approval_status, "pending_approval")
         self.assertEqual(row.target_score, 80.0)
+
+    # ---- #11 target 语义化：语义维度 20 倍数白名单（仅拦新增/变化值） ----
+
+    def test_semantic_new_non_multiple_rejected(self):
+        # 新增语义维度（无既有行）非 20 倍数（85）→ 400（85 门禁等价 80，假精确）
+        with self.assertRaises(ApiError):
+            self._call(self._user(1, "admin"), None, dim="factuality", score=85.0)
+
+    def test_semantic_changed_to_non_multiple_rejected(self):
+        # 存量语义 80 → 改 85：值变化且非 20 倍数 → 400
+        row = self._row(dimension_code="factuality", target_score=80.0)
+        with self.assertRaises(ApiError):
+            self._call(self._user(1, "admin"), row, dim="factuality", score=85.0)
+
+    def test_semantic_unchanged_legacy_value_allowed(self):
+        # 存量非 20 倍数（85）未变 → 放行（前端全量组包提交，拦存量会让既有配置卡死）
+        row = self._row(dimension_code="factuality", target_score=85.0)
+        db = self._call(self._user(1, "admin"), row, dim="factuality", score=85.0)
+        self.assertEqual(row.target_score, 85.0)
+        self.assertEqual(row.approval_status, "pending_approval")  # 正常走双签流转
 
 
 if __name__ == "__main__":

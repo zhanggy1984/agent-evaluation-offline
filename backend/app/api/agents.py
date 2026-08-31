@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.engine import ConfigEngine
 from app.api.deps import get_current_user, require_role
 from app.core.audit import write_audit
-from app.core.constants import ALLOWED_ADAPTER_TYPES, DEFAULT_WEIGHTS
+from app.core.constants import ALLOWED_ADAPTER_TYPES, DEFAULT_WEIGHTS, SEMANTIC_DIMENSIONS
 from app.core.db import get_db
 from app.core.errors import ApiError, E_CONFLICT, E_NOT_FOUND, E_VALIDATION
 from app.core.http import build_agent_client, validate_base_url
@@ -443,6 +443,19 @@ async def set_targets(
             BaselineTarget.interface_id == iid,
             BaselineTarget.dimension_code == dim))).scalar_one_or_none()
         old_score = row.target_score if row is not None else None   # C1：from 在赋值前缓存
+        # #11 target 语义化：语义维度 judge 精度 20 分档（judge/rubric.py RATINGS），
+        # _gate_met 档位化（int(target//20)）下非 20 倍数 target 与 floor 档等价
+        # （85/90/95=80、75/70=60）属"假精确"。仅对「新增或值变化」的维度强制 20 倍数，
+        # 存量未变值放行——前端全量组包提交，拦存量会让既有配置（cc 85/85 等）卡死。
+        s = float(score)
+        if (dim in SEMANTIC_DIMENSIONS
+                and (row is None or old_score != s)
+                and s % 20 != 0):
+            raise ApiError(E_VALIDATION,
+                           f"{dim} 为 judge 维度，judge 精度 20 分档，target 需为 20 的倍数"
+                           f"（0/20/40/60/80/100）；{int(s)} 门禁等价 {int(s // 20) * 20} 分，"
+                           f"若想更严请配 100",
+                           400)
         old_status = row.approval_status if row is not None else None
         if row is None:
             row = BaselineTarget(agent_id=agent_id, interface_id=iid, dimension_code=dim,

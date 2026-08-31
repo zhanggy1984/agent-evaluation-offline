@@ -207,7 +207,7 @@ class TestRunOut:
                  status="completed", generation=1, started_at=None, finished_at=None,
                  total_case=2, pass_case=1, fail_case=0, error_case=0, na_case=1,
                  agent_score=80.0, judge_incomplete=False, ttft_p50=None, e2e_p50=None,
-                 case_ids=[10, 20])
+                 case_ids=[10, 20], env_snapshot=None)
         p.update(kw)
         return SimpleNamespace(**p)
 

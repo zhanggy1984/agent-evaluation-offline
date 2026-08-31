@@ -97,7 +97,8 @@ def _res_row(**kw):
              answer_preview="x" * 600,
              assertion_results=[{"dimension": "c1", "pass": False, "actual": "a1"},
                                 {"dimension": "c2", "pass": True, "actual": "a2"}],
-             judge_results=[{"dimension": "factuality", "score": 50.0, "reason": "r1", "level": 3}])
+             judge_results=[{"dimension": "factuality", "score": 50.0, "reason": "r1", "level": 3}],
+             usage=None)
     p.update(kw)
     return SimpleNamespace(**p)
 

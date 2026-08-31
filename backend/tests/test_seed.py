@@ -163,3 +163,25 @@ def test_verify_sample_files(monkeypatch, tmp_path):
         {"name": "c1", "input": {"file_path": str(tmp_path / "missing.pdf")}}]
     with pytest.raises(RuntimeError, match="样例文件缺失"):
         _verify_sample_files()
+
+
+def test_seed_baseline_targets_semantic_60():
+    """#11：语义维度默认 60（对齐 judge 20 分档，70 档位等价 60），规则维度保持 70。"""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.seed import _seed_baseline_targets
+
+    db = AsyncMock()
+    # Agent 全部存在（scalar_one_or_none 返回 id）；BaselineTarget 全部不存在（first 返回 None）
+    db.execute.return_value = SimpleNamespace(
+        scalar_one_or_none=lambda: 1, first=lambda: None)
+    asyncio.run(_seed_baseline_targets(db))
+
+    added = [c[0][0] for c in db.add.call_args_list]
+    target = {a.dimension_code: a.target_score for a in added}
+    assert target["factuality"] == 60          # 语义维度 → 20 分档对齐
+    assert target["reasoning_quality"] == 60
+    assert target["completeness"] == 70        # 规则维度 → 连续分保持 70
+    assert target["tool_usage"] == 70

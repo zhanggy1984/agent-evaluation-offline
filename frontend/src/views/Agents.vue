@@ -213,7 +213,8 @@
               <template #header><TermTip term="target" /></template>
               <template #default="{ row }">
                 <el-input-number v-model="row.target_score" :disabled="!isStaff" :controls="false"
-                  :min="0" :max="100" :step="0.1" style="width: 100%" />
+                  :min="0" :max="100" :step="SEMANTIC.has(row.dimension_code) ? 20 : 0.1"
+                  style="width: 100%" />
               </template>
             </el-table-column>
             <el-table-column label="双签状态" width="130">
@@ -383,6 +384,9 @@ const DIMS = [
   { code: 'e2e', name: '端到端延迟', cat: 'performance' },
   { code: 'token_cost', name: 'Token 成本', cat: 'cost' },
 ]
+
+// #11 语义维度（LLM-judge 判分，judge 精度 20 分档；与 backend core/constants SEMANTIC_DIMENSIONS 对齐）
+const SEMANTIC = new Set(['factuality', 'reasoning_quality'])
 
 const userName = (id) => users.value.find((u) => u.id === id)?.username || (id ? `#${id}` : '未指派')
 
@@ -653,6 +657,7 @@ const saveWeights = async () => {
 // ---- 阈值（双签） ----
 const targetIface = ref(null)
 const targetRows = ref([])
+const originalTargets = ref({}) // #11 语义化：load 时的原始值快照，saveTargets 只拦变化值
 const loadingTargets = ref(false)
 const savingTargets = ref(false)
 
@@ -668,6 +673,7 @@ const loadTargets = async () => {
   loadingTargets.value = true
   try {
     targetRows.value = await getTargets(detail.value.id, targetIface.value)
+    originalTargets.value = Object.fromEntries(targetRows.value.map((r) => [r.dimension_code, r.target_score]))
   } catch (e) {
     // 拦截器已弹
   } finally {
@@ -676,6 +682,19 @@ const loadTargets = async () => {
 }
 
 const saveTargets = async () => {
+  // #11 语义化：语义维度 judge 精度 20 分档，仅拦「本次变化」的非 20 倍数
+  //（存量未变值放行——后端同口径，防全量提交被存量 75/85 卡死）
+  for (const r of targetRows.value) {
+    if (SEMANTIC.has(r.dimension_code)
+        && originalTargets.value[r.dimension_code] !== r.target_score
+        && r.target_score % 20 !== 0) {
+      const name = DIMS.find((d) => d.code === r.dimension_code)?.name || r.dimension_code
+      const floor = Math.floor(r.target_score / 20) * 20
+      ElMessage.warning(`${name} 为 judge 维度，judge 精度 20 分档，target 需为 20 的倍数`
+        + `（0/20/40/60/80/100）；${r.target_score} 门禁等价 ${floor} 分`)
+      return
+    }
+  }
   const targetScores = {}
   for (const r of targetRows.value) targetScores[r.dimension_code] = r.target_score
   savingTargets.value = true

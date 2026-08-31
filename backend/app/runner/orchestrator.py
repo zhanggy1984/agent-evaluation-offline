@@ -17,7 +17,7 @@ import math
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from app.adapters.engine import ConfigEngine
 from app.core import circuit_repo
@@ -374,6 +374,19 @@ class RunOrchestrator:
         """落 eval_result（usage/timing 存全 attempt 数组，看板只读预聚合列）。"""
         case_version_id = await self._ensure_case_version(case)
         async with SessionLocal() as db:
+            # P2-9 评测态追溯：回填 knowledge_version（agent SSE meta 提供，库级文档时间戳锚）。
+            # 条件 UPDATE 首写胜（WHERE 该键 IS NULL）：同 run agent→library 固定值一致，
+            # 并发 case 各自执行同值更新幂等不覆盖；truthy 判定防 gq 空串 "" 落库。
+            meta_kv = ((outcome.unified.get("meta") or {}).get("knowledge_version")
+                       if outcome else None)
+            if meta_kv:
+                await db.execute(
+                    update(EvalRun)
+                    .where(EvalRun.id == run_id,
+                           func.json_extract(EvalRun.env_snapshot, '$.knowledge_version').is_(None))
+                    .values(env_snapshot=func.json_set(
+                        func.coalesce(EvalRun.env_snapshot, '{}'),
+                        '$.knowledge_version', meta_kv)))
             existing = (await db.execute(select(EvalResult).where(
                 EvalResult.run_id == run_id, EvalResult.case_id == case.id))).first()
             if existing:

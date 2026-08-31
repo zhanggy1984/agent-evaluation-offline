@@ -108,6 +108,21 @@
             {{ fmtRate(row.total_case ? row.pass_case / row.total_case : null) }}
           </template>
         </el-table-column>
+        <el-table-column label="进度" min-width="200">
+          <template #default="{ row }">
+            <template v-if="row.done_case != null">
+              <el-progress
+                :percentage="Math.min(100, Math.round(row.total_case ? (row.done_case / row.total_case) * 100 : 0))"
+                :stroke-width="10"
+                style="width: 90px; display: inline-block; vertical-align: middle"
+              />
+              <span class="dim-note" style="margin-left: 6px">{{ row.done_case }}/{{ row.total_case }}</span>
+              <span v-if="row.estimate_remaining_sec != null" class="dim-note">· 剩 {{ fmtDuration(row.estimate_remaining_sec) }}</span>
+              <el-tag v-if="row.judge_queue" size="small" type="info" style="margin-left: 4px">判分 {{ row.judge_queue }}</el-tag>
+            </template>
+            <span v-else class="dim-note">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="开始时间" min-width="160">
           <template #default="{ row }">{{ fmtTime(row.started_at) }}</template>
         </el-table-column>
@@ -398,6 +413,13 @@
         <span>用例明细</span>
         <el-tag size="small" type="info" style="margin-left: 8px"><TermTip term="L3" /></el-tag>
         <el-tag v-if="curRunId" size="small" style="margin-left: 8px">run #{{ curRunId }}</el-tag>
+        <!-- P2-9 评测态追溯：评测时 gq 知识版本 + 应用缓存命中 case 数（区别于 DeepSeek 上下文缓存） -->
+        <el-tag v-if="curRunKnowledge" size="small" type="primary" style="margin-left: 8px">
+          <TermTip term="knowledge" /> {{ curRunKnowledge }}
+        </el-tag>
+        <el-tag v-if="cacheHitCount" size="small" type="success" style="margin-left: 8px">
+          <TermTip term="app_cache" /> {{ cacheHitCount }}/{{ runResults.length }}
+        </el-tag>
         <span v-if="isStaff" class="export-bar">
           <el-button size="small" type="primary" :loading="exporting" @click="doExport('pdf')">导出 PDF</el-button>
         </span>
@@ -433,6 +455,14 @@
         <el-table-column label="结果" width="80">
           <template #default="{ row }">
             <el-tag :type="pfTag(row.pass_fail)" size="small">{{ pfLabel(row.pass_fail) }}</el-tag>
+          </template>
+        </el-table-column>
+        <!-- #12 单 case 状态流：判分中/判分失败显式标注，终态留空避免噪音 -->
+        <el-table-column label="阶段" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="row.stage === 'judging'" size="small" type="warning">判分中</el-tag>
+            <el-tag v-else-if="row.stage === 'judge_failed'" size="small" type="danger">判分失败</el-tag>
+            <span v-else class="dim-note">{{ stageLabel(row.stage) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="总分" width="80">
@@ -673,8 +703,12 @@ const compareA = ref(null)
 const compareB = ref(null)
 const compareData = ref(null)
 const curRunId = ref(null)
+// P2-9 评测态追溯：当前 run 评测时的 gq 知识版本（list_runs env_snapshot 回填透出）
+const curRunKnowledge = ref(null)
 const resultsLoading = ref(false)
 const runResults = ref([])
+// P2-9 应用缓存命中聚合：run_results 每行 cache_hit（usage.cached=True）为真即计入
+const cacheHitCount = computed(() => runResults.value.filter((r) => r.cache_hit).length)
 const exporting = ref(false)
 const runFailures = ref({ items: [], top_reasons: [] })
 const triggerVisible = ref(false)
@@ -705,6 +739,16 @@ const pfLabel = (v) => (PF[v] || {}).label || v
 const isActive = (s) => ACTIVE.includes(s)
 const fmtTime = (t) => (t ? new Date(t).toLocaleString('zh-CN') : '-')
 const fmtRate = (r) => (r == null ? 'N/A' : `${(r * 100).toFixed(1)}%`)
+// #12 预计剩余时长：s / m+s / h+m
+const fmtDuration = (sec) => {
+  if (sec == null) return '—'
+  if (sec < 60) return `${sec}s`
+  if (sec < 3600) return `${Math.floor(sec / 60)}m${sec % 60 ? ` ${sec % 60}s` : ''}`
+  return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`
+}
+// #12 单 case 状态流（stage 推断）
+const STAGE_LABEL = { error: '失败', judging: '判分中', judge_failed: '判分失败', completed: '完成' }
+const stageLabel = (s) => STAGE_LABEL[s] || s
 // 分数统一兜底：保留 2 位小数并去尾零（避免 100.0 / 2.092 这类长尾展示，走查 #3）
 const fmtScore = (v) => (v == null ? 'N/A' : Number(Number(v).toFixed(2)))
 // P2-C4：tooltip 走 ECharts HTML 渲染，任何动态串进 HTML 前必须转义（存量恶意 version 兜底）
@@ -961,6 +1005,7 @@ function resetDrill() {
   compareB.value = null
   compareData.value = null
   curRunId.value = null
+  curRunKnowledge.value = null
   detailVisible.value = false
   runResults.value = []
   runFailures.value = { items: [], top_reasons: [] }
@@ -974,6 +1019,7 @@ async function doCompare() {
 
 async function openRunDetail(row) {
   curRunId.value = row.id
+  curRunKnowledge.value = row.knowledge_version || null
   resultsLoading.value = true
   detailVisible.value = true
   try {
