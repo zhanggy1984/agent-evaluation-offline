@@ -57,6 +57,7 @@ class EvalRun(Base):
     total_cost: Mapped[float | None] = mapped_column(Numeric(12, 6))
     env_snapshot: Mapped[dict | None] = mapped_column(JSON)   # 两段：contract_version+adapter_config_hash；meta 回填 git_sha/knowledge_version/model
     run_config: Mapped[dict | None] = mapped_column(JSON)     # scope=run 配置冻结值（创建时快照）
+    case_ids: Mapped[list | None] = mapped_column(JSON)       # #3 定向重跑子集（None=全量；run_out redact 时裁剪留出集）
 
 
 class EvalResult(Base):

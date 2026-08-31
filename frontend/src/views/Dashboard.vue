@@ -84,7 +84,14 @@
         <el-table-column label="Agent" width="160">
           <template #default="{ row }">{{ agentName(row.agent_id) }}</template>
         </el-table-column>
-        <el-table-column prop="version" label="版本" width="100" />
+        <el-table-column label="版本" width="150">
+          <template #default="{ row }">
+            {{ row.version }}
+            <el-tag v-if="row.case_ids?.length" size="small" type="info" style="margin-left: 4px">
+              子集 {{ row.case_ids.length }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="160">
           <template #default="{ row }">
             <el-tag :type="runStatus(row.status).type" size="small">{{ runStatus(row.status).label }}</el-tag>
@@ -104,7 +111,7 @@
         <el-table-column label="开始时间" min-width="160">
           <template #default="{ row }">{{ fmtTime(row.started_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="170" fixed="right">
+        <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openRunDetail(row)">明细</el-button>
             <el-button v-if="isStaff && isActive(row.status)" link type="warning" size="small" @click="doCancel(row)">
@@ -112,6 +119,15 @@
             </el-button>
             <el-button v-if="isStaff && !isActive(row.status)" link type="primary" size="small" @click="doRerun(row)">
               重跑
+            </el-button>
+            <el-button
+              v-if="isStaff && !isActive(row.status) && row.fail_case > 0"
+              link
+              type="warning"
+              size="small"
+              @click="doRerunFailed(row)"
+            >
+              重跑未达标
             </el-button>
           </template>
         </el-table-column>
@@ -1018,17 +1034,42 @@ async function doCancel(row) {
 }
 
 async function doRerun(row) {
+  // 子集 run 重跑同一批：显式传 case_ids（=row.case_ids），全量 run 传 null → 后端继承原 run 子集（null=全量）
+  const scope = row.case_ids?.length ? `（子集 ${row.case_ids.length} 例）` : ''
   try {
     await ElMessageBox.confirm(
-      `确认重跑 run #${row.id}（${row.version}）？将真实调用 agent，耗时/费用。`,
+      `确认重跑 run #${row.id}（${row.version}）${scope}？将真实调用 agent，耗时/费用。`,
       '重跑评测',
       { type: 'warning' }
     )
   } catch {
     return
   }
-  const res = await rerunRun(row.id)
+  const res = await rerunRun(row.id, { case_ids: row.case_ids })
   ElMessage.success(`已创建 run #${res.id}`)
+  refreshAll()
+  startPoll()
+}
+
+// 定向重跑未达标（#3）：拉 run_failures 失败 case_ids，仅重跑这批
+async function doRerunFailed(row) {
+  const failures = await listRunFailures(row.id)
+  const ids = failures.map((f) => f.case_id)
+  if (!ids.length) {
+    ElMessage.info('该 run 无未达标用例，无需定向重跑')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认仅重跑 run #${row.id} 的 ${ids.length} 个未达标用例？将真实调用 agent，耗时/费用。`,
+      '定向重跑未达标',
+      { type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  const res = await rerunRun(row.id, { case_ids: ids })
+  ElMessage.success(`已创建定向 run #${res.id}（${ids.length} 例）`)
   refreshAll()
   startPoll()
 }

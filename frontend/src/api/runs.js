@@ -12,8 +12,8 @@ export const createRun = (data) => http.post('/api/runs', data)
 // POST /runs/{id}/cancel（staff，非终态）
 export const cancelRun = (id) => http.post(`/api/runs/${id}/cancel`)
 
-// POST /runs/{id}/rerun（staff，复用冻结配置）
-export const rerunRun = (id) => http.post(`/api/runs/${id}/rerun`)
+// POST /runs/{id}/rerun（staff，复用冻结配置；body.case_ids 可选：null=继承原 run 子集，数组=定向改批）
+export const rerunRun = (id, body) => http.post(`/api/runs/${id}/rerun`, body)
 
 // GET /runs/{id}/results → L3 用例明细
 export const listRunResults = (runId) => http.get(`/api/runs/${runId}/results`)

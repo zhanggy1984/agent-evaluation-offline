@@ -29,6 +29,7 @@ from app.models import (
 )
 from app.models.user import User
 from app.runner.orchestrator import orchestrator
+from app.runner.scorer import _gate_met  # #2 门禁判定同源（fail_dims 与 run 门禁同一口径）
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -49,12 +50,41 @@ class RunCreate(BaseModel):
     version: str = Field(min_length=1, max_length=64)
     # 6.4 留出集复测：trigger_type=held_out 只跑 is_held_out 用例（QA 触发）
     trigger_type: Literal["manual", "held_out"] = "manual"
+    # #3 定向重跑：None=全量；非空=只跑指定 case 子集（去重/归属/留出集匹配由创建接口校验）
+    case_ids: list[int] | None = None
+
+
+class RerunBody(BaseModel):
+    # #3：None=继承源 run 子集（重跑同一批）；非空=定向改批
+    case_ids: list[int] | None = None
 
 
 async def _snapshot_run_config(db: AsyncSession) -> dict:
     """快照 scope=run 的 system_config（创建时冻结，执行期不再读热配置）。"""
     rows = (await db.execute(select(SystemConfig).where(SystemConfig.scope == "run"))).scalars().all()
     return {r.key: r.value for r in rows}
+
+
+async def _validate_case_ids(db: AsyncSession, suite_id: int, trigger_type: str,
+                             case_ids: list[int] | None) -> list[int] | None:
+    """#3 定向重跑：case_ids 校验，返回有序去重列表（None/空=全量）。
+
+    校验项：set 去重保序、id 属于 suite 且 active、is_held_out 与 trigger_type 匹配。
+    任一无效 → 400（拒绝静默剔除，避免 run 实际执行数与请求子集不一致的困惑）。
+    """
+    if not case_ids:
+        return None
+    ids = list(dict.fromkeys(case_ids))  # 去重保序
+    rows = (await db.execute(select(TestCase).where(
+        TestCase.id.in_(ids), TestCase.suite_id == suite_id,
+        TestCase.status == "active",
+        TestCase.is_held_out == (trigger_type == "held_out")))).scalars().all()
+    missing = set(ids) - {c.id for c in rows}
+    if missing:
+        raise ApiError(E_VALIDATION,
+                       f"case_ids 含无效用例（不属于该 suite / 非 active / 留出集不匹配）: "
+                       f"{sorted(missing)[:5]}", 400)
+    return ids
 
 
 async def _is_held_out_hidden(db: AsyncSession, run: EvalRun, user: User) -> bool:
@@ -84,6 +114,7 @@ def _run_out(r: EvalRun, *, redact: bool = False) -> dict:
         "judge_incomplete": None if redact else r.judge_incomplete,
         "ttft_p50": None if redact else (float(r.ttft_p50) if r.ttft_p50 is not None else None),
         "e2e_p50": None if redact else (float(r.e2e_p50) if r.e2e_p50 is not None else None),
+        "case_ids": None if redact else r.case_ids,  # #3 子集（redact 裁剪留出集内容指纹）
     }
 
 
@@ -101,6 +132,8 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
     suite = await db.get(TestSuite, body.suite_id)
     if suite is None or suite.agent_id != body.agent_id:
         raise ApiError(E_VALIDATION, "suite 不存在或不属于该 agent", 400)
+    # #3 定向重跑：case_ids 校验（None/空=全量；非空=子集）
+    case_ids = await _validate_case_ids(db, body.suite_id, body.trigger_type, body.case_ids)
     # 互斥：同 agent 单 in_progress run（§15.4）。7.6 C1 多 worker 化：
     # 持 agent 行 FOR UPDATE 锁跨 worker 串行「查 active + 插 run + commit」，
     # 防止两 worker 同时过互斥检查各建一个 run（内存态互斥不跨进程）。
@@ -117,6 +150,7 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
             agent_id=body.agent_id, suite_id=body.suite_id, version=body.version,
             trigger_type=body.trigger_type, status="pending", generation=1,
             run_config=await _snapshot_run_config(db),
+            case_ids=case_ids,
             # 7.5a pending 回收兜底：创建即写初始租约（start_run 心跳立即覆盖为计算值，正常 run 零影响）；
             # 若 orchestrator 未接管（进程崩溃/任务丢失），scanner ① 回收 pending 释放互斥槽
             lease_until=datetime.utcnow() + timedelta(seconds=90),
@@ -179,10 +213,14 @@ async def cancel_run(run_id: int, request: Request, _: User = Staff,
 
 @router.post("/{run_id}/rerun")
 async def rerun_run(run_id: int, request: Request, _: User = Staff,
-                    db: AsyncSession = Depends(get_db)):
+                    db: AsyncSession = Depends(get_db),
+                    body: RerunBody | None = None):
     src = await db.get(EvalRun, run_id)
     if src is None:
         raise ApiError(E_NOT_FOUND, "run 不存在", 404)
+    # #3 定向重跑：None=继承源 run 子集（普通 run=全量，子集 run=同一子集）；非空=定向改批
+    case_ids = src.case_ids if body is None or body.case_ids is None else (
+        await _validate_case_ids(db, src.suite_id, src.trigger_type, body.case_ids))
     # 7.6 C1 同 create_run：跨 worker 串行「查 active + 插 run + commit」
     # P2-D2：同 create_run，活跃检查锁定读，避免 REPEATABLE READ 旧快照漏看并发 run。
     async with agent_mutex(src.agent_id, db):
@@ -194,6 +232,7 @@ async def rerun_run(run_id: int, request: Request, _: User = Staff,
             agent_id=src.agent_id, suite_id=src.suite_id, version=src.version,
             trigger_type=src.trigger_type, status="pending", generation=1,
             run_config=src.run_config,  # 复用冻结配置
+            case_ids=case_ids,  # #3：None=继承源子集，非空=定向改批
             lease_until=datetime.utcnow() + timedelta(seconds=90),  # 7.5a 同 create_run
         )
         db.add(run)
@@ -280,7 +319,7 @@ async def run_failures(run_id: int, user: User = Depends(get_current_user),
                 continue
             value = float(entry["value"])
             target = resolved.get(code)
-            if target is not None and value < target:
+            if target is not None and not _gate_met(value, target, code):
                 fail_dims.append({"code": code, "value": value, "target": target})
         fail_codes = {d["code"] for d in fail_dims}
         judge_failures = [j for j in (r.judge_results or [])

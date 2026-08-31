@@ -29,7 +29,8 @@ from app.core.lock import agent_mutex
 from app.core.probe import probe_interface
 from app.core.retry import retry_with_backoff
 from app.core.security import fernet_decrypt
-from app.models import Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, TestCase, TestSuite
+from app.models import Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, TestSuite
+from app.runner.case_loader import _load_run_cases
 from app.runner.executor import RETRYABLE_ERRORS, CaseOutcome, execute_case
 from app.runner.scorer import _enabled_semantic_dims, score_run
 
@@ -132,11 +133,9 @@ class RunOrchestrator:
                 return
             agent = await db.get(Agent, run.agent_id)
             suite = await db.get(TestSuite, run.suite_id)
-            # 6.4b 留出集：held_out run 只跑 is_held_out 用例，manual run 排除留出集
-            held_out = run.trigger_type == "held_out"
-            cases = (await db.execute(select(TestCase).where(
-                TestCase.suite_id == run.suite_id, TestCase.status == "active",
-                TestCase.is_held_out == held_out))).scalars().all()
+            # 6.4b 留出集 + #3 定向重跑：case 过滤单一来源
+            # （执行/probe/对账/salvage 四处同源，过滤规则变更只改 _load_run_cases 一处）
+            cases = await _load_run_cases(db, run)
             run_config = run.run_config or {}
             # 冻结 scope=run 的并发/超时/重复数配置（run_config 由创建接口快照）
             global_limit = run_config.get("global_max_inflight", 16)
@@ -272,10 +271,9 @@ class RunOrchestrator:
         """
         async with SessionLocal() as db:
             run = await db.get(EvalRun, run_id)
-            held_out = run.trigger_type == "held_out" if run else False
-            cases = (await db.execute(select(TestCase).where(
-                TestCase.suite_id == suite_id, TestCase.status == "active",
-                TestCase.is_held_out == held_out))).scalars().all()
+            if run is None:
+                return False  # run 已不存在，中止探测（原逻辑 run None 兜底 held_out=False，路径实际不可达）
+            cases = await _load_run_cases(db, run)
         if not cases:
             return True  # 无 active case 在前面已被拦截，双保险
         probe_case = cases[0]
@@ -494,9 +492,7 @@ class RunOrchestrator:
             total = len(results)
             # 对账：total_case 与结果条数差 → 缺失回填 error（cancel 或熔断未落）
             if total < run.total_case:
-                for case in (await db.execute(select(TestCase).where(
-                        TestCase.suite_id == run.suite_id, TestCase.status == "active",
-                        TestCase.is_held_out == (run.trigger_type == "held_out")))).scalars():
+                for case in await _load_run_cases(db, run):
                     if not any(r.case_id == case.id for r in results):
                         # P2-D6：事务内直插 error 结果（复用本事务 db）。本事务持 run 行
                         # FOR UPDATE 锁；若走 _save_result 自开 session，插 eval_result 的

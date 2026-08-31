@@ -413,6 +413,9 @@ async def set_targets(
     """阈值双签：approved 才参与快照。auto=自动标定；手动改 → pending_approval；第二人 → approved。"""
     await _get_agent(db, agent_id)
     for dim, score in body.target_scores.items():
+        # #2 档位化前提：target 必须是合法分值域（负数/超界会让 int(target//20) 语义未定义）
+        if not 0.0 <= float(score) <= 100.0:
+            raise ApiError(E_VALIDATION, f"target_score 需在 0-100 范围内（{dim}={score}）", 400)
         row = (await db.execute(select(BaselineTarget).where(
             BaselineTarget.agent_id == agent_id,
             BaselineTarget.interface_id == iid,

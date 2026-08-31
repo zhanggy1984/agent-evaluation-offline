@@ -240,13 +240,22 @@ class TestBuildBaseline(unittest.TestCase):
         self.assertAlmostEqual(d["gap"], 3.0, places=2)  # 78-75
 
     def test_fallback_agent_default(self):
+        # #2 档位化：68 与 70 同档（3 档）→ met=True（消除「差 2 分生死不同档」悬崖）
         results = [self._result(101, {"factuality": 68})]
         out = build_baseline(results, {101: 1}, {(0, "factuality"): 70}, [self._iface(1, "a")])
         dims = {d["code"]: d for d in out[0]["dims"]}
         d = dims["factuality"]
         self.assertEqual(d["target"], 70.0)
+        self.assertTrue(d["met"])
+        self.assertAlmostEqual(d["gap"], -2.0, places=2)  # gap 保留连续差（展示口径不变）
+
+    def test_semantic_below_floor_not_met(self):
+        # 跨档仍不达标：59（2 档）对 70（3 档）→ met=False（与门禁 _gate_met 同源）
+        results = [self._result(101, {"factuality": 59})]
+        out = build_baseline(results, {101: 1}, {(0, "factuality"): 70}, [self._iface(1, "a")])
+        d = {x["code"]: x for x in out[0]["dims"]}["factuality"]
         self.assertFalse(d["met"])
-        self.assertAlmostEqual(d["gap"], -2.0, places=2)
+        self.assertAlmostEqual(d["gap"], -11.0, places=2)
 
     def test_na_and_none_excluded(self):
         """na 维度不计均值；无有效值 → score None（met/gap 无判定）。"""

@@ -6,6 +6,7 @@
 from statistics import mean, stdev
 
 from app.core.constants import ACCURACY_DIMENSIONS
+from app.runner.scorer import _gate_met  # #2 门禁判定同源（scorer 顶层零 DB 依赖，无环）
 
 # run 终态：只有终态 run 才有评分/分数（cancel 不产生结果）
 TERMINAL_STATUS = {"completed", "partial_failed", "scoring_failed", "timeout", "cancelled"}
@@ -158,7 +159,9 @@ def build_baseline(results, case_interface: dict, targets: dict, interfaces) -> 
             if score is None or target is None:
                 gap, met = None, None
             else:
-                gap, met = round(score - target, 2), score >= target
+                # #2 档位化：met 与 run 门禁同源（语义维度 floor 档判定，规则维度连续分）。
+                # gap 保留连续差值（展示「差多少」，判定口径才档位化）。
+                gap, met = round(score - target, 2), _gate_met(score, target, dim)
             dims.append({"code": dim, "score": score, "target": target,
                          "gap": gap, "met": met})
         out.append({"interface_id": iface.id, "name": iface.name,

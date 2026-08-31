@@ -32,6 +32,7 @@ class _Run:
     lease_until = None
     hard_deadline = None
     env_snapshot = None
+    case_ids = None  # #3 子集：_load_run_cases 访问 run.case_ids，mock 需有该字段（None=全量）
 
 
 class _Agent:
