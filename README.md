@@ -316,18 +316,29 @@ ai-evaluation/
 
 ## 九、测试与验收
 
-**实测全绿（2026-08-21）：后端单测 387 + 集成测试 17 + 前端单测 20 = 424 项。**
+**四家 agent V2 门禁全部通过（2026-08-31）**：发布前门禁评测（门禁判定规程 V2：规则维度全过 + judge 2/3 多数决 + run 级 agent_score 均值 ≥85，详见 [上线待办.md](上线待办.md)「门禁判定规程 V2」），4 家现有 agent 全 PASS——
 
-后端单测覆盖（`backend/tests/`，387 项）：
+| agent | 复测 run | 结果 | 均分 |
+|---|---|---|---|
+| gq（2300）| 2558/2559/2560 | 16 case 全 PASS | 99.46 |
+| cc（2299）| 2561/2562/2563 | 10 case 全 PASS | 100.0 |
+| sp（2297）| 2564/2565/2567 | 9 case 全 PASS | 92.48 |
+| cs（2298）| 2566/2568/2569 | 17 case 全 PASS | 97.12 |
+
+gq 是唯一需门禁 target 调整方（factuality 90→80、reasoning 85→80——judge 6 档步进下 85/90 等价必须满分档，评语正面的「轻微瑕疵」稳定 80 被误伤）；其余三家 target 现状无需调整。
+
+**实测全绿（2026-08-30 全量回归）：后端单测 555（另有 87 skipped）+ 集成测试 86 + 前端单测 40 = 681 项。**
+
+后端单测覆盖（`backend/tests/`，555 项）：
 
 - **runner 链路**：orchestrator（重试 / 限流 / per-run 桶）、executor、scorer、run 超时、契约探测 probe、engine、assembler；
 - **judge / metrics**：judge 六级评分、LLM 调用、metrics 维度（factuality/reasoning/completeness/tool_usage + ttft/e2e/cost）；
 - **断言 / 插件**：四类断言算子、断言白名单、插件注册；
 - **平台能力**：仪表盘聚合（门禁墙 / 覆盖 / 基线）、基线达标分、标注、审计、安全（响应头/SSRF）、熔断器、幂等清理、限流接线。
 
-集成测试（`tests/integration/`，17 项，`RUN_INTEGRATION=1` 才连库）：完整 run 执行、scanner 回收、7.6 多 worker 互斥。
+集成测试（`tests/integration/`，86 项，`RUN_INTEGRATION=1` 才连库）：完整 run 执行、scanner 回收、7.6 多 worker 互斥。
 
-前端单测（vitest，20 项）：`utils/` 纯函数（runFilter / caseParse / meta 常量）。
+前端单测（vitest，40 项）：`utils/` 纯函数（runFilter / caseParse / meta 常量）+ `Onboarding.test.js` wizard 组件测试（5 项）。
 
 **跑测试**：
 
