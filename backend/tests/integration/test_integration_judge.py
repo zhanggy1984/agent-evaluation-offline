@@ -27,7 +27,8 @@ from helpers import create_chain, make_run
 
 
 async def _seed_judge_env(env, db, *, case_names=None, max_retries=2, answer="A 售价 100 元",
-                          pass_fail="pass", task_status="pending"):
+                          pass_fail="pass", task_status="pending",
+                          reasoning=None, tool_calls=None):
     """播种：chain + completed run + 每 case 一条 case_version/eval_result/judge_task(factuality)。"""
     ch = await create_chain(db, case_names=case_names or ["it72-case"])
     run = make_run(ch["agent"].id, ch["suite"].id,
@@ -42,7 +43,8 @@ async def _seed_judge_env(env, db, *, case_names=None, max_retries=2, answer="A 
         db.add(cv)
         await db.flush()
         res = EvalResult(run_id=run.id, case_id=case.id, case_version_id=cv.id,
-                         pass_fail=pass_fail, answer=answer)
+                         pass_fail=pass_fail, answer=answer,
+                         reasoning=reasoning, tool_calls=tool_calls)
         db.add(res)
         await db.flush()
         task = JudgeTask(run_id=run.id, case_id=case.id, dimension_code="factuality",
@@ -156,6 +158,33 @@ async def test_process_one_done(db, env):
     assert fresh.result["repeat"] == 3
     assert len(fresh.result["repeats"]) == 3
     assert fresh.result["repeats"][0]["level"] == 4
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_process_one_passes_reasoning_tool_calls(db, env):
+    """P2-A3：EvalResult 的 reasoning/tool_calls 透传到 judge；reasoning [:4000] 截断生效。
+
+    长推理链（9000 字符）截断为 4000；tool_calls 序列化透传（< 4000 不截断）。
+    """
+    run, _, ch = await _seed_judge_env(env, db, reasoning="先查库" * 3000,  # 9000 字符 → 截断
+                                       tool_calls=[{"name": "search", "arguments": {"q": "A"}}])
+    seen = {}
+    v4 = JudgeVerdict(dimension="factuality", level=4, score=80.0, reason="准确", rubric_version="1.2")
+
+    async def judge(**kwargs):
+        seen["agent_reasoning"] = kwargs.get("agent_reasoning")
+        seen["agent_tool_calls"] = kwargs.get("agent_tool_calls")
+        seen["agent_output"] = kwargs.get("agent_output")
+        return v4
+    await worker._process_one(await _detached_task(run.id),
+                              {"judge_max_retries": 2, "judge_repeat": 1},
+                              ch["iface"].id, types.SimpleNamespace(judge=judge))
+    fresh = await _load_task(db, run.id)
+    assert fresh.status == "done"
+    assert len(seen["agent_reasoning"]) == 4000          # 截断生效
+    assert "先查库" in seen["agent_reasoning"]
+    assert "search" in seen["agent_tool_calls"]           # tool_calls 序列化透传
+    assert seen["agent_output"] == "A 售价 100 元"        # answer 原样透传
 
 
 @pytest.mark.asyncio(loop_scope="session")

@@ -96,6 +96,8 @@ def build_messages(
     golden_answer: Any | None,
     agent_output: str | None,
     reference_docs: str | None = None,
+    agent_reasoning: str | None = None,
+    agent_tool_calls: Any | None = None,
 ) -> list[dict]:
     """组装 messages。
 
@@ -104,6 +106,9 @@ def build_messages(
     reference_docs 为 case 的 ground truth 原文（标书/知识库/合同等），可选；
     注入后 judge 能区分「忠实引用原文」vs「凭空编造」（根治 golden_answer
     覆盖不全导致的信息不对称误判，阶段 7.3 sp 低分根因）。
+    reasoning/tool_calls 为 agent 推理链/工具调用序列（P2-A3：reasoning 维度判分
+    的证据，answer 简短时 judge 不再无据），可选；truthy 才渲染（None/空串不渲染
+    空行），与 agent 输出同源同防护。
     """
     dimension_name = template.get("name", dimension)
     system = (
@@ -129,6 +134,10 @@ def build_messages(
     if reference_docs:
         parts.append(f"参考依据文档（事实基准，agent 引用其中内容视为忠实）：{_dump(reference_docs)}")
     parts.append(f"agent 回答：{_dump(agent_output or '')}")
+    if agent_reasoning:
+        parts.append(f"推理链：{_dump(agent_reasoning)}")
+    if agent_tool_calls:
+        parts.append(f"工具调用序列：{_dump(agent_tool_calls)}")
     parts.append("</evaluation_data>")
     parts.append(f"请判定该 agent 回答的 {dimension_name} 等级，输出 JSON："
                  f"{{\"level\": <0-5>, \"reason\": \"<理由>\"}}。")
@@ -163,11 +172,15 @@ class JudgeClient:
         agent_output: str | None,
         rubric_version: str,
         reference_docs: str | None = None,
+        agent_reasoning: str | None = None,
+        agent_tool_calls: Any | None = None,
     ) -> JudgeVerdict:
         """调一次 LLM 判分。失败抛 JudgeError（不重试，由 worker attempts 控制）。"""
         messages = build_messages(dimension=dimension, template=template,
                                   case_input=case_input, golden_answer=golden_answer,
-                                  agent_output=agent_output, reference_docs=reference_docs)
+                                  agent_output=agent_output, reference_docs=reference_docs,
+                                  agent_reasoning=agent_reasoning,
+                                  agent_tool_calls=agent_tool_calls)
         payload = {
             "model": self.model,
             "messages": messages,

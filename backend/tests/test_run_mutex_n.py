@@ -30,15 +30,19 @@ class _ScalarResult:
     def first(self):
         return self._rows[0] if self._rows else None
 
+    def scalar(self):
+        return self._rows[0][0] if self._rows else None
+
 
 class _FakeDB:
     """create_run/rerun_run 的查询分派：get→agent/suite/src，eval_run→按 _MUTEX_STATUS 过滤，
-    system_config→注入配置（缺行兜底）。"""
+    system_config→注入配置（缺行兜底）；test_case→V1 空转校验的 count（默认 1=suite 有 active 用例）。"""
 
-    def __init__(self, agent=None, suite=None, active=None, sys_cfg=None):
+    def __init__(self, agent=None, suite=None, active=None, sys_cfg=None, case_count=1):
         self._agent, self._suite = agent, suite
         self._active = active or []            # [{id, status}]
         self._sys_cfg = dict(sys_cfg or [])    # key -> value（global scope）
+        self._case_count = case_count          # V1：suite 匹配的 active 用例数（0 → 空转 400）
         self._src = None
         self.added = []
 
@@ -54,6 +58,8 @@ class _FakeDB:
 
     async def execute(self, stmt):
         s = str(stmt).lower()
+        if "test_case" in s:
+            return _ScalarResult([(self._case_count,)])   # V1 空转校验 count
         if "eval_run.id" in s:
             # #4：互斥计数只算执行中（pending/running），scoring 不占槽
             rows = [a for a in self._active if a.status in _MUTEX_STATUS]

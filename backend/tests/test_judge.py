@@ -124,6 +124,33 @@ class TestBuildMessages(unittest.TestCase):
         # 默认不传 reference_docs：既有 case 行为零变化（不渲染该段落）
         self.assertNotIn("参考依据文档", self.msg[1]["content"])
 
+    def test_reasoning_tool_calls_rendered_when_provided(self):
+        # P2-A3：reasoning/tool_calls 透传 → evaluation_data 内渲染两行（evidence 供 reasoning 判分）
+        msg = build_messages(dimension=DIM, template=TEMPLATE,
+                             case_input=CASE, golden_answer=GOLDEN,
+                             agent_output="mock agent 的最终回答",
+                             agent_reasoning="先查库，再比对，最后下结论",
+                             agent_tool_calls=[{"name": "search", "arguments": {"q": "A"}}])
+        user = msg[1]["content"]
+        self.assertIn("推理链：先查库，再比对，最后下结论", user)
+        self.assertIn("工具调用序列", user)
+        self.assertIn("search", user)
+
+    def test_reasoning_empty_string_not_rendered(self):
+        # P2-A3：空串不渲染空行（truthy 判定）；空列表 tool_calls 同理
+        msg = build_messages(dimension=DIM, template=TEMPLATE,
+                             case_input=CASE, golden_answer=GOLDEN,
+                             agent_output="mock agent 的最终回答",
+                             agent_reasoning="", agent_tool_calls=[])
+        user = msg[1]["content"]
+        self.assertNotIn("推理链", user)
+        self.assertNotIn("工具调用序列", user)
+
+    def test_reasoning_omitted_when_none(self):
+        # 默认不传：既有 case 行为零变化
+        self.assertNotIn("推理链", self.msg[1]["content"])
+        self.assertNotIn("工具调用序列", self.msg[1]["content"])
+
 
 class TestAllowlist(unittest.TestCase):
     def test_allowed_host(self):

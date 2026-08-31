@@ -117,7 +117,11 @@ def score_case(
         acc.append((dim, mr.score, weight))
 
     total_w = sum(w for _, _, w in acc)
-    total_accuracy_weight = sum(weights.get(d, DEFAULT_WEIGHTS[d]) for d in ACCURACY_DIMENSIONS)
+    # P2-A4：分母只累 enabled 维度（与 semantic_na_weight / judge_failed_dims 同口径）。
+    # 修复前遍历全四维使「评分完整度」= 已判权重/应判权重 的分母偏大 → run 级
+    # judge_incomplete 与 #6 N/A 保护被低估。case_metrics 未配置 → enabled=全四维 → 不变。
+    total_accuracy_weight = sum(weights.get(d, DEFAULT_WEIGHTS[d])
+                                for d in ACCURACY_DIMENSIONS if d in enabled)
     score_total = sum(s * w for _, s, w in acc) / total_w if acc else None
 
     # 门禁：配置了 target 的 accuracy 维度，任一不达标 → fail（N/A 维度不判；#2 档位化判定）

@@ -112,6 +112,26 @@ async def _validate_case_ids(db: AsyncSession, suite_id: int, trigger_type: str,
     return ids
 
 
+async def _ensure_suite_has_cases(db: AsyncSession, suite_id: int, trigger_type: str,
+                                  case_ids: list[int] | None) -> None:
+    """V1 防 0-case 空转：全量触发（case_ids=None）校验 suite 有匹配的 active 用例。
+
+    子集路径已由 _validate_case_ids 逐 id 校验（返回即全有效），此处仅兜全量。
+    校验条件与 case_loader._load_run_cases 逐字同口径（status=active + is_held_out 匹配）。
+    稳态防护：校验与执行窗口间 case 仍可能被置非 active（TOCTOU），与 case_loader 既有
+    静默剔除语义一致——防的是「suite 本就无 active 用例」造出空转 run，非并发安全。
+    """
+    if case_ids is not None:
+        return
+    cnt = (await db.execute(select(func.count()).select_from(TestCase).where(
+        TestCase.suite_id == suite_id,
+        TestCase.status == "active",
+        TestCase.is_held_out == (trigger_type == "held_out")))).scalar() or 0
+    if cnt == 0:
+        raise ApiError(E_VALIDATION,
+                       "该 suite 无匹配的 active 用例（全量触发），请先创建/启用用例", 400)
+
+
 async def _is_held_out_hidden(db: AsyncSession, run: EvalRun, user: User) -> bool:
     """7.8 前置⑤：留出集 owner 隐藏。owner 不可见 held-out run 的用例结果
     （deps.is_held_out_visible 同语义；与 annotations.py 对 held-out case 的处理一致）。"""
@@ -217,6 +237,8 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
         raise ApiError(E_VALIDATION, "suite 不存在或不属于该 agent", 400)
     # #3 定向重跑：case_ids 校验（None/空=全量；非空=子集）
     case_ids = await _validate_case_ids(db, body.suite_id, body.trigger_type, body.case_ids)
+    # V1 防 0-case 空转：全量触发时校验 suite 有匹配的 active 用例（子集已有逐 id 校验）
+    await _ensure_suite_has_cases(db, body.suite_id, body.trigger_type, case_ids)
     # 互斥：#4 并发上限 N（max_active_runs_per_agent，默认 1）。7.6 C1 多 worker 化：
     # 持 agent 行 FOR UPDATE 锁跨 worker 串行「查 active + 插 run + commit」，
     # 防止两 worker 同时过互斥检查各建一个 run（内存态互斥不跨进程）。
@@ -338,6 +360,9 @@ async def rerun_run(run_id: int, request: Request, _: User = Staff,
     # #3 定向重跑：None=继承源 run 子集（普通 run=全量，子集 run=同一子集）；非空=定向改批
     case_ids = src.case_ids if body is None or body.case_ids is None else (
         await _validate_case_ids(db, src.suite_id, src.trigger_type, body.case_ids))
+    # V1 防 0-case 空转：源 run 全量（case_ids=None）且 suite 用例随后被禁用 → 重跑同样空转，
+    # 与 create_run 同校验（子集继承已有 _validate_case_ids 保护）
+    await _ensure_suite_has_cases(db, src.suite_id, src.trigger_type, case_ids)
     # #4 护栏：源 run 执行中（pending/running）不可并行重跑——N>1 放行计数时若源仍在跑，
     # 会「源执行中即全量再跑一遍」（前端 isActive 已门住，API 层兜底防直连绕过）。
     # scoring 源允许（不占执行槽，复用配置再跑合理）。

@@ -130,6 +130,22 @@ async def test_judge_ok_parses_verdict(judge_server, monkeypatch):
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_judge_reasoning_tool_calls_in_request(judge_server, monkeypatch):
+    """P2-A3：agent_reasoning/agent_tool_calls 透传到请求 messages（evaluation_data 内渲染）。"""
+    STATE.body = _ok_body(level=4, reason="推理合理")
+    client = _client(judge_server, monkeypatch)
+    try:
+        await client.judge(**ARGS, agent_reasoning="先查后答",
+                           agent_tool_calls=[{"name": "search", "arguments": {"q": "A"}}])
+        payload = json.loads(STATE.requests[0]["body"])
+        user = payload["messages"][1]["content"]
+        assert "推理链：先查后答" in user
+        assert "工具调用序列" in user and "search" in user
+    finally:
+        await client._http.aclose()
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_judge_ok_fenced_json(judge_server, monkeypatch):
     """LLM 输出 ```json 包裹也能解析（extract_verdict 容忍）。"""
     STATE.body = {"choices": [{"message": {"content": "```json\n{\"level\": 5, \"reason\": \"完全一致\"}\n```"}}]}

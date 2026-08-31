@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -172,6 +173,12 @@ async def _process_one(t: JudgeTask, run_cfg: dict, interface_id: int, client: J
                         golden_answer=(snapshot.get("expected") or {}).get("golden_answer"),
                         reference_docs=(snapshot.get("expected") or {}).get("reference_docs"),
                         agent_output=result.answer,
+                        # P2-A3：reasoning 维度判分证据透传。MEDIUMTEXT(16MB) + repeat 翻倍
+                        # （最多 repeat×2 维次全量发送）会撑爆输入上下文 → 统一 [:4000] 截断；
+                        # answer 未截断是既有状态，本次不动（超待办范围）
+                        agent_reasoning=(result.reasoning or "")[:4000],
+                        agent_tool_calls=(json.dumps(result.tool_calls, ensure_ascii=False)[:4000]
+                                          if result.tool_calls else None),
                         rubric_version=version,
                     )
                     verdicts.append(verdict)

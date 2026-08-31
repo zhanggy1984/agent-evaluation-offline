@@ -265,6 +265,38 @@ class TestJudgeIncomplete(unittest.TestCase):
         self.assertAlmostEqual(r.score_total, 87.0)
 
 
+class TestEnabledDenominator(unittest.TestCase):
+    """P2-A4：评分完整度分母按 enabled 过滤（修复前恒全四维和，低估不完整）。"""
+
+    def test_total_accuracy_weight_filters_enabled(self):
+        # 只启用 completeness+factuality（0.3+0.35）：分母收紧到 0.65（修复前恒 1.0）
+        r = _base(case_metrics={"completeness": {"enabled": True},
+                                "factuality": {"enabled": True}})
+        self.assertAlmostEqual(r.total_accuracy_weight, 0.65)
+
+    def test_incomplete_cross_threshold_enabled_filter(self):
+        # 仅启用 reasoning_quality(0.15) 且该维度 N/A：修复前 0.15/1.0=0.15 不标
+        # incomplete；修复后 0.15/0.15=1.0 标 → run 级 judge_incomplete 翻转
+        r = _base(case_metrics={"reasoning_quality": {"enabled": True}})
+        self.assertAlmostEqual(r.total_accuracy_weight, 0.15)
+        self.assertAlmostEqual(r.semantic_na_weight, 0.15)
+        self.assertGreater(r.semantic_na_weight / r.total_accuracy_weight, 0.3)
+
+    def test_na_protection_cross_threshold_enabled_filter(self):
+        # 同一配置 + judge_failed_dims：修复前 0.15/1.0 不触发（pass）；
+        # 修复后 0.15/0.15=1.0 触发 → na（#6 保护翻转）
+        r = _base(case_metrics={"reasoning_quality": {"enabled": True}},
+                  judge_results=[{"dimension": "reasoning_quality", "level": 1, "score": 0.0}],
+                  judge_failed_dims={"reasoning_quality"})
+        self.assertEqual(r.pass_fail, "na")
+        self.assertEqual(r.na_reason, "semantic_na_high")
+
+    def test_unconfigured_metrics_full_weight(self):
+        # case_metrics=None → enabled=全四维 → 分母 1.0（回归，既有行为不变）
+        r = _base()
+        self.assertAlmostEqual(r.total_accuracy_weight, 1.0)
+
+
 class TestCost(unittest.TestCase):
     def test_cost_with_price(self):
         # 单价单位 = 元/百万 token → 金额(元) = tokens × 单价 / 1e6

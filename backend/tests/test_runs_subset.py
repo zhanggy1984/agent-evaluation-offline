@@ -31,6 +31,9 @@ class _ScalarResult:
     def first(self):
         return self._rows[0] if self._rows else None  # #4 _max_active_runs 用
 
+    def scalar(self):
+        return self._rows[0][0] if self._rows else None  # V1 空转校验 count
+
 
 class _FirstResult:
     def __init__(self, row):
@@ -41,10 +44,12 @@ class _FirstResult:
 
 
 class _FakeDB:
-    """rerun_run/_validate_case_ids 的查询分派：get→src，TestCase→cases，active→list（含 status）。"""
+    """rerun_run/_validate_case_ids 的查询分派：get→src，TestCase→cases，active→list（含 status）。
+    case_count 供 V1 空转校验 count（默认 1=suite 有 active 用例；0 → 空转 400）。"""
 
-    def __init__(self, src=None, cases=None, active=None):
+    def __init__(self, src=None, cases=None, active=None, case_count=1):
         self._src, self._cases, self._active = src, cases or [], active or []
+        self._case_count = case_count
         self.added = []
 
     async def get(self, model, pk, with_for_update=False):
@@ -53,6 +58,8 @@ class _FakeDB:
     async def execute(self, stmt):
         s = str(stmt).lower()
         if "test_case" in s:
+            if "count(" in s:                 # V1 空转校验 count → scalar tuple
+                return _ScalarResult([(self._case_count,)])
             return _ScalarResult(self._cases)
         if "eval_run.id" in s:
             # #4 互斥计数改 .all()：返回列表（元素带 status，由调用方 SQL 条件过滤）
