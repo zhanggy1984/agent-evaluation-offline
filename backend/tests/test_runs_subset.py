@@ -28,6 +28,9 @@ class _ScalarResult:
     def all(self):
         return self._rows
 
+    def first(self):
+        return self._rows[0] if self._rows else None  # #4 _max_active_runs 用
+
 
 class _FirstResult:
     def __init__(self, row):
@@ -38,10 +41,10 @@ class _FirstResult:
 
 
 class _FakeDB:
-    """rerun_run/_validate_case_ids 的查询分派：get→src，TestCase→cases，active→None。"""
+    """rerun_run/_validate_case_ids 的查询分派：get→src，TestCase→cases，active→list（含 status）。"""
 
     def __init__(self, src=None, cases=None, active=None):
-        self._src, self._cases, self._active = src, cases or [], active
+        self._src, self._cases, self._active = src, cases or [], active or []
         self.added = []
 
     async def get(self, model, pk, with_for_update=False):
@@ -52,7 +55,10 @@ class _FakeDB:
         if "test_case" in s:
             return _ScalarResult(self._cases)
         if "eval_run.id" in s:
-            return _FirstResult(self._active)
+            # #4 互斥计数改 .all()：返回列表（元素带 status，由调用方 SQL 条件过滤）
+            return _ScalarResult(self._active)
+        if "system_config" in s:
+            return _ScalarResult([])  # #4 缺配置行 → _max_active_runs 兜底 1
         return _ScalarResult([])
 
     def add(self, obj):
@@ -148,7 +154,8 @@ class TestValidateCaseIds:
 class TestRerunRun:
     def _src(self, case_ids=None):
         return SimpleNamespace(id=1, agent_id=1, suite_id=2, version="1.0.0",
-                               trigger_type="manual", run_config={}, case_ids=case_ids)
+                               trigger_type="manual", run_config={}, case_ids=case_ids,
+                               status="completed")  # #4：源须终态（执行中 rerun 400）
 
     @pytest.mark.asyncio
     async def test_rerun_inherits_source_subset(self, monkeypatch):
@@ -185,8 +192,8 @@ class TestRerunRun:
 
     @pytest.mark.asyncio
     async def test_rerun_mutex_409(self, monkeypatch):
-        # 已有活跃 run → 409（继承判断在互斥前已算好，仍走互斥）
-        db = _FakeDB(src=self._src(case_ids=None), active=SimpleNamespace(id=99))
+        # 已有执行中 run → 409（缺配置行 → N=1，count=1 >= 1）
+        db = _FakeDB(src=self._src(case_ids=None), active=[SimpleNamespace(id=99, status="running")])
         _patch_orchestrator(monkeypatch)
         with pytest.raises(ApiError) as ei:
             await rerun_run(1, _req(), _user(), db)

@@ -36,14 +36,15 @@ class TestSetTargetsFlow(unittest.TestCase):
         db.execute.return_value = _Exec()
         body = SimpleNamespace(target_scores={"completeness": 80.0})
         request = SimpleNamespace(headers={}, client=SimpleNamespace(host="10.0.0.1"))
-        asyncio.run(set_targets(1, 2, body, user, db))
+        asyncio.run(set_targets(1, 2, body, request, user, db))
         return db
 
     def test_first_change_pending(self):
         # 无既有行：新建 + 记 approved_by_1 + pending_approval
         db = self._call(self._user(1, "admin"), None)
         self.assertTrue(db.add.called)
-        added = db.add.call_args[0][0]
+        # 首次 add 是 BaselineTarget（write_audit 随后 add AuditLog，故取 call_args_list[0]）
+        added = db.add.call_args_list[0][0][0]
         self.assertEqual(added.approval_status, "pending_approval")
         self.assertEqual(added.approved_by_1, 1)
         self.assertIsNone(added.approved_by_2)

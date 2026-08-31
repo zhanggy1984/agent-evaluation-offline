@@ -15,7 +15,6 @@ export const CONFIG_META = {
   judge_call_timeout: { label: 'judge 调用超时', unit: '秒', precision: 0, desc: '单次 judge LLM 调用的超时上限' },
   judge_na_threshold: { label: 'NA 判定阈值', unit: '比例', precision: 2, desc: '判不出结论（NA）的占比上限，超过则该维度结果不可信' },
   error_rate_block: { label: '错误率熔断阈值', unit: '比例', precision: 2, desc: '用例错误率超过该值即熔断该 agent，暂停下发' },
-  assertion_penalty: { label: '断言失败扣分', unit: '分', precision: 0, desc: '断言未通过时该维度的扣分数（百分制）' },
   judge_max_retries: { label: 'judge 最大重试', unit: '次', precision: 0, desc: 'judge 调用失败的最大重试次数' },
   judge_repeat: { label: 'judge 重复判分', unit: '次', precision: 0, desc: '同一用例重复判分次数，取一致结论' },
   breaker_failure_threshold: { label: '熔断失败阈值', unit: '次', precision: 0, desc: '连续失败多少次触发熔断' },
@@ -26,6 +25,7 @@ export const CONFIG_META = {
   // ---- 进程级（global）----
   retain_runs: { label: 'run 保留次数', unit: '次', precision: 0, desc: '每个 agent+套件保留的历史 run 数，超出部分清理' },
   heartbeat_interval: { label: '心跳间隔', unit: '秒', precision: 0, desc: 'orchestrator 心跳间隔（非热生效，改需重启）' },
+  max_active_runs_per_agent: { label: '同 agent 并发 run 上限', unit: '个', precision: 0, desc: '同一 agent 同时执行的 run 数上限；默认 1，调大后并发=该值×单 agent 并发（慎改）' },
   'judge_llm.base_url': { label: 'judge LLM 地址', unit: 'URL', precision: 0, desc: '判分 LLM 的服务地址（密钥走 env）' },
   'judge_llm.model_name': { label: 'judge LLM 模型', unit: '', precision: 0, desc: '判分 LLM 的模型名' },
   // ---- 注册期（registration）----

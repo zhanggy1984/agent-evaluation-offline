@@ -68,6 +68,10 @@ export const getTargets = (id, iid) => http.get(`/api/agents/${id}/interfaces/${
 export const setTargets = (id, iid, targetScores) =>
   http.put(`/api/agents/${id}/interfaces/${iid}/targets`, { target_scores: targetScores })
 
+// ---- 配置变更历史（P2-7） ----
+// GET /agents/{id}/config-history → [{id, action, interface_id, dims, ip, created_at, username}]
+export const getAgentConfigHistory = (id) => http.get(`/api/agents/${id}/config-history`)
+
 // ---- 契约发现 / 同步（scaffold） ----
 // POST /agents/{id}/discover → {ok, agent, contract_version, scenes, interfaces, added/existing/missing/auxiliary}
 export const discoverAgent = (id) => http.post(`/api/agents/${id}/discover`)

@@ -403,6 +403,31 @@
         </span>
       </template>
       <el-table :data="runResults" v-loading="resultsLoading" size="small" stripe>
+        <!-- P2-6 行内明细：失败断言（basic，含 actual）+ judge 判定（staff 才返回） -->
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="row-detail">
+              <div v-if="(row.assertion_results || []).length" class="detail-sec">
+                <div class="detail-title">断言失败</div>
+                <div v-for="(a, i) in row.assertion_results" :key="i" class="fail-dim">
+                  [{{ a.dimension || '-' }}] {{ a.op }} args={{ JSON.stringify(a.args) }} → actual={{ a.actual }}
+                </div>
+              </div>
+              <div v-if="(row.judge_results || []).length" class="detail-sec">
+                <div class="detail-title">Judge 判定</div>
+                <div v-for="(j, i) in row.judge_results" :key="i" class="fail-dim">
+                  {{ DIM_LABEL[j.dimension] || j.dimension }}: {{ fmtScore(j.score) }} — {{ j.reason }}
+                </div>
+              </div>
+              <div
+                v-if="!(row.assertion_results || []).length && !(row.judge_results || []).length"
+                class="detail-sec detail-empty"
+              >
+                无失败断言 / judge 判定
+              </div>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="case_name" label="用例" min-width="160" show-overflow-tooltip />
         <el-table-column prop="interface_name" label="接口" width="120" />
         <el-table-column label="结果" width="80">
@@ -427,6 +452,13 @@
             <span v-if="row.error_type" class="err">{{ row.error_type }}: {{ row.error_detail }}</span>
           </template>
         </el-table-column>
+        <!-- P2-6 Answer 摘要：后端已按 D3 截断 500（basic，含 viewer） -->
+        <el-table-column label="Answer 摘要" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.answer">{{ row.answer }}</span>
+            <span v-else class="dim-na">(空)</span>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="80" fixed="right">
           <template #default="{ row }">
             <el-button v-if="isStaff" link type="primary" size="small" @click="openEvidence(row)">证据</el-button>
@@ -434,13 +466,22 @@
         </el-table-column>
       </el-table>
       <!-- L3.5 门禁失败摘要 -->
-      <div v-if="runFailures.length" class="drawer-failures">
+      <div v-if="runFailures.items && runFailures.items.length" class="drawer-failures">
         <div class="drawer-failures-title">
           <span>门禁失败摘要</span>
           <el-tag size="small" type="warning" style="margin-left: 8px"><TermTip term="L3.5" /></el-tag>
         </div>
+        <!-- P2-6 top 扣分原因：按维度聚合，staff 才有数据（judge reason 证据级） -->
+        <div v-if="runFailures.top_reasons && runFailures.top_reasons.length" class="top-reasons">
+          <div class="top-reasons-title">Top 扣分原因</div>
+          <div v-for="t in runFailures.top_reasons" :key="t.dimension" class="top-reason-item">
+            <el-tag size="small" type="danger">{{ DIM_LABEL[t.dimension] || t.dimension }}</el-tag>
+            <span class="top-reason-count">× {{ t.count }} 例 · avg {{ fmtScore(t.avg_score) }}</span>
+            <div v-for="(r, i) in t.sample_reasons" :key="i" class="top-reason-sample">· {{ r }}</div>
+          </div>
+        </div>
         <el-collapse>
-          <el-collapse-item v-for="f in runFailures" :key="f.case_id" :name="f.case_id">
+          <el-collapse-item v-for="f in runFailures.items" :key="f.case_id" :name="f.case_id">
             <template #title>
               <span class="fail-title">{{ f.case_name }}</span>
               <el-tag size="small" type="danger" style="margin-left: 8px">fail</el-tag>
@@ -552,7 +593,7 @@
           <el-collapse-item v-if="evidence.tool_calls && evidence.tool_calls.length" title="工具调用" name="tools">
             <pre class="pre">{{ JSON.stringify(evidence.tool_calls, null, 2) }}</pre>
           </el-collapse-item>
-          <el-collapse-item title="Usage / Timing" name="meta">
+          <el-collapse-item v-if="evidence.usage || evidence.timing" title="Usage / Timing" name="meta">
             <pre class="pre">{{ JSON.stringify({ usage: evidence.usage, timing: evidence.timing }, null, 2) }}</pre>
           </el-collapse-item>
           <el-collapse-item v-if="evidence.error_type" title="错误信息" name="err">
@@ -635,7 +676,7 @@ const curRunId = ref(null)
 const resultsLoading = ref(false)
 const runResults = ref([])
 const exporting = ref(false)
-const runFailures = ref([])
+const runFailures = ref({ items: [], top_reasons: [] })
 const triggerVisible = ref(false)
 const triggering = ref(false)
 const triggerForm = reactive({ agent_id: null, suite_id: null, version: '', trigger_type: 'manual' })
@@ -922,7 +963,7 @@ function resetDrill() {
   curRunId.value = null
   detailVisible.value = false
   runResults.value = []
-  runFailures.value = []
+  runFailures.value = { items: [], top_reasons: [] }
   evidence.value = null
 }
 
@@ -1051,10 +1092,10 @@ async function doRerun(row) {
   startPoll()
 }
 
-// 定向重跑未达标（#3）：拉 run_failures 失败 case_ids，仅重跑这批
+// 定向重跑未达标（#3）：拉 run_failures 失败 case_ids，仅重跑这批（P2-6 起返回 {items, top_reasons}）
 async function doRerunFailed(row) {
   const failures = await listRunFailures(row.id)
-  const ids = failures.map((f) => f.case_id)
+  const ids = (failures.items || []).map((f) => f.case_id)
   if (!ids.length) {
     ElMessage.info('该 run 无未达标用例，无需定向重跑')
     return
@@ -1251,6 +1292,55 @@ onBeforeUnmount(() => {
   font-size: 13px;
   line-height: 22px;
   padding-left: 8px;
+}
+/* P2-6 行内明细（expand）+ top 扣分原因 */
+.row-detail {
+  padding: 8px 12px;
+}
+.detail-sec {
+  margin-bottom: 8px;
+}
+.detail-sec:last-child {
+  margin-bottom: 0;
+}
+.detail-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 4px;
+}
+.detail-empty {
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+}
+.top-reasons {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+}
+.top-reasons-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 6px;
+}
+.top-reason-item {
+  margin-bottom: 6px;
+}
+.top-reason-item:last-child {
+  margin-bottom: 0;
+}
+.top-reason-count {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.top-reason-sample {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  padding-left: 8px;
+  line-height: 20px;
 }
 .pre {
   background: var(--el-fill-color-light);

@@ -12,15 +12,16 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, is_held_out_visible, require_role, viewer_sees_evidence
+from app.assertions.run import _truncate  # D3 answer 截断与断言 actual 同口径（500）
+from app.api.deps import get_current_user, is_held_out_visible, require_role, sees_evidence_full
 from app.core.audit import write_audit
 from app.core.constants import ACCURACY_DIMENSIONS
 from app.core.dashboard_rules import PF_ORDER, resolve_targets
 from app.core.db import get_db
-from app.core.errors import ApiError, E_NO_PERMISSION, E_NOT_FOUND, E_RUN_MUTEX, E_VALIDATION
+from app.core.errors import ApiError, E_NOT_FOUND, E_RUN_MUTEX, E_VALIDATION
 from app.core.lock import agent_mutex
 from app.core.response import ok
 from app.models import (
@@ -39,7 +40,14 @@ Staff = Depends(require_role("admin", "evaluator"))
 # P2-C4：必须锚定结尾——原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 能入库，
 # 其值会被 Dashboard 图表 tooltip 当 HTML 渲染成 XSS。\Z 拒绝尾部任何字符（含换行）。
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+\Z")
-_ACTIVE_STATUS = ("pending", "running", "scoring")
+# #4 放开并发：互斥槽（执行中）与可取消槽拆开——scoring 是「采集完成待评分」终态，
+# 不占用 agent 执行能力，同 agent 可在判分期间开新 run；cancel 仍允许 scoring（判分期可放弃）。
+_ACTIVE_STATUS = ("pending", "running", "scoring")   # 可取消状态（cancel 判断，含 scoring）
+_MUTEX_STATUS = ("pending", "running")               # 互斥槽（create/rerun 计数，scoring 不占）
+_DEFAULT_MAX_ACTIVE_RUNS = 1  # 未配置/配置缺失兜底（N=1 = 与旧「单活跃 run」一致）
+_ANSWER_PREVIEW = 500  # D3 answer 截断预览：与断言 actual 同口径（assertions.run._ACTUAL_TRUNCATE）
+_TOP_REASONS_N = 5     # L3.5 top 扣分原因条数上限
+_TOP_REASONS_SAMPLE = 3  # 每个 top 维度展示的代表 reason 条数（去重保序）
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +71,23 @@ async def _snapshot_run_config(db: AsyncSession) -> dict:
     """快照 scope=run 的 system_config（创建时冻结，执行期不再读热配置）。"""
     rows = (await db.execute(select(SystemConfig).where(SystemConfig.scope == "run"))).scalars().all()
     return {r.key: r.value for r in rows}
+
+
+async def _max_active_runs(db: AsyncSession) -> int:
+    """#4 并发上限：同 agent 允许的执行中 run 数（互斥计数阈值）。热读 scope=global 配置。
+
+    缺行（未 seed 库/集成测试 sqlite）或非法值 → 兜底 _DEFAULT_MAX_ACTIVE_RUNS=1，
+    保证 N=1 时与旧「任一活跃即 409」行为一致。非法值兜底而非抛错：配置坏不阻塞创建。
+    """
+    row = (await db.execute(select(SystemConfig).where(
+        SystemConfig.scope == "global",
+        SystemConfig.key == "max_active_runs_per_agent"))).scalars().first()
+    if row is None or row.value is None:
+        return _DEFAULT_MAX_ACTIVE_RUNS
+    try:
+        return max(1, int(row.value))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_ACTIVE_RUNS
 
 
 async def _validate_case_ids(db: AsyncSession, suite_id: int, trigger_type: str,
@@ -134,17 +159,20 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
         raise ApiError(E_VALIDATION, "suite 不存在或不属于该 agent", 400)
     # #3 定向重跑：case_ids 校验（None/空=全量；非空=子集）
     case_ids = await _validate_case_ids(db, body.suite_id, body.trigger_type, body.case_ids)
-    # 互斥：同 agent 单 in_progress run（§15.4）。7.6 C1 多 worker 化：
+    # 互斥：#4 并发上限 N（max_active_runs_per_agent，默认 1）。7.6 C1 多 worker 化：
     # 持 agent 行 FOR UPDATE 锁跨 worker 串行「查 active + 插 run + commit」，
     # 防止两 worker 同时过互斥检查各建一个 run（内存态互斥不跨进程）。
     # P2-D2 修复：活跃检查必须锁定读（with_for_update）——REPEATABLE READ 下本事务
     # 首个一致性读（上方 db.get(Agent)）已建立快照，普通读查 active 会读到旧快照
     # 漏掉并发 worker 刚提交的 run（实测双插）；锁定读永远读最新已提交数据。
+    # #4：计数槽用 _MUTEX_STATUS（pending/running，scoring 不占执行槽）；count>=N → 409。
     async with agent_mutex(body.agent_id, db):
+        n = await _max_active_runs(db)
         active = (await db.execute(select(EvalRun.id).with_for_update().where(
-            EvalRun.agent_id == body.agent_id, EvalRun.status.in_(_ACTIVE_STATUS)))).first()
-        if active:
-            raise ApiError(E_RUN_MUTEX, "该 agent 已有进行中的 run，请等待完成或取消", 409)
+            EvalRun.agent_id == body.agent_id, EvalRun.status.in_(_MUTEX_STATUS)))).all()
+        if len(active) >= n:
+            raise ApiError(E_RUN_MUTEX,
+                           f"该 agent 已有 {len(active)} 个执行中 run（上限 {n}），请等待完成或取消", 409)
 
         run = EvalRun(
             agent_id=body.agent_id, suite_id=body.suite_id, version=body.version,
@@ -221,13 +249,21 @@ async def rerun_run(run_id: int, request: Request, _: User = Staff,
     # #3 定向重跑：None=继承源 run 子集（普通 run=全量，子集 run=同一子集）；非空=定向改批
     case_ids = src.case_ids if body is None or body.case_ids is None else (
         await _validate_case_ids(db, src.suite_id, src.trigger_type, body.case_ids))
+    # #4 护栏：源 run 执行中（pending/running）不可并行重跑——N>1 放行计数时若源仍在跑，
+    # 会「源执行中即全量再跑一遍」（前端 isActive 已门住，API 层兜底防直连绕过）。
+    # scoring 源允许（不占执行槽，复用配置再跑合理）。
+    if src.status in _MUTEX_STATUS:
+        raise ApiError(E_VALIDATION, f"源 run 执行中（{src.status}），不可重跑", 400)
     # 7.6 C1 同 create_run：跨 worker 串行「查 active + 插 run + commit」
     # P2-D2：同 create_run，活跃检查锁定读，避免 REPEATABLE READ 旧快照漏看并发 run。
+    # #4：计数槽 _MUTEX_STATUS，count>=N → 409（scoring 不占槽，判分期间可 rerun）。
     async with agent_mutex(src.agent_id, db):
+        n = await _max_active_runs(db)
         active = (await db.execute(select(EvalRun.id).with_for_update().where(
-            EvalRun.agent_id == src.agent_id, EvalRun.status.in_(_ACTIVE_STATUS)))).first()
-        if active:
-            raise ApiError(E_RUN_MUTEX, "该 agent 已有进行中的 run，请等待完成或取消", 409)
+            EvalRun.agent_id == src.agent_id, EvalRun.status.in_(_MUTEX_STATUS)))).all()
+        if len(active) >= n:
+            raise ApiError(E_RUN_MUTEX,
+                           f"该 agent 已有 {len(active)} 个执行中 run（上限 {n}），请等待完成或取消", 409)
         run = EvalRun(
             agent_id=src.agent_id, suite_id=src.suite_id, version=src.version,
             trigger_type=src.trigger_type, status="pending", generation=1,
@@ -251,7 +287,9 @@ async def rerun_run(run_id: int, request: Request, _: User = Staff,
 @router.get("/{run_id}/results")
 async def run_results(run_id: int, user: User = Depends(get_current_user),
                       db: AsyncSession = Depends(get_db)):
-    """L3 用例明细：run 内全部用例结果（error/fail 靠前，其余按分数降序）。"""
+    """L3 用例明细：run 内全部用例结果（error/fail 靠前，其余按分数降序）。
+    D3 内联：answer（截断 500）+ 失败断言（basic，含 viewer）；judge_results（reason 证据级）仅 staff。
+    """
     logger.debug("run_results in: run_id=%s user=%s", run_id, user.username)
     run = await db.get(EvalRun, run_id)
     if run is None:
@@ -259,14 +297,22 @@ async def run_results(run_id: int, user: User = Depends(get_current_user),
     # 7.8 前置⑤：留出集 owner 视为不存在（不泄露 held-out 结果）
     if await _is_held_out_hidden(db, run, user):
         raise ApiError(E_NOT_FOUND, "run 不存在", 404)
-    results = (await db.execute(select(EvalResult).where(
-        EvalResult.run_id == run_id))).scalars().all()
-    if not results:
+    # B2 列子集查询：answer 在 DB 层截断（func.left 多取 1 位，Python 侧 _truncate 补 "…"，
+    # 与断言 actual 同口径），避免整列 MEDIUMTEXT 出库。
+    rows = (await db.execute(
+        select(EvalResult.id, EvalResult.case_id, EvalResult.pass_fail,
+               EvalResult.score_total, EvalResult.score_per_dimension,
+               EvalResult.error_type, EvalResult.error_detail,
+               func.left(EvalResult.answer, _ANSWER_PREVIEW + 1).label("answer_preview"),
+               EvalResult.assertion_results, EvalResult.judge_results)
+        .where(EvalResult.run_id == run_id))).all()
+    if not rows:
         return ok([])
     cases = {c.id: c for c in (await db.execute(select(TestCase).where(
-        TestCase.id.in_([r.case_id for r in results])))).scalars().all()}
+        TestCase.id.in_([r.case_id for r in rows])))).scalars().all()}
     ifaces = {i.id: i.name for i in (await db.execute(
         select(AgentInterface).where(AgentInterface.agent_id == run.agent_id))).scalars().all()}
+    sees_full = sees_evidence_full(user)  # D3 full：judge_results（含 reason）仅 staff
     out = [{
         "id": r.id, "case_id": r.case_id,
         "case_name": cases[r.case_id].name if r.case_id in cases else "",
@@ -277,7 +323,14 @@ async def run_results(run_id: int, user: User = Depends(get_current_user),
         "score_total": float(r.score_total) if r.score_total is not None else None,
         "score_per_dimension": r.score_per_dimension or [],
         "error_type": r.error_type, "error_detail": r.error_detail,
-    } for r in results]
+        # D3 basic（所有登录用户，含 viewer）：answer 截断 + 失败断言明细（「为什么扣分」定位）
+        "answer": _truncate(r.answer_preview),
+        "assertion_results": [a for a in (r.assertion_results or []) if not a.get("pass")],
+        # D3 full（staff）：judge reason 证据级，viewer 不返回（score 仍可从 score_per_dimension 见）
+        "judge_results": ([{"dimension": j.get("dimension"), "score": j.get("score"),
+                            "reason": j.get("reason")} for j in (r.judge_results or [])]
+                          if sees_full else None),
+    } for r in rows]
     out.sort(key=lambda x: (PF_ORDER.get(x["pass_fail"], 9),
                             -(x["score_total"] or -1)))
     logger.debug("run_results out: count=%s", len(out))
@@ -287,8 +340,9 @@ async def run_results(run_id: int, user: User = Depends(get_current_user),
 @router.get("/{run_id}/failures")
 async def run_failures(run_id: int, user: User = Depends(get_current_user),
                        db: AsyncSession = Depends(get_db)):
-    """L3.5 门禁失败摘要：fail 用例 + 不达标维度/断言/judge 失败（viewer 可达）。
-    judge 失败理由属证据级（L4），viewer 不可见（7.6 A2 与 result_evidence 403 同语义）。
+    """L3.5 门禁失败摘要：fail 用例 + 不达标维度/断言/judge 失败 + top 扣分原因（viewer 可达）。
+    断言明细 basic（viewer 可见，现状已暴露）；judge 失败理由与 top_reasons 属证据级（L4），
+    仅 staff（D3：judge reason 归 full）。
     """
     logger.debug("run_failures in: run_id=%s user=%s", run_id, user.username)
     run = await db.get(EvalRun, run_id)
@@ -300,15 +354,16 @@ async def run_failures(run_id: int, user: User = Depends(get_current_user),
     results = (await db.execute(select(EvalResult).where(
         EvalResult.run_id == run_id, EvalResult.pass_fail == "fail"))).scalars().all()
     if not results:
-        return ok([])
+        return ok({"items": [], "top_reasons": []})
     cases = {c.id: c for c in (await db.execute(select(TestCase).where(
         TestCase.id.in_([r.case_id for r in results])))).scalars().all()}
     ifaces = {i.id: i.name for i in (await db.execute(
         select(AgentInterface).where(AgentInterface.agent_id == run.agent_id))).scalars().all()}
     targets = await _load_agent_targets(db, run.agent_id)
-    sees_evidence = viewer_sees_evidence(user)
+    sees_full = sees_evidence_full(user)
 
     out = []
+    top_agg = {}  # dimension_code -> bucket（#7 top 扣分原因聚合）
     for r in results:
         case = cases.get(r.case_id)
         resolved = resolve_targets(targets, case.interface_id if case else 0)
@@ -324,6 +379,17 @@ async def run_failures(run_id: int, user: User = Depends(get_current_user),
         fail_codes = {d["code"] for d in fail_dims}
         judge_failures = [j for j in (r.judge_results or [])
                           if j.get("dimension") in fail_codes]
+        if sees_full:
+            # #7 按 dimension 聚合（不按 reason 自由文本：LLM 措辞几乎不重复，精确分组必碎片化）
+            for j in judge_failures:
+                bucket = top_agg.setdefault(j.get("dimension"), {
+                    "dimension": j.get("dimension"), "count": 0,
+                    "sample_reasons": [], "avg_score": 0.0})
+                bucket["count"] += 1
+                reason = j.get("reason")
+                if reason and reason not in bucket["sample_reasons"]:
+                    bucket["sample_reasons"].append(reason)
+                bucket["avg_score"] += float(j.get("score") or 0)
         out.append({
             "case_id": r.case_id,
             "case_name": case.name if case else "",
@@ -331,20 +397,28 @@ async def run_failures(run_id: int, user: User = Depends(get_current_user),
             "score_total": float(r.score_total) if r.score_total is not None else None,
             "fail_dims": fail_dims,
             "assertion_failures": [a for a in (r.assertion_results or []) if not a.get("pass")],
-            "judge_failures": judge_failures if sees_evidence else [],
+            "judge_failures": judge_failures if sees_full else [],
         })
-    logger.debug("run_failures out: count=%s", len(out))
-    return ok(out)
+    top_reasons = []
+    if sees_full:
+        for b in top_agg.values():
+            b["avg_score"] = round(b["avg_score"] / b["count"], 1)
+            b["sample_reasons"] = b["sample_reasons"][:_TOP_REASONS_SAMPLE]
+        top_reasons = sorted(top_agg.values(),
+                             key=lambda b: (-b["count"], b["dimension"]))[:_TOP_REASONS_N]
+    logger.debug("run_failures out: count=%s top=%s", len(out), len(top_reasons))
+    return ok({"items": out, "top_reasons": top_reasons})
 
 
 @router.get("/{run_id}/results/{result_id}/evidence")
 async def result_evidence(run_id: int, result_id: int, user: User = Depends(get_current_user),
                           db: AsyncSession = Depends(get_db)):
-    """L4 证据：reasoning 全文 / judge 理由 / 断言详情 / 工具调用（viewer 403）。"""
+    """L4 证据：answer（截断）/ reasoning / judge 理由 / 断言详情 / 工具调用。
+    D3 分级：viewer 仅 basic（answer 截断 500 + 断言明细）；full（reasoning/tool_calls/usage/
+    timing/judge reason）仅 staff。原「viewer 403」放开为 basic 可见（前端证据按钮仍 isStaff 门住）。
+    """
     logger.debug("result_evidence in: run_id=%s result_id=%s user=%s",
                  run_id, result_id, user.username)
-    if not viewer_sees_evidence(user):
-        raise ApiError(E_NO_PERMISSION, "viewer 无权查看评测证据", 403)
     # 7.8 前置⑤：留出集 owner 视为不存在（先于结果校验，不泄露 held-out 存在性）
     run = await db.get(EvalRun, run_id)
     if run is not None and await _is_held_out_hidden(db, run, user):
@@ -352,13 +426,17 @@ async def result_evidence(run_id: int, result_id: int, user: User = Depends(get_
     result = await db.get(EvalResult, result_id)
     if result is None or result.run_id != run_id:
         raise ApiError(E_NOT_FOUND, "结果不存在", 404)
+    sees_full = sees_evidence_full(user)
     out = {
         "id": result.id, "case_id": result.case_id,
-        "answer": result.answer, "reasoning": result.reasoning,
-        "tool_calls": result.tool_calls,
-        "usage": result.usage, "timing": result.timing,
-        "assertion_results": result.assertion_results,
-        "judge_results": result.judge_results,
+        # D3 basic：viewer 也可见 answer（截断 500）——与 run_results 内联同口径
+        "answer": result.answer if sees_full else _truncate(result.answer),
+        "reasoning": result.reasoning if sees_full else None,
+        "tool_calls": result.tool_calls if sees_full else None,
+        "usage": result.usage if sees_full else None,
+        "timing": result.timing if sees_full else None,
+        "assertion_results": result.assertion_results,  # basic：断言明细现状已对 viewer 暴露
+        "judge_results": result.judge_results if sees_full else None,  # judge reason 证据级
         "error_type": result.error_type, "error_detail": result.error_detail,
     }
     logger.debug("result_evidence out: case_id=%s", out["case_id"])

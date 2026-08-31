@@ -6,15 +6,17 @@
 - 契约探测：POST /{id}/probe 对 agent 接口发真实请求逐字段验证（B.5，core/probe.py）
 """
 import json
+import logging
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.engine import ConfigEngine
 from app.api.deps import get_current_user, require_role
+from app.core.audit import write_audit
 from app.core.constants import ALLOWED_ADAPTER_TYPES, DEFAULT_WEIGHTS
 from app.core.db import get_db
 from app.core.errors import ApiError, E_CONFLICT, E_NOT_FOUND, E_VALIDATION
@@ -23,12 +25,14 @@ from app.core.probe import ProbeResult, probe_interface, validate_probe_input
 from app.core.response import ok
 from app.core.security import fernet_decrypt, fernet_encrypt
 from app.models import (
-    Agent, AgentDimensionWeight, AgentInterface, BaselineTarget, SystemConfig,
+    Agent, AgentDimensionWeight, AgentInterface, AuditLog, BaselineTarget, SystemConfig,
     TestCase, TestSuite,
 )
 from app.models.user import User
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+logger = logging.getLogger(__name__)
 
 Admin = Depends(require_role("admin"))
 Staff = Depends(require_role("admin", "evaluator"))
@@ -350,18 +354,26 @@ async def get_agent_weights(agent_id: int, _: User = Depends(get_current_user), 
 
 
 @router.put("/{agent_id}/weights")
-async def set_agent_weights(agent_id: int, body: WeightsBody, _: User = Staff, db: AsyncSession = Depends(get_db)):
+async def set_agent_weights(agent_id: int, body: WeightsBody, request: Request,
+                            user: User = Staff, db: AsyncSession = Depends(get_db)):
+    """P2-7 留痕：agent 默认权重（interface_id=0）变更写审计，dims 带 from/to 快照。"""
     await _get_agent(db, agent_id)
+    dims = {}
     for dim, w in body.weights.items():
         row = (await db.execute(select(AgentDimensionWeight).where(
             AgentDimensionWeight.agent_id == agent_id,
             AgentDimensionWeight.interface_id == 0,
             AgentDimensionWeight.dimension_code == dim))).scalar_one_or_none()
+        old = row.weight if row is not None else None  # C1：from 在赋值前缓存
         if row is None:
             row = AgentDimensionWeight(agent_id=agent_id, interface_id=0, dimension_code=dim, weight=w)
             db.add(row)
         else:
             row.weight = w
+        dims[dim] = {"from": old, "to": w}
+    # 同事务审计：interface_id=0 = agent 默认权重（config-history 据此区分默认/接口覆盖）
+    await write_audit(db, user, request, "agent.weights.set", "agent", agent_id,
+                      detail={"interface_id": 0, "dims": dims})
     await db.commit()
     return ok(body.weights)
 
@@ -375,17 +387,24 @@ async def get_interface_weights(agent_id: int, iid: int, _: User = Depends(get_c
 
 
 @router.put("/{agent_id}/interfaces/{iid}/weights")
-async def set_interface_weights(agent_id: int, iid: int, body: WeightsBody, _: User = Staff, db: AsyncSession = Depends(get_db)):
+async def set_interface_weights(agent_id: int, iid: int, body: WeightsBody, request: Request,
+                                user: User = Staff, db: AsyncSession = Depends(get_db)):
+    """P2-7 留痕：接口级覆盖权重变更写审计（detail 带 interface_id，区分默认/覆盖）。"""
     await _get_agent(db, agent_id)
+    dims = {}
     for dim, w in body.weights.items():
         row = (await db.execute(select(AgentDimensionWeight).where(
             AgentDimensionWeight.agent_id == agent_id,
             AgentDimensionWeight.interface_id == iid,
             AgentDimensionWeight.dimension_code == dim))).scalar_one_or_none()
+        old = row.weight if row is not None else None  # C1：from 在赋值前缓存
         if row is None:
             db.add(AgentDimensionWeight(agent_id=agent_id, interface_id=iid, dimension_code=dim, weight=w))
         else:
             row.weight = w
+        dims[dim] = {"from": old, "to": w}
+    await write_audit(db, user, request, "agent.interface.weights.set", "agent", agent_id,
+                      detail={"interface_id": iid, "dims": dims})
     await db.commit()
     return ok(body.weights)
 
@@ -406,12 +425,15 @@ async def get_targets(agent_id: int, iid: int, _: User = Depends(get_current_use
 
 @router.put("/{agent_id}/interfaces/{iid}/targets")
 async def set_targets(
-    agent_id: int, iid: int, body: TargetsBody,
+    agent_id: int, iid: int, body: TargetsBody, request: Request,
     user: User = Depends(require_role("admin", "evaluator")),
     db: AsyncSession = Depends(get_db),
 ):
-    """阈值双签：approved 才参与快照。auto=自动标定；手动改 → pending_approval；第二人 → approved。"""
+    """阈值双签：approved 才参与快照。auto=自动标定；手动改 → pending_approval；第二人 → approved。
+    P2-7 留痕：每次修改（双签两笔各落一条）写审计，detail 带 interface_id + dims{from,to} + 审批流转。
+    """
     await _get_agent(db, agent_id)
+    dims = {}
     for dim, score in body.target_scores.items():
         # #2 档位化前提：target 必须是合法分值域（负数/超界会让 int(target//20) 语义未定义）
         if not 0.0 <= float(score) <= 100.0:
@@ -420,6 +442,8 @@ async def set_targets(
             BaselineTarget.agent_id == agent_id,
             BaselineTarget.interface_id == iid,
             BaselineTarget.dimension_code == dim))).scalar_one_or_none()
+        old_score = row.target_score if row is not None else None   # C1：from 在赋值前缓存
+        old_status = row.approval_status if row is not None else None
         if row is None:
             row = BaselineTarget(agent_id=agent_id, interface_id=iid, dimension_code=dim,
                                  target_score=score, calibration_source="手动")
@@ -437,5 +461,39 @@ async def set_targets(
             else:
                 row.approved_by_2 = user.id
                 row.approval_status = "approved"
+        dims[dim] = {"from": old_score, "to": score,
+                     "approval_status": {"from": old_status, "to": row.approval_status}}
+    await write_audit(db, user, request, "agent.targets.set", "agent", agent_id,
+                      detail={"interface_id": iid, "dims": dims})
     await db.commit()
     return ok()
+
+
+# ---------------- 配置变更历史（P2-7 留痕） ----------------
+_CONFIG_HISTORY_ACTIONS = ("agent.weights.set", "agent.interface.weights.set", "agent.targets.set")
+
+
+@router.get("/{agent_id}/config-history")
+async def agent_config_history(agent_id: int, _: User = Staff, db: AsyncSession = Depends(get_db)):
+    """P2-7 变更历史：weights/targets 审计流水（新→旧），join User 取操作人。
+
+    C2 兜底：AuditLog.user_id 是裸 Integer 无 FK，用户删除后 username 为 None → 显示「已删除用户」。
+    """
+    await _get_agent(db, agent_id)
+    rows = (await db.execute(
+        select(AuditLog, User.username)
+        .outerjoin(User, User.id == AuditLog.user_id)
+        .where(AuditLog.target_type == "agent",
+               AuditLog.target_id == str(agent_id),
+               AuditLog.action.in_(_CONFIG_HISTORY_ACTIONS))
+        .order_by(AuditLog.created_at.desc()))).all()
+    out = [{
+        "id": log.id, "action": log.action,
+        "interface_id": (log.detail or {}).get("interface_id"),
+        "dims": (log.detail or {}).get("dims"),
+        "ip": log.ip,
+        "created_at": log.created_at.isoformat() if log.created_at else None,
+        "username": username or "已删除用户",
+    } for log, username in rows]
+    logger.debug("config_history out: agent=%s count=%s", agent_id, len(out))
+    return ok(out)

@@ -84,6 +84,8 @@
         <el-tag size="small" type="warning">{{ detail.adapter_type }}</el-tag>
         <span class="detail-url">{{ detail.base_url }}</span>
         <span class="detail-owner">Owner: {{ userName(detail.owner_id) }}</span>
+        <span style="flex: 1"></span>
+        <el-button v-if="isStaff" size="small" @click="openConfigHistory">变更历史</el-button>
       </div>
 
       <el-tabs v-model="detailTab">
@@ -284,6 +286,41 @@
       </el-tabs>
     </el-drawer>
 
+    <!-- 变更历史 drawer（P2-7） -->
+    <el-drawer v-model="historyVisible" size="480px" :title="`配置变更历史 · ${detail?.name || ''}`">
+      <div v-loading="loadingHistory">
+        <el-empty v-if="!loadingHistory && !historyRows.length" description="暂无配置变更记录" />
+        <el-collapse v-else accordion>
+          <el-collapse-item v-for="h in historyRows" :key="h.id" :name="h.id">
+            <template #title>
+              <span class="hist-action">{{ actionLabel(h.action) }}</span>
+              <span class="hist-iface">{{ ifaceName(h.interface_id) }}</span>
+              <span class="hist-who">{{ h.username }}</span>
+              <span class="hist-time">{{ fmtTime(h.created_at) }}</span>
+            </template>
+            <el-table :data="dimsRows(h.dims)" border size="small">
+              <el-table-column prop="code" label="维度" min-width="160" />
+              <el-table-column label="原值" width="80">
+                <template #default="{ row }">{{ row.from }}</template>
+              </el-table-column>
+              <el-table-column label="新值" width="80">
+                <template #default="{ row }">{{ row.to }}</template>
+              </el-table-column>
+              <el-table-column label="状态变化" min-width="150">
+                <template #default="{ row }">
+                  <span v-if="row.statusFrom || row.statusTo" class="hist-status">
+                    {{ row.statusFrom || '—' }} → {{ row.statusTo || '—' }}
+                  </span>
+                  <span v-else class="dim-note">—</span>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div class="hist-meta">IP {{ h.ip || '—' }} · {{ fmtTime(h.created_at) }}</div>
+          </el-collapse-item>
+        </el-collapse>
+      </div>
+    </el-drawer>
+
     <!-- 接口新增/编辑 dialog -->
     <el-dialog v-model="ifaceFormVisible" :title="ifaceEditingId ? '编辑接口' : '新增接口'" width="520px">
       <el-form :model="ifaceForm" label-width="110px" size="small">
@@ -319,8 +356,8 @@ import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   addScenes, createAgent, createInterface, deleteInterface, disableAgent, discoverAgent,
-  getAgentWeights, getTargets, listAgents, listInterfaces, listScenes, probeAgent,
-  setAgentAuth, setAgentWeights, setTargets, syncInterfaces, updateAgent, updateInterface,
+  getAgentConfigHistory, getAgentWeights, getTargets, listAgents, listInterfaces, listScenes,
+  probeAgent, setAgentAuth, setAgentWeights, setTargets, syncInterfaces, updateAgent, updateInterface,
 } from '../api/agents'
 import { listUsers } from '../api/users'
 import { useRouter } from 'vue-router'
@@ -653,6 +690,49 @@ const saveTargets = async () => {
   }
 }
 
+// ---- 配置变更历史（P2-7） ----
+const historyVisible = ref(false)
+const historyRows = ref([])
+const loadingHistory = ref(false)
+
+const ACTION_LABEL = {
+  'agent.weights.set': '权重调整',
+  'agent.interface.weights.set': '接口权重调整',
+  'agent.targets.set': '阈值调整',
+}
+const actionLabel = (a) => ACTION_LABEL[a] || a
+
+// interface_id：0 / null = agent 级默认权重；否则映射接口名
+const ifaceName = (iid) => {
+  if (!iid || iid === 0) return 'Agent 级'
+  const i = interfaces.value.find((x) => x.id === iid)
+  return i ? i.name : `接口 #${iid}`
+}
+
+const fmtTime = (s) => (s ? new Date(s).toLocaleString() : '—')
+
+// dims: {code: {from, to, approval_status?: {from, to}}} → 表格行
+const dimsRows = (dims) => Object.entries(dims || {}).map(([code, v]) => ({
+  code,
+  from: v.from ?? '—',
+  to: v.to ?? '—',
+  statusFrom: v.approval_status?.from,
+  statusTo: v.approval_status?.to,
+}))
+
+const openConfigHistory = async () => {
+  historyVisible.value = true
+  loadingHistory.value = true
+  historyRows.value = []
+  try {
+    historyRows.value = await getAgentConfigHistory(detail.value.id)
+  } catch (e) {
+    // 拦截器已弹
+  } finally {
+    loadingHistory.value = false
+  }
+}
+
 // ---- 凭证 ----
 const authForm = reactive({ username: '', password: '' })
 const savingAuth = ref(false)
@@ -733,4 +813,10 @@ onMounted(() => {
 .scene-box h4 { margin: 0 0 8px; }
 .dim-note { color: #909399; font-size: 12px; }
 .probe-err { color: #f56c6c; font-size: 12px; }
+.hist-action { font-weight: 600; margin-right: 8px; }
+.hist-iface { color: #606266; margin-right: 8px; }
+.hist-who { color: #909399; margin-right: 8px; font-size: 12px; }
+.hist-time { color: #c0c4cc; font-size: 12px; }
+.hist-meta { margin-top: 6px; color: #909399; font-size: 12px; }
+.hist-status { color: #606266; font-size: 12px; }
 </style>

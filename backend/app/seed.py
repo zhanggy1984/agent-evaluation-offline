@@ -366,8 +366,8 @@ DEFAULT_SYSTEM_CONFIG = {
                            "meta": {"type": "number", "min": 0.0, "max": 1.0}},
     "error_rate_block": {"value": 0.1, "scope": "run", "is_hot": True,
                          "meta": {"type": "number", "min": 0.0, "max": 1.0}},
-    "assertion_penalty": {"value": 30, "scope": "run", "is_hot": True,
-                          "meta": {"type": "int", "min": 0, "max": 100}},
+    # P2-8：assertion_penalty 已移除（产品意图「语义维度断言扣分」未落地，见 solution_detail §七评审）。
+    # scorer 从未消费；删除注册避免「配置即真相」误导。存量库需执行 DELETE（seed insert-if-missing 不清行）。
     "judge_max_retries": {"value": 2, "scope": "run", "is_hot": True,
                           "meta": {"type": "int", "min": 0, "max": 10}},
     "judge_repeat": {"value": 3, "scope": "run", "is_hot": True,
@@ -385,6 +385,10 @@ DEFAULT_SYSTEM_CONFIG = {
     # 进程级（global）
     "retain_runs": {"value": 50, "scope": "global", "is_hot": True,
                     "meta": {"type": "int", "min": 1, "max": 10000}},
+    # #4 放开并发：同 agent 允许的执行中 run 数（互斥计数阈值）。上限收窄：per-run 桶下
+    # N 是并发放大镜（N×per_agent_concurrency），默认 1 = 旧「单活跃 run」语义。
+    "max_active_runs_per_agent": {"value": 1, "scope": "global", "is_hot": True,
+                                  "meta": {"type": "int", "min": 1, "max": 8}},
     "heartbeat_interval": {"value": 30, "scope": "global", "is_hot": False,
                            "meta": {"type": "int", "min": 1, "max": 86400}},
     "judge_llm.base_url": {"value": "", "scope": "global", "is_hot": True,
