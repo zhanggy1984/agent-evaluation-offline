@@ -7,6 +7,7 @@
 依赖函数直接调用（fastapi Depends 默认参数不触发），不建测试 app；风格同 test_engine._run。
 """
 import asyncio
+from asyncio_util import run_in_isolated_loop
 import datetime
 import types
 
@@ -27,7 +28,7 @@ def _user(password_changed_at):
 def test_guard_blocks_when_need_change_password():
     """首登未改密（password_changed_at=None）：严格鉴权拦截，403 + E_NEED_CHANGE_PASSWORD。"""
     with pytest.raises(ApiError) as ei:
-        asyncio.run(deps.get_current_user(user=_user(None)))
+        run_in_isolated_loop(deps.get_current_user(user=_user(None)))
     assert ei.value.code == E_NEED_CHANGE_PASSWORD
     assert ei.value.status_code == 403
     assert "修改密码" in ei.value.message
@@ -36,13 +37,13 @@ def test_guard_blocks_when_need_change_password():
 def test_guard_allows_when_password_changed():
     """已改密（password_changed_at 非空）：严格鉴权正常放行。"""
     user = _user(datetime.datetime.now(datetime.timezone.utc))
-    assert asyncio.run(deps.get_current_user(user=user)) is user
+    assert run_in_isolated_loop(deps.get_current_user(user=user)) is user
 
 
 def test_allow_change_passes_when_not_changed():
     """放行版：即使未改密也返回 user（change-password / me 改密流程入口）。"""
     user = _user(None)
-    assert asyncio.run(deps.get_current_user_allow_change(user=user)) is user
+    assert run_in_isolated_loop(deps.get_current_user_allow_change(user=user)) is user
 
 
 # 注：require_role 内部依赖 get_current_user（Depends 链），改密拦截在 FastAPI 解析时生效；

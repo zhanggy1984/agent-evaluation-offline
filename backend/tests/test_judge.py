@@ -3,7 +3,7 @@
 覆盖：verdict 解析（合法/包裹/非法）、prompt 组装（注入防护 + schema 约束）、
 allowlist 校验、rubric 模板完整性、退避计算、scorer 建任务/结果组装辅助函数。
 """
-import asyncio
+from asyncio_util import run_in_isolated_loop
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -321,7 +321,7 @@ class TestProcessOneNonJudgeError(unittest.TestCase):
                     interface_id=0, client=client)
             return t, (logs if with_logs else None)
 
-        return asyncio.run(_run())
+        return run_in_isolated_loop(_run())
 
     def test_aggregate_non_judge_error_over_limit_failed(self):
         # 非 JudgeError 不被静默当单次判分失败：attempts 照常推进，超限标 failed

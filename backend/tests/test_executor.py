@@ -6,7 +6,7 @@ SSE 正常/断流无 done/无 usage/HTTP 非 2xx/超时/连接错误/解析错�
 构建失败/未知异常兜底；同步变体正常与解析失败。
 用 httpx.MockTransport 模拟 agent 网络层，chunk 走真实 SSEParser 解析。
 """
-import asyncio
+from asyncio_util import run_in_isolated_loop
 import json
 from types import SimpleNamespace
 
@@ -114,7 +114,7 @@ def test_sse_normal():
         assert out.unified["usage"]["total_tokens"] == 15
         assert out.status_code == 200
         assert out.timing["end_ts"] is not None
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_sse_no_done():
@@ -124,7 +124,7 @@ def test_sse_no_done():
         async with _client(lambda req: httpx.Response(200, content=chunks)) as c:
             out = await execute_case(_SSEAdapter(chunks=chunks), c, _case())
         assert not out.ok and out.error_type == ERROR_NO_DONE
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_sse_no_usage():
@@ -134,7 +134,7 @@ def test_sse_no_usage():
         async with _client(lambda req: httpx.Response(200, content=chunks)) as c:
             out = await execute_case(_SSEAdapter(chunks=chunks), c, _case())
         assert not out.ok and out.error_type == ERROR_NO_USAGE
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_http_non_200():
@@ -143,7 +143,7 @@ def test_http_non_200():
             out = await execute_case(_SSEAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_HTTP
         assert "500" in out.error_detail
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_connect_error():
@@ -153,7 +153,7 @@ def test_connect_error():
         async with _client(handler) as c:
             out = await execute_case(_SSEAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_CONNECT
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_timeout():
@@ -163,7 +163,7 @@ def test_timeout():
         async with _client(handler) as c:
             out = await execute_case(_SSEAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_TIMEOUT
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_sse_parse_error():
@@ -172,7 +172,7 @@ def test_sse_parse_error():
         async with _client(lambda req: httpx.Response(200, content=b"event: answer\ndata: not-json\n\n")) as c:
             out = await execute_case(_SSEAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_SSE_PARSE
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_prepare_error():
@@ -181,7 +181,7 @@ def test_prepare_error():
             out = await execute_case(_SSEAdapter(prepare_error=RuntimeError("login failed")), c, _case())
         assert not out.ok and out.error_type == ERROR_CONTRACT
         assert "prepare" in out.error_detail
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_build_request_error():
@@ -190,7 +190,7 @@ def test_build_request_error():
             out = await execute_case(_SSEAdapter(build_error=ValueError("bad template")), c, _case())
         assert not out.ok and out.error_type == ERROR_CONTRACT
         assert "build_request" in out.error_detail
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_unknown_exception_fallback():
@@ -199,7 +199,7 @@ def test_unknown_exception_fallback():
         async with _client(lambda req: httpx.Response(200, content=b"\n")) as c:
             out = await execute_case(_SSEAdapter(unknown_error=True), c, _case())
         assert not out.ok and out.error_type == ERROR_CONTRACT
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 # ---------------- 同步变体 ----------------
@@ -212,7 +212,7 @@ def test_sync_normal():
         assert out.unified["answer"] == "同步答案"
         assert out.unified["usage"]["total_tokens"] == 7
         assert out.status_code == 200
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_sync_parse_error():
@@ -221,7 +221,7 @@ def test_sync_parse_error():
             out = await execute_case(_SyncAdapter(parse_error=KeyError("answer")), c, _case())
         assert not out.ok and out.error_type == ERROR_CONTRACT
         assert "parse_sync" in out.error_detail
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_sync_http_error():
@@ -231,7 +231,7 @@ def test_sync_http_error():
             out = await execute_case(_SyncAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_HTTP_CLIENT
         assert "403" in out.error_detail
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_sync_http_5xx_retryable():
@@ -241,7 +241,7 @@ def test_sync_http_5xx_retryable():
             out = await execute_case(_SyncAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_HTTP
         assert "503" in out.error_detail
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 # ---------------- 7.5c SSE 断流续推（Last-Event-ID） ----------------
@@ -286,7 +286,7 @@ def test_sse_resume_last_event_id():
         assert seen[1].headers["Last-Event-ID"] == "u1"
         assert out.unified["answer"] == "x"
         assert out.unified["usage"]["total_tokens"] == 1
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_sse_resume_exhausted_no_done():
@@ -303,4 +303,4 @@ def test_sse_resume_exhausted_no_done():
             out = await execute_case(_ResumeAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_NO_DONE
         assert len(seen) == 2  # 首流 + 1 次续推
-    asyncio.run(main())
+    run_in_isolated_loop(main())

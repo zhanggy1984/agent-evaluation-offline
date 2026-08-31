@@ -3,7 +3,7 @@
 核心逻辑：N/A 归一化加权、门禁判定、judge_incomplete 权重、成本计算、target 接口覆盖。
 不触 DB：score_case/_enabled_dims/_total_cost/_resolve_targets/_unified/_aggregate_precomputed。
 """
-import asyncio
+from asyncio_util import run_in_isolated_loop
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -459,7 +459,7 @@ class TestRunLevelAggregation(unittest.TestCase):
             ok = await _score_executed_results(db, run, results, weight_rows,
                                                targets or {}, {}, {})
             return ok
-        ok = asyncio.run(_go())
+        ok = run_in_isolated_loop(_go())
         return run, ok
 
     def test_zero_cases_score(self):

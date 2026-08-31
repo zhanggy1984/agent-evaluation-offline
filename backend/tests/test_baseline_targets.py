@@ -3,7 +3,7 @@
 mock DB 跑 set_targets 的五个流转分支：首次改 / 第二人 / 同人 / admin 例外 / evaluator 拒绝。
 dashboard baseline 的 pending_approval 过滤由容器验证（verify_77 场景 8）覆盖。
 """
-import asyncio
+from asyncio_util import run_in_isolated_loop
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -36,7 +36,7 @@ class TestSetTargetsFlow(unittest.TestCase):
         db.execute.return_value = _Exec()
         body = SimpleNamespace(target_scores={dim: score})
         request = SimpleNamespace(headers={}, client=SimpleNamespace(host="10.0.0.1"))
-        asyncio.run(set_targets(1, 2, body, request, user, db))
+        run_in_isolated_loop(set_targets(1, 2, body, request, user, db))
         return db
 
     def test_first_change_pending(self):

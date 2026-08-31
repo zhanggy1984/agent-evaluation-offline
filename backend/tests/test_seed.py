@@ -167,7 +167,7 @@ def test_verify_sample_files(monkeypatch, tmp_path):
 
 def test_seed_baseline_targets_semantic_60():
     """#11：语义维度默认 60（对齐 judge 20 分档，70 档位等价 60），规则维度保持 70。"""
-    import asyncio
+    from asyncio_util import run_in_isolated_loop
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
@@ -177,7 +177,7 @@ def test_seed_baseline_targets_semantic_60():
     # Agent 全部存在（scalar_one_or_none 返回 id）；BaselineTarget 全部不存在（first 返回 None）
     db.execute.return_value = SimpleNamespace(
         scalar_one_or_none=lambda: 1, first=lambda: None)
-    asyncio.run(_seed_baseline_targets(db))
+    run_in_isolated_loop(_seed_baseline_targets(db))
 
     added = [c[0][0] for c in db.add.call_args_list]
     target = {a.dimension_code: a.target_score for a in added}

@@ -4,6 +4,7 @@ WeightedLimiter：先 per-agent 后全局（防环形等待），同 agent 并�
 约束。async 用 asyncio.run + wait_for 超时断言阻塞与释放。
 """
 import asyncio
+from asyncio_util import run_in_isolated_loop
 
 import pytest
 
@@ -26,7 +27,7 @@ def test_per_agent_blocking_and_release():
             await asyncio.wait_for(lm.acquire("a"), 0.1)  # 第 3 个并发被 per-agent 挡住
         lm.release("a")
         await asyncio.wait_for(lm.acquire("a"), 0.1)  # 释放后放行
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_agents_isolated():
@@ -34,7 +35,7 @@ def test_agents_isolated():
         lm = WeightedLimiter(global_limit=16, per_agent_limit=1)
         await lm.acquire("a")
         await asyncio.wait_for(lm.acquire("b"), 0.1)  # 不同 agent 独立信号量，不被 a 挡
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_global_cap():
@@ -45,7 +46,7 @@ def test_global_cap():
             await asyncio.wait_for(lm.acquire("b"), 0.1)  # 全局已被 a 占满
         lm.release("a")
         await asyncio.wait_for(lm.acquire("b"), 0.1)  # 全局归还后 b 放行
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_release_order_no_leak():
@@ -56,7 +57,7 @@ def test_release_order_no_leak():
             await lm.acquire("a")
             lm.release("a")
         await asyncio.wait_for(lm.acquire("a"), 0.1)
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_keyed_run_buckets_isolated():
@@ -71,7 +72,7 @@ def test_keyed_run_buckets_isolated():
             await asyncio.wait_for(kl.acquire(1, "b"), 0.1)  # run1 全局仍满
         kl.release(1, "a")
         await asyncio.wait_for(kl.acquire(1, "b"), 0.1)  # 归还后 run1 放行
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_keyed_drop_run_falls_back_to_default():
@@ -82,7 +83,7 @@ def test_keyed_drop_run_falls_back_to_default():
         kl.drop_run(1)
         await asyncio.wait_for(kl.acquire(1, "a"), 0.1)   # 默认桶可放行
         await asyncio.wait_for(kl.acquire(1, "b"), 0.1)   # 全局 16 未占满
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_keyed_unset_run_uses_default():
@@ -91,7 +92,7 @@ def test_keyed_unset_run_uses_default():
         kl = KeyedLimiter()
         await asyncio.wait_for(kl.acquire(999, "a"), 0.1)
         kl.release(999, "a")
-    asyncio.run(main())
+    run_in_isolated_loop(main())
 
 
 def test_keyed_set_run_updates_bucket():
@@ -102,4 +103,4 @@ def test_keyed_set_run_updates_bucket():
         kl.set_run(1, global_limit=16, per_agent_limit=16)
         await asyncio.wait_for(kl.acquire(1, "a"), 0.1)
         await asyncio.wait_for(kl.acquire(1, "b"), 0.1)  # 新限制 16 未占满
-    asyncio.run(main())
+    run_in_isolated_loop(main())
