@@ -328,8 +328,11 @@ const next = async () => {
       }
       // 以确认后 manifest 为准（用户可能在 Step3 编辑过接口/场景）
       const m = confirmedManifest.value || discoverData.value
+      // T15：只 sync llm 评测接口（带 contract_type）。辅助接口（login 等 llm=false）
+      // 无 contract_type，后端 InterfaceSyncItem 校验必填 sse|sync → 一并提交会 422；
+      // 辅助接口由 adapter_config.prepare 驱动，无需进 agent_interface 表。
       const sync = await syncInterfaces(agentId.value,
-        (m.interfaces || []).map((i) => ({
+        (m.interfaces || []).filter((i) => i.llm).map((i) => ({
           name: i.name, path: i.path, method: i.method || 'POST', contract_type: i.contract_type,
         })))
       const sceneRes = await addScenes(agentId.value,

@@ -155,7 +155,12 @@ def validate_base_url(url_str: str, cidrs: Iterable[str] = ()) -> None:
     host = parsed.hostname
     if not host:
         raise ApiError(E_VALIDATION, "base_url 缺少 host")
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    # T15：urllib.parse 对非法端口（超 0-65535 或非数字）在访问 .port 时才抛 ValueError，
+    # 不捕获会冒泡成 500。合法 URL 校验失败应回 4xx，故此处转成校验错误。
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        raise ApiError(E_VALIDATION, f"base_url 端口非法: {url_str}")
     networks = build_networks([*DEFAULT_AGENT_CIDRS, *cidrs])
     if host in DEFAULT_AGENT_HOSTS:
         return

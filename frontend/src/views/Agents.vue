@@ -493,7 +493,9 @@ const handleSync = async () => {
   }
   syncing.value = true
   try {
-    const r = await syncInterfaces(detail.value.id, list.map((i) => ({
+    // T15：只补录 llm 评测接口。辅助接口（llm=false）无 contract_type，后端 sync 校验必填
+    // sse|sync，一并提交会 422；辅助接口由 adapter_config.prepare 驱动，无需进 agent_interface。
+    const r = await syncInterfaces(detail.value.id, list.filter((i) => i.llm).map((i) => ({
       name: i.name, path: i.path, method: i.method, contract_type: i.contract_type,
     })))
     ElMessage.success(`补录 ${r.created.length}，跳过 ${r.skipped.length}${r.renamed.length ? `，改名 ${r.renamed.length}` : ''}`)

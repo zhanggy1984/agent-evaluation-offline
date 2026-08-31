@@ -108,8 +108,9 @@ const grouped = computed(() => {
   return map
 })
 
-// 可编辑：admin + is_hot（非热项改需重启，前端只读灰显）
-const editable = (row) => isAdmin.value && row.is_hot
+// 可编辑：admin + is_hot + 有契约（CONFIG_META）。无契约残留项（alarm.*/smtp.* 等）
+// 后端 PUT /config/global 会 2003 拒绝，置灰避免「改了没保存」的困惑。
+const editable = (row) => isAdmin.value && row.is_hot && CONFIG_META[row.key]
 
 const load = async () => {
   loading.value = true
@@ -125,7 +126,8 @@ const load = async () => {
 const handleSave = async () => {
   const values = {}
   for (const c of configs.value) {
-    if (!c.is_hot) continue
+    // 只收集有契约项：无契约残留项（alarm.*/smtp.* 等）后端无 meta 契约会拒绝全盘保存
+    if (!c.is_hot || !CONFIG_META[c.key]) continue
     if (c._type === 'json') {
       // JSON 文本域：空串表示 null（配置默认），否则解析还原类型；非法 JSON 直接中断保存
       try {

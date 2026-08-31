@@ -9,8 +9,9 @@ contract 段抓漂移（scaffold._adapter_drift）。模板域：{case.input.*} 
 - seed.py::_seed_agents 按 SEED_AGENTS 幂等建 agent + interface + Fernet 凭证 + 示例 suite/case
 - verify_cs/cc/gq_e2e.py 的 ADAPTER_CFG 从这里 import（消除重复，单一来源）
 
-端口约定（seed 的 base_url 必须稳定可并发）：cs 8000 / cc 8001 / sp 8002 / gq 8080，
-由各 agent 的 docker-compose 宿主映射决定（sp 由 ${SP_APP_PORT:-8002} 提供）。
+端口约定（seed 的 base_url 必须稳定可并发，四家可同时启动互不冲突）：cs 8000 / cc 8003 / gq 8080，
+sp 由 ${SP_APP_PORT:-18002} 提供；web 端口 cs 8081/8443 / cc 8088 / gq 8089 / sp 18080。
+各 agent 的 docker-compose 宿主映射决定。
 """
 
 from datetime import datetime
@@ -253,14 +254,14 @@ REF_SP_BID024 = """第一章  公司概况
 GQ_LIBRARY_ID = 3  # 现存空文档库（无文档，检索空亦合法）；原 6 迁移后 id 漂移不存在，2026-08-25 修正
 
 MANIFEST_SNAPSHOTS = {
-    # ── customer-service：SSE，login→建 session→messages，事件名已统一（无需 field_map）──
+    # ── customer-service：SSE，login→建 session→messages；answer 走 token 事件，需 field_map ──
     "customer-service": {
         "agent": "customer-service", "contract_version": "2.0",
         "interfaces": [
             {"name": "chat", "path": "/api/v1/sessions/{sid}/messages", "method": "POST",
              "contract_type": "sse", "llm": True,
              "description": "客服会话对话（SSE 流式，透出 token/usage/done；token 事件含 content+delta 双字段，平台 field_map 可映射 answer）"},
-            {"name": "login", "path": "/api/v1/auth/login", "method": "POST",
+            {"name": "login", "path": "/api/auth/login", "method": "POST",
              "llm": False, "description": "会话鉴权（辅助接口）"},
         ],
         "scenes": [
@@ -271,8 +272,9 @@ MANIFEST_SNAPSHOTS = {
         ],
         "contract": {
             "type": "sse", "timeout": 120,
+            "sse": {"field_map": {"token": "answer"}},
             "prepare": [
-                {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
+                {"name": "login", "method": "POST", "path": "/api/auth/login",
                  "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
                  "extract": {"token": "access_token"}},
                 # cs 建 session 返回 {session_id}（非 id）：extract 指定映射
@@ -288,13 +290,15 @@ MANIFEST_SNAPSHOTS = {
             },
         },
     },
-    # ── contract-check：同步 JSON，multipart 上传→轮询 WAITING_REVIEW→取 result，无鉴权 ──
+    # ── contract-check：同步 JSON，login→上传→轮询 WAITING_REVIEW→取 result（files/tasks 均挂鉴权）──
     "contract-check": {
         "agent": "contract-check", "contract_version": "2.0",
         "interfaces": [
             {"name": "result", "path": "/api/tasks/{task_id}/result", "method": "GET",
              "contract_type": "sync", "llm": True,
              "description": "合同校验结果（同步 JSON，透出 answer/usage/timing/tool_calls）"},
+            {"name": "login", "path": "/api/auth/login", "method": "POST",
+             "llm": False, "description": "登录获取 JWT（辅助接口，files/tasks 均挂鉴权需 token）"},
             {"name": "upload", "path": "/api/files/upload", "method": "POST",
              "llm": False, "description": "上传合同文件（辅助接口）"},
         ],
@@ -308,16 +312,25 @@ MANIFEST_SNAPSHOTS = {
         "contract": {
             "type": "sync", "timeout": 300,
             "prepare": [
+                # 鉴权闭环：先登录换 JWT，后续受保护接口全部带 Bearer token
+                {"name": "login", "method": "POST", "path": "/api/auth/login",
+                 "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
+                 "extract": {"token": "token"}},
                 {"name": "upload", "method": "POST", "path": "/api/files/upload",
+                 "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
                  "files": {"file": "{{input.file_path}}"},
                  "extract": {"task_id": "task_id"}},
                 # 决策 #41：不 resume，取 WAITING_REVIEW 时的 result 打分（不产生假 review 记录）
                 {"name": "wait_done", "poll": {
                     "path": "/api/tasks/{{prepare.upload.task_id}}",
+                    "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
                     "until": {"status": ["WAITING_REVIEW", "SUCCESS", "FAILED", "CANCELLED"]},
                     "interval": 2, "timeout": 300}},
             ],
-            "request": {"path": "/api/tasks/{{prepare.upload.task_id}}/result", "method": "GET"},
+            "request": {
+                "path": "/api/tasks/{{prepare.upload.task_id}}/result", "method": "GET",
+                "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
+            },
         },
     },
     # ── smart-procurement：SSE，login→建评审→chat；answer{delta}/usage(全名)/done 口径一致 ──
@@ -330,7 +343,7 @@ MANIFEST_SNAPSHOTS = {
             {"name": "score", "path": "/api/v1/reviews/{review_id}/score", "method": "POST",
              "contract_type": "sse", "llm": True,
              "description": "AI 评分（SSE，含 tool_call knowledge_retrieval；报价维度走 price_calc，run 前需用例规避）"},
-            {"name": "login", "path": "/api/v1/auth/login", "method": "POST",
+            {"name": "login", "path": "/api/auth/login", "method": "POST",
              "llm": False, "description": "专家/管理员鉴权（辅助接口）"},
         ],
         "scenes": [
@@ -342,7 +355,7 @@ MANIFEST_SNAPSHOTS = {
         "contract": {
             "type": "sse", "timeout": 120,
             "prepare": [
-                {"name": "login", "method": "POST", "path": "/api/v1/auth/login",
+                {"name": "login", "method": "POST", "path": "/api/auth/login",
                  "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
                  "extract": {"token": "access_token"}},
                 # 评审需 FROZEN 标书 + 专家账号（display_name==expert.name 反查 expert_id）
@@ -462,7 +475,7 @@ SEED_AGENTS = [
     },
     {
         "name": "contract-check",
-        "base_url": "http://host.docker.internal:8001",
+        "base_url": "http://host.docker.internal:8003",
         "adapter_type": "config",
         "adapter_config": CC_ADAPTER_CFG,
         "contract_version": "2.0",
@@ -493,7 +506,7 @@ SEED_AGENTS = [
     },
     {
         "name": "smart-procurement",
-        "base_url": "http://host.docker.internal:8002",
+        "base_url": "http://host.docker.internal:18002",
         "adapter_type": "config",
         "adapter_config": SP_ADAPTER_CFG,
         "contract_version": "2.0",

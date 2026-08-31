@@ -85,7 +85,7 @@ def static_check(agent_url: str) -> int:
         return 1
     print("✅ manifest 解析 + adapter 派生通过")
     print(f"   agent={manifest.agent} contract_version={manifest.contract_version}")
-    print(f"   接口: {', '.join(i.name + '(' + i.contract_type + ')' for i in manifest.interfaces)}")
+    print(f"   接口: {', '.join(i.name + '(' + (i.contract_type or 'aux') + ')' for i in manifest.interfaces)}")
     print(f"   llm 评测接口: {[i.name for i in manifest.interfaces if i.llm]}")
     print(f"   场景: {[s.tag for s in manifest.scenes]}")
     print(f"   input_fields: {draft.input_fields}")

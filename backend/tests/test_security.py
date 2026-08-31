@@ -93,7 +93,9 @@ def test_random_ids():
 
 
 # ---------------- SSRF（7.6 A4：build_networks 拒全放行 / 169.254 移出白名单） ----------------
-from app.core.http import DEFAULT_AGENT_CIDRS, JUDGE_DENY_CIDRS, AllowlistAsyncClient, build_agent_client, build_networks
+from app.core.http import (DEFAULT_AGENT_CIDRS, JUDGE_DENY_CIDRS,
+                           AllowlistAsyncClient, build_agent_client,
+                           build_networks, validate_base_url)
 
 
 def test_build_networks_rejects_any_any():
@@ -118,6 +120,21 @@ def test_build_networks_normal_cidrs_ok():
 def test_default_cidrs_exclude_cloud_metadata():
     # 169.254.0.0/16（云元数据段 metadata 169.254.169.254）不得在默认白名单
     assert "169.254.0.0/16" not in DEFAULT_AGENT_CIDRS
+
+
+def test_validate_base_url_illegal_port_is_validation_error():
+    # T15：非法端口（>65535 / 非数字）urllib.parse 在访问 .port 时才抛 ValueError，
+    # 不捕获会冒泡成 500；转 E_VALIDATION 让合法 URL 校验失败回 4xx
+    with pytest.raises(ApiError) as ei:
+        validate_base_url("http://host:99999/path")
+    assert "端口" in str(ei.value)
+    with pytest.raises(ApiError):
+        validate_base_url("http://host:abc/path")
+
+
+def test_validate_base_url_legal_private_ip_ok():
+    # 合法私网 IP + 合法端口：SSRF 白名单通过，不抛
+    validate_base_url("http://10.0.0.5:8000/api")
 
 
 # ---------------- P2-C1 judge 出站 SSRF：域名白名单（llm_allowlist）+ IP 黑名单（deny_cidrs） ----------------

@@ -190,9 +190,9 @@ def test_input_fields():
 
 
 def test_requires_auth():
-    # 4 家里只有 contract-check 不引用 {{auth.*}}（无需凭证）
+    # Q9 起 4 家全部引用 {{auth.*}}（cc 补了 login prepare，需凭证换 JWT）
     assert build_adapter_config(_payload("customer-service"))[0].requires_auth is True
-    assert build_adapter_config(_payload("contract-check"))[0].requires_auth is False
+    assert build_adapter_config(_payload("contract-check"))[0].requires_auth is True
     assert build_adapter_config(_payload("smart-procurement"))[0].requires_auth is True
     assert build_adapter_config(_payload("good-question"))[0].requires_auth is True
 

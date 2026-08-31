@@ -22,7 +22,9 @@ export const setAgentAuth = (id, secrets) => http.put(`/api/agents/${id}/auth`, 
 
 // POST /agents/{id}/probe?suite_id&interface_id → {ok, interfaces: [ProbeResult]}
 // 真实调 LLM，前端触发前二次确认
-export const probeAgent = (id, params) => http.post(`/api/agents/${id}/probe`, null, { params })
+// bug#3：全局 http timeout=15s 会中断真实 LLM 冒烟，probe 单独覆盖为长超时
+export const probeAgent = (id, params) =>
+  http.post(`/api/agents/${id}/probe`, null, { params, timeout: 180000 })
 
 // ---- 快捷接入（Q7 wizard） ----
 // POST /agents/{id}/adapter {manifest} → 确认 v2 manifest，服务端权威生成 adapter 落库（Q2）
@@ -33,7 +35,9 @@ export const generateSkeleton = (id, probeInput) =>
   http.post(`/api/agents/${id}/skeleton`, { probe_input: probeInput })
 
 // POST /agents/{id}/probe {input} → 显式探测输入冒烟（Q4：文件型 file_path 也走这里）
-export const probeAgentInput = (id, input) => http.post(`/api/agents/${id}/probe`, { input })
+// bug#3：全局 http timeout=15s 会中断真实 LLM 冒烟，probe 单独覆盖为长超时（后端 case_timeout 120s + 余量）
+export const probeAgentInput = (id, input) =>
+  http.post(`/api/agents/${id}/probe`, { input }, { timeout: 180000 })
 
 // ---- 接口（agent_interface） ----
 export const listInterfaces = (id) => http.get(`/api/agents/${id}/interfaces`)
