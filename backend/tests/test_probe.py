@@ -3,7 +3,7 @@
 核心逻辑定义见 CLAUDE.md：探测的字段判定是核心分支逻辑。用 unittest（不引入 pytest），
 fake adapter/client 喂模拟响应，不触真实网络。
 """
-import asyncio
+from asyncio_util import run_in_isolated_loop
 import json
 import os
 import types
@@ -90,7 +90,7 @@ class _FakeClient:
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    return run_in_isolated_loop(coro)
 
 
 # ---------------- usage 三分量 ----------------

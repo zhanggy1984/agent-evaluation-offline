@@ -48,6 +48,19 @@ RULE_DIMS = ["completeness", "tool_usage"]
 JUDGE_DIMS = ["factuality", "reasoning_quality"]
 
 
+def _judge_met(value: float, target: float) -> bool:
+    """#2 档位化：judge 维度达标判定（与 backend runner/scorer._gate_met 同规则）。
+
+    judge 分恒为 6 档步进 20（0/20/.../100），target 是连续双签值。直接连续比较会让
+    85 target 只有 100 档能过（80<85 悬崖）。target 归 floor 档、value 达 floor 档即过
+    （85/92 → 4 档，80 可过）。负数无档位语义，回退连续分比较。
+    脚本独立运行不 import 后端包，判据复制防漂移。
+    """
+    if target >= 0 and value >= 0:
+        return int(value // 20) >= int(target // 20)
+    return value >= target
+
+
 def decide_case(dims: dict[str, list[float | None]],
                 tgts: dict[str, float]) -> tuple[bool, bool, list[str], list[str]]:
     """单个 case 三层分级判定（V2 门禁核心逻辑，纯函数可单测）。
@@ -70,7 +83,8 @@ def decide_case(dims: dict[str, list[float | None]],
                 rule_ok = False
                 rule_reason.append(f"{dim}({fails}次<{t})")
         elif dim in JUDGE_DIMS:
-            pc = sum(1 for v in vals if v >= t)
+            # #2 档位化：judge 80 对 target 85 不再 fail（同档 4 档）；全 fail 强 fail 语义保留
+            pc = sum(1 for v in vals if _judge_met(v, t))
             if pc == 0:
                 judge_ok = False
                 judge_reason.append(f"{dim}全fail<{t}")

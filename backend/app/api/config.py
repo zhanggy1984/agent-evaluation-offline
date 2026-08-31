@@ -77,7 +77,11 @@ async def list_prices(_: User = Depends(get_current_user), db: AsyncSession = De
 @router.post("/model-prices")
 async def create_price(body: PriceCreate, _: User = Admin, db: AsyncSession = Depends(get_db)):
     from datetime import datetime, timezone
-    effective = datetime.fromisoformat(body.effective_from) if body.effective_from else datetime.now(timezone.utc)
+    # C5：全库 naive UTC 约定（DB DATETIME 无时区，orchestrator.py:48-50 同口径）。
+    # 缺省 datetime.utcnow() 为 naive UTC（原 aware now 与 naive fromisoformat 混用）；
+    # 用户显式传带时区 ISO 时按 UTC 归一后剥 tzinfo → naive，无时区输入视为已 naive。
+    raw = datetime.fromisoformat(body.effective_from) if body.effective_from else datetime.utcnow()
+    effective = raw.astimezone(timezone.utc).replace(tzinfo=None) if raw.tzinfo else raw
     db.add(ModelPrice(model=body.model, input_price=body.input_price, output_price=body.output_price,
                       cache_hit_price=body.cache_hit_price, effective_from=effective))
     await db.commit()

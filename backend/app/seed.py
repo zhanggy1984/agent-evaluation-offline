@@ -252,9 +252,10 @@ async def _seed_baseline_targets(db) -> None:
     """6.3 默认达标分：seed 四家 agent accuracy 四维 agent 级默认（interface_id=0 哨兵）。
 
     幂等（联合主键 agent+interface+dimension）；已存在不覆盖（保留人工标定）。
-    初始值 70（百分制），approval_status=auto（手动改才进双签流程）。
+    初始值：规则维度 70 / 语义维度 60（#11 对齐 judge 20 分档——语义维度 70 在
+    _gate_met 档位化下等价 60 档，改 60 仅对齐展示值，门禁行为不变），approval_status=auto。
     """
-    from app.core.constants import ACCURACY_DIMENSIONS
+    from app.core.constants import ACCURACY_DIMENSIONS, SEMANTIC_DIMENSIONS
     from app.models import Agent, BaselineTarget
     from app.seed_data import SEED_AGENTS
 
@@ -270,10 +271,13 @@ async def _seed_baseline_targets(db) -> None:
                 BaselineTarget.dimension_code == dim))).first()
             if exists:
                 continue
+            target_score = 60 if dim in SEMANTIC_DIMENSIONS else 70
             db.add(BaselineTarget(agent_id=agent_id, interface_id=0, dimension_code=dim,
-                                  target_score=70, calibration_source="手动",
+                                  target_score=target_score,
+                                  calibration_source="手动",
                                   approval_status="auto"))
-            logger.info("seed baseline_target agent=%s dim=%s target=70", spec["name"], dim)
+            logger.info("seed baseline_target agent=%s dim=%s target=%s",
+                        spec["name"], dim, target_score)
 
 
 async def _seed_admin(db) -> None:
@@ -350,10 +354,8 @@ DEFAULT_SYSTEM_CONFIG = {
                      "meta": {"type": "int", "min": 1, "max": 86400}},
     "scoring_timeout": {"value": 3600, "scope": "run", "is_hot": True,   # scoring 超时（秒）：超时 → scoring_failed 兜底
                         "meta": {"type": "int", "min": 1, "max": 604800}},
-    "contract_check_timeout": {"value": 300, "scope": "run", "is_hot": True,
-                               "meta": {"type": "int", "min": 1, "max": 86400}},
-    "sse_idle_timeout": {"value": 60, "scope": "run", "is_hot": True,
-                         "meta": {"type": "int", "min": 1, "max": 86400}},
+    # C1：contract_check_timeout/sse_idle_timeout 死配置已删（全仓仅 seed 命中，从未消费）——
+    # 「配置即真相」不留展示无效项。存量库需运维 DELETE（见上线待办）。
     "run_timeout": {"value": None, "scope": "run", "is_hot": True,   # None → orchestrator.estimate_run_timeout 估算（7.4）
                     "meta": {"type": "int", "min": 1, "max": 604800, "nullable": True}},
     "perf_repeat_count": {"value": 5, "scope": "run", "is_hot": True,
@@ -364,27 +366,28 @@ DEFAULT_SYSTEM_CONFIG = {
                            "meta": {"type": "int", "min": 1, "max": 3600}},
     "judge_na_threshold": {"value": 0.3, "scope": "run", "is_hot": True,
                            "meta": {"type": "number", "min": 0.0, "max": 1.0}},
-    "error_rate_block": {"value": 0.1, "scope": "run", "is_hot": True,
-                         "meta": {"type": "number", "min": 0.0, "max": 1.0}},
-    "assertion_penalty": {"value": 30, "scope": "run", "is_hot": True,
-                          "meta": {"type": "int", "min": 0, "max": 100}},
+    # C1：error_rate_block 死配置已删（名似「错误率熔断」但从未消费，全仓仅 seed 命中）。
+    # P2-8：assertion_penalty 已移除（产品意图「语义维度断言扣分」未落地，见 solution_detail §七评审）。
+    # scorer 从未消费；删除注册避免「配置即真相」误导。存量库需执行 DELETE（seed insert-if-missing 不清行）。
     "judge_max_retries": {"value": 2, "scope": "run", "is_hot": True,
                           "meta": {"type": "int", "min": 0, "max": 10}},
-    "judge_repeat": {"value": 2, "scope": "run", "is_hot": True,
+    "judge_repeat": {"value": 3, "scope": "run", "is_hot": True,
                      "meta": {"type": "int", "min": 1, "max": 10}},
     "breaker_failure_threshold": {"value": 5, "scope": "run", "is_hot": True,
                                   "meta": {"type": "int", "min": 1, "max": 1000}},
     "breaker_open_duration": {"value": 60, "scope": "run", "is_hot": True,
                               "meta": {"type": "int", "min": 1, "max": 86400}},
-    "breaker_half_open_probe": {"value": 1, "scope": "run", "is_hot": True,
-                                "meta": {"type": "int", "min": 1, "max": 100}},
-    "retry_backoff_max": {"value": 10, "scope": "run", "is_hot": True,
-                          "meta": {"type": "int", "min": 1, "max": 3600}},
+    # C1：breaker_half_open_probe/retry_backoff_max 死配置已删（熔断/重试只消费
+    # breaker_failure_threshold/breaker_open_duration/max_retries，这俩从未被读）。
     "max_retries": {"value": 1, "scope": "run", "is_hot": True,
                     "meta": {"type": "int", "min": 0, "max": 100}},
     # 进程级（global）
     "retain_runs": {"value": 50, "scope": "global", "is_hot": True,
                     "meta": {"type": "int", "min": 1, "max": 10000}},
+    # #4 放开并发：同 agent 允许的执行中 run 数（互斥计数阈值）。上限收窄：per-run 桶下
+    # N 是并发放大镜（N×per_agent_concurrency），默认 1 = 旧「单活跃 run」语义。
+    "max_active_runs_per_agent": {"value": 1, "scope": "global", "is_hot": True,
+                                  "meta": {"type": "int", "min": 1, "max": 8}},
     "heartbeat_interval": {"value": 30, "scope": "global", "is_hot": False,
                            "meta": {"type": "int", "min": 1, "max": 86400}},
     "judge_llm.base_url": {"value": "", "scope": "global", "is_hot": True,

@@ -1,0 +1,234 @@
+{
+  "agent": "contract-check",
+  "base_url": "http://host.docker.internal:8003",
+  "started_at": "2026-08-30 16:24:03",
+  "discover": {
+    "ok": true,
+    "contract_version": "2.0",
+    "adapter_drift": [
+      "平台无 manifest 快照（手工配置 adapter 或非 v2 seed），无法对比漂移"
+    ]
+  },
+  "adapter": {
+    "contract_version": "2.0",
+    "requires_auth": true,
+    "input_fields": [
+      "file_path"
+    ],
+    "warnings": []
+  },
+  "interfaces": {
+    "created": [],
+    "skipped": [
+      {
+        "name": "result",
+        "path": "/api/tasks/{task_id}/result",
+        "method": "GET"
+      }
+    ],
+    "renamed": []
+  },
+  "scenes": {
+    "created": [],
+    "skipped": [
+      {
+        "tag": "missing_date"
+      },
+      {
+        "tag": "single_party"
+      },
+      {
+        "tag": "scanned_pdf"
+      },
+      {
+        "tag": "conflict"
+      },
+      {
+        "tag": "genuine"
+      }
+    ]
+  },
+  "auth": {
+    "auth_configured": true
+  },
+  "probe": {
+    "ok": true,
+    "interfaces": [
+      {
+        "interface_id": 2,
+        "contract_type": "sync",
+        "ok": true,
+        "http_status": 200,
+        "elapsed_ms": 15,
+        "fields": {
+          "answer": true,
+          "reasoning": false,
+          "tool_calls": true,
+          "usage": true,
+          "usage_detail": {
+            "prompt_tokens": 2551,
+            "completion_tokens": 973,
+            "total_tokens": 3524,
+            "prompt_cache_hit_tokens": 2432,
+            "prompt_cache_miss_tokens": 119
+          },
+          "timing_start": true,
+          "timing_end": true
+        },
+        "errors": [],
+        "raw_sample": "{\"id\": 414, \"status\": \"WAITING_REVIEW\", \"extraction_status\": \"COMPLETE\", \"standard_json\": {\"contractTitle\": \"购销合同\", \"totalAmount\": 100000.0, \"invoiceRequirements\": \"\", \"status\": null, \"contractNo\": \"\", \"terminationDate\": null, \"invoiceType\": null, \"signedDate\": \"2026-01-01\", \"depositAmount\": null, \"depositType\": null, \"contractType\": \"采购\", \"currency\": \"CNY\", \"depositRefundCondition\": \"\", \"signingPlace\": \"\", \"taxRate\": null, \"effectiveDate\": null, \"taxInclusive\": true, \"hasClause\": [{\"clauseType\"",
+        "input_error": false
+      }
+    ]
+  },
+  "skeleton": {
+    "agent_name": "contract-check",
+    "suite": {
+      "name": "contract-check 接入示例",
+      "description": "Q5 自动生成的示例骨架：input 已预填，expected/golden_answer/reference_docs 需人工补全"
+    },
+    "interfaces": [
+      {
+        "name": "result",
+        "path": "/api/tasks/{task_id}/result",
+        "contract_type": "sync"
+      }
+    ],
+    "cases": [
+      {
+        "name": "missing_date-result",
+        "interface_name": "result",
+        "scene_tag": "missing_date",
+        "input_type": "file",
+        "input": {
+          "file_path": "/app/uploads/cc_b1_missing_date.pdf"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "single_party-result",
+        "interface_name": "result",
+        "scene_tag": "single_party",
+        "input_type": "file",
+        "input": {
+          "file_path": "/app/uploads/cc_b1_missing_date.pdf"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "scanned_pdf-result",
+        "interface_name": "result",
+        "scene_tag": "scanned_pdf",
+        "input_type": "file",
+        "input": {
+          "file_path": "/app/uploads/cc_b1_missing_date.pdf"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "conflict-result",
+        "interface_name": "result",
+        "scene_tag": "conflict",
+        "input_type": "file",
+        "input": {
+          "file_path": "/app/uploads/cc_b1_missing_date.pdf"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "genuine-result",
+        "interface_name": "result",
+        "scene_tag": "genuine",
+        "input_type": "file",
+        "input": {
+          "file_path": "/app/uploads/cc_b1_missing_date.pdf"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      }
+    ],
+    "agent_id": 2
+  },
+  "persist": {
+    "suite_id": 2094,
+    "case_ids": [
+      3034,
+      3035,
+      3036,
+      3037,
+      3038
+    ]
+  },
+  "passed": 6,
+  "failed": 0,
+  "completed_at": "2026-08-30 16:24:13"
+}

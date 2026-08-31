@@ -10,5 +10,7 @@ export const TERMS = {
   gate: { name: '门禁墙', desc: '对 agent 评分的准入达标检查：任一维度低于达标分即视为门禁失败，汇总在失败摘要' },
   gold: { name: '金标准', desc: '人工标定、作为判分事实依据的用例（golden），judge 以此比对判定' },
   baseline: { name: '基线', desc: '最近一次 run 的评分基准，用于对比当前分数（含各接口维度达标情况）' },
-  target: { name: '达标分', desc: '该维度需达到的分数阈值（0-100 百分制）' },
+  target: { name: '达标分', desc: '该维度需达到的分数阈值（0-100 百分制）。judge 维度（事实性/思考链）精度为 20 分档，仅 0/20/40/60/80/100 有效——85/90/95 门禁等价 80，75/70 等价 60' },
+  knowledge: { name: '知识版本', desc: '评测时 gq 应用侧知识库版本（库级文档时间戳锚，SSE meta 回填 env_snapshot）。与线上当前知识版本对比，判断「评测态/线上态」是否一致' },
+  app_cache: { name: '应用缓存命中', desc: 'gq 应用层问答缓存命中 case 数（usage.cached=True）。区别于 DeepSeek 上下文缓存 prompt_cache_hit_tokens——应用缓存是语义级问答去重，命中代表相同问题复用历史答案' },
 }

@@ -32,6 +32,7 @@ class _Run:
     lease_until = None
     hard_deadline = None
     env_snapshot = None
+    case_ids = None  # #3 子集：_load_run_cases 访问 run.case_ids，mock 需有该字段（None=全量）
 
 
 class _Agent:
@@ -56,8 +57,9 @@ class _Case:
 
 
 class _ScalarResult:
-    def __init__(self, rows):
+    def __init__(self, rows, rowcount=1):
         self._rows = rows
+        self.rowcount = rowcount  # A1 原子条件 UPDATE：默认影响 1 行（正常流程），防 AttributeError
 
     def scalars(self):
         return self

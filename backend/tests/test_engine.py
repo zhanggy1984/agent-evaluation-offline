@@ -3,7 +3,7 @@
 核心逻辑（CLAUDE.md）：prepare 步骤的执行分支（普通/multipart/poll）是引擎核心，
 用 unittest + fake client 喂模拟响应，不触真实网络、不读真实文件（multipart 用例除外）。
 """
-import asyncio
+from asyncio_util import run_in_isolated_loop
 import json
 import os
 import shutil
@@ -43,7 +43,7 @@ class _SeqClient:
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    return run_in_isolated_loop(coro)
 
 
 class _UploadsTestCase(unittest.TestCase):

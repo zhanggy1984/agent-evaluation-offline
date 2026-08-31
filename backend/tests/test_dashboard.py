@@ -240,13 +240,22 @@ class TestBuildBaseline(unittest.TestCase):
         self.assertAlmostEqual(d["gap"], 3.0, places=2)  # 78-75
 
     def test_fallback_agent_default(self):
+        # #2 档位化：68 与 70 同档（3 档）→ met=True（消除「差 2 分生死不同档」悬崖）
         results = [self._result(101, {"factuality": 68})]
         out = build_baseline(results, {101: 1}, {(0, "factuality"): 70}, [self._iface(1, "a")])
         dims = {d["code"]: d for d in out[0]["dims"]}
         d = dims["factuality"]
         self.assertEqual(d["target"], 70.0)
+        self.assertTrue(d["met"])
+        self.assertAlmostEqual(d["gap"], -2.0, places=2)  # gap 保留连续差（展示口径不变）
+
+    def test_semantic_below_floor_not_met(self):
+        # 跨档仍不达标：59（2 档）对 70（3 档）→ met=False（与门禁 _gate_met 同源）
+        results = [self._result(101, {"factuality": 59})]
+        out = build_baseline(results, {101: 1}, {(0, "factuality"): 70}, [self._iface(1, "a")])
+        d = {x["code"]: x for x in out[0]["dims"]}["factuality"]
         self.assertFalse(d["met"])
-        self.assertAlmostEqual(d["gap"], -2.0, places=2)
+        self.assertAlmostEqual(d["gap"], -11.0, places=2)
 
     def test_na_and_none_excluded(self):
         """na 维度不计均值；无有效值 → score None（met/gap 无判定）。"""
@@ -284,4 +293,65 @@ class TestBuildBaseline(unittest.TestCase):
         results = [self._result(999, {"completeness": 60})]
         out = build_baseline(results, {}, {}, [self._iface(1, "a")])
         self.assertEqual(out, [])
+
+
+# ============ B7：DB 编排层（以下用例 mock DB，验证 SQL 结构；与上方纯逻辑单测分区） ============
+import pytest
+from unittest.mock import AsyncMock
+
+from app.api.dashboard import _agent_dim_series, gate
+
+
+class _Exec:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+def _fake_db(runs, results):
+    """按表分派：eval_run → runs，其余 → results（测试数据空时两者皆 []）。"""
+    calls = []
+
+    def _exec(stmt):
+        calls.append(stmt)
+        name = stmt.get_final_froms()[0].name
+        return _Exec(runs if name == "eval_run" else results)
+
+    db = AsyncMock()
+    db.execute.side_effect = _exec
+    return db, calls
+
+
+class TestB7DbQueries:
+    @pytest.mark.asyncio
+    async def test_agent_dim_series_batch_in(self):
+        """B7：N+1 → 单次 in_ 批量；按 run 分组维度均值（顺序/归属与逐 run 一致）。"""
+        from types import SimpleNamespace
+        runs = [SimpleNamespace(id=1), SimpleNamespace(id=2)]
+        results = [
+            (1, [{"code": "completeness", "value": 0.8, "na": None}]),
+            (2, [{"code": "completeness", "value": 0.9, "na": None}]),
+        ]
+        db, calls = _fake_db(runs, results)
+        out = await _agent_dim_series(db, 1)
+        assert out == {"completeness": [0.8, 0.9]}
+        assert len(calls) == 2  # run 查询 + 一次批量（替代 N+1）
+        batch = str(calls[1].compile())
+        assert "eval_result" in batch and "IN" in batch  # 批量列投影 + in_
+
+    @pytest.mark.asyncio
+    async def test_gate_filters_terminal_status(self):
+        """B7：终态过滤下推 SQL（build_gate_cards Python 层已过滤，纯性能下推）。"""
+        from types import SimpleNamespace
+        db, calls = _fake_db([], [])
+        out = await gate(db=db, user=SimpleNamespace(username="u"))
+        assert out["data"] == []
+        run_stmt = next(c for c in calls if c.get_final_froms()[0].name == "eval_run")
+        sql = str(run_stmt.compile())
+        assert "eval_run" in sql and "IN" in sql  # 含 status IN (TERMINAL_STATUS)
 

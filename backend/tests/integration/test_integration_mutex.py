@@ -24,7 +24,7 @@ from sqlalchemy import delete, select
 
 from app.api import runs as runs_mod
 from app.core.db import SessionLocal
-from app.core.errors import ApiError, E_RUN_MUTEX
+from app.core.errors import ApiError, E_RUN_MUTEX, E_VALIDATION
 from app.core.lock import agent_mutex
 from app.models import EvalRun
 from app.models.misc import AuditLog
@@ -189,8 +189,8 @@ async def test_create_run_concurrent_one_wins(env, monkeypatch):
 
 # ---------------- rerun_run 触发互斥（P2-D2 同修 with_for_update，需覆盖） ----------------
 @pytest.mark.asyncio(loop_scope="session")
-async def test_rerun_active_409(env, monkeypatch):
-    """源 run 自身 pending（active）即自锁：rerun 同 run 应 409。"""
+async def test_rerun_active_400(env, monkeypatch):
+    """源 run 自身 pending（active）即自锁：rerun 同 run 应 400（#4 护栏，单测已定 400）。"""
     monkeypatch.setattr(orchestrator, "start_run", _noop_start)
     async with SessionLocal() as s:
         ch = await create_chain(s)
@@ -201,8 +201,8 @@ async def test_rerun_active_409(env, monkeypatch):
         env.suites.append(ch["suite"]); env.cases.extend(ch["cases"]); env.runs.append(src)
         with pytest.raises(ApiError) as ei:
             await runs_mod.rerun_run(src.id, _audit_req("10.9.9.1"), _staff, s)
-        assert ei.value.status_code == 409
-        assert ei.value.code == E_RUN_MUTEX
+        assert ei.value.status_code == 400
+        assert ei.value.code == E_VALIDATION
 
 
 @pytest.mark.asyncio(loop_scope="session")

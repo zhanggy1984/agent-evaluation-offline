@@ -84,7 +84,14 @@
         <el-table-column label="Agent" width="160">
           <template #default="{ row }">{{ agentName(row.agent_id) }}</template>
         </el-table-column>
-        <el-table-column prop="version" label="版本" width="100" />
+        <el-table-column label="版本" width="150">
+          <template #default="{ row }">
+            {{ row.version }}
+            <el-tag v-if="row.case_ids?.length" size="small" type="info" style="margin-left: 4px">
+              子集 {{ row.case_ids.length }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="160">
           <template #default="{ row }">
             <el-tag :type="runStatus(row.status).type" size="small">{{ runStatus(row.status).label }}</el-tag>
@@ -101,10 +108,25 @@
             {{ fmtRate(row.total_case ? row.pass_case / row.total_case : null) }}
           </template>
         </el-table-column>
+        <el-table-column label="进度" min-width="200">
+          <template #default="{ row }">
+            <template v-if="row.done_case != null">
+              <el-progress
+                :percentage="Math.min(100, Math.round(row.total_case ? (row.done_case / row.total_case) * 100 : 0))"
+                :stroke-width="10"
+                style="width: 90px; display: inline-block; vertical-align: middle"
+              />
+              <span class="dim-note" style="margin-left: 6px">{{ row.done_case }}/{{ row.total_case }}</span>
+              <span v-if="row.estimate_remaining_sec != null" class="dim-note">· 剩 {{ fmtDuration(row.estimate_remaining_sec) }}</span>
+              <el-tag v-if="row.judge_queue" size="small" type="info" style="margin-left: 4px">判分 {{ row.judge_queue }}</el-tag>
+            </template>
+            <span v-else class="dim-note">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="开始时间" min-width="160">
           <template #default="{ row }">{{ fmtTime(row.started_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="170" fixed="right">
+        <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openRunDetail(row)">明细</el-button>
             <el-button v-if="isStaff && isActive(row.status)" link type="warning" size="small" @click="doCancel(row)">
@@ -112,6 +134,15 @@
             </el-button>
             <el-button v-if="isStaff && !isActive(row.status)" link type="primary" size="small" @click="doRerun(row)">
               重跑
+            </el-button>
+            <el-button
+              v-if="isStaff && !isActive(row.status) && row.fail_case > 0"
+              link
+              type="warning"
+              size="small"
+              @click="doRerunFailed(row)"
+            >
+              重跑未达标
             </el-button>
           </template>
         </el-table-column>
@@ -382,16 +413,56 @@
         <span>用例明细</span>
         <el-tag size="small" type="info" style="margin-left: 8px"><TermTip term="L3" /></el-tag>
         <el-tag v-if="curRunId" size="small" style="margin-left: 8px">run #{{ curRunId }}</el-tag>
+        <!-- P2-9 评测态追溯：评测时 gq 知识版本 + 应用缓存命中 case 数（区别于 DeepSeek 上下文缓存） -->
+        <el-tag v-if="curRunKnowledge" size="small" type="primary" style="margin-left: 8px">
+          <TermTip term="knowledge" /> {{ curRunKnowledge }}
+        </el-tag>
+        <el-tag v-if="cacheHitCount" size="small" type="success" style="margin-left: 8px">
+          <TermTip term="app_cache" /> {{ cacheHitCount }}/{{ runResults.length }}
+        </el-tag>
         <span v-if="isStaff" class="export-bar">
           <el-button size="small" type="primary" :loading="exporting" @click="doExport('pdf')">导出 PDF</el-button>
         </span>
       </template>
       <el-table :data="runResults" v-loading="resultsLoading" size="small" stripe>
+        <!-- P2-6 行内明细：失败断言（basic，含 actual）+ judge 判定（staff 才返回） -->
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="row-detail">
+              <div v-if="(row.assertion_results || []).length" class="detail-sec">
+                <div class="detail-title">断言失败</div>
+                <div v-for="(a, i) in row.assertion_results" :key="i" class="fail-dim">
+                  [{{ a.dimension || '-' }}] {{ a.op }} args={{ JSON.stringify(a.args) }} → actual={{ a.actual }}
+                </div>
+              </div>
+              <div v-if="(row.judge_results || []).length" class="detail-sec">
+                <div class="detail-title">Judge 判定</div>
+                <div v-for="(j, i) in row.judge_results" :key="i" class="fail-dim">
+                  {{ DIM_LABEL[j.dimension] || j.dimension }}: {{ fmtScore(j.score) }} — {{ j.reason }}
+                </div>
+              </div>
+              <div
+                v-if="!(row.assertion_results || []).length && !(row.judge_results || []).length"
+                class="detail-sec detail-empty"
+              >
+                无失败断言 / judge 判定
+              </div>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="case_name" label="用例" min-width="160" show-overflow-tooltip />
         <el-table-column prop="interface_name" label="接口" width="120" />
         <el-table-column label="结果" width="80">
           <template #default="{ row }">
             <el-tag :type="pfTag(row.pass_fail)" size="small">{{ pfLabel(row.pass_fail) }}</el-tag>
+          </template>
+        </el-table-column>
+        <!-- #12 单 case 状态流：判分中/判分失败显式标注，终态留空避免噪音 -->
+        <el-table-column label="阶段" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="row.stage === 'judging'" size="small" type="warning">判分中</el-tag>
+            <el-tag v-else-if="row.stage === 'judge_failed'" size="small" type="danger">判分失败</el-tag>
+            <span v-else class="dim-note">{{ stageLabel(row.stage) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="总分" width="80">
@@ -411,6 +482,13 @@
             <span v-if="row.error_type" class="err">{{ row.error_type }}: {{ row.error_detail }}</span>
           </template>
         </el-table-column>
+        <!-- P2-6 Answer 摘要：后端已按 D3 截断 500（basic，含 viewer） -->
+        <el-table-column label="Answer 摘要" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.answer">{{ row.answer }}</span>
+            <span v-else class="dim-na">(空)</span>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="80" fixed="right">
           <template #default="{ row }">
             <el-button v-if="isStaff" link type="primary" size="small" @click="openEvidence(row)">证据</el-button>
@@ -418,13 +496,22 @@
         </el-table-column>
       </el-table>
       <!-- L3.5 门禁失败摘要 -->
-      <div v-if="runFailures.length" class="drawer-failures">
+      <div v-if="runFailures.items && runFailures.items.length" class="drawer-failures">
         <div class="drawer-failures-title">
           <span>门禁失败摘要</span>
           <el-tag size="small" type="warning" style="margin-left: 8px"><TermTip term="L3.5" /></el-tag>
         </div>
+        <!-- P2-6 top 扣分原因：按维度聚合，staff 才有数据（judge reason 证据级） -->
+        <div v-if="runFailures.top_reasons && runFailures.top_reasons.length" class="top-reasons">
+          <div class="top-reasons-title">Top 扣分原因</div>
+          <div v-for="t in runFailures.top_reasons" :key="t.dimension" class="top-reason-item">
+            <el-tag size="small" type="danger">{{ DIM_LABEL[t.dimension] || t.dimension }}</el-tag>
+            <span class="top-reason-count">× {{ t.count }} 例 · avg {{ fmtScore(t.avg_score) }}</span>
+            <div v-for="(r, i) in t.sample_reasons" :key="i" class="top-reason-sample">· {{ r }}</div>
+          </div>
+        </div>
         <el-collapse>
-          <el-collapse-item v-for="f in runFailures" :key="f.case_id" :name="f.case_id">
+          <el-collapse-item v-for="f in runFailures.items" :key="f.case_id" :name="f.case_id">
             <template #title>
               <span class="fail-title">{{ f.case_name }}</span>
               <el-tag size="small" type="danger" style="margin-left: 8px">fail</el-tag>
@@ -536,7 +623,7 @@
           <el-collapse-item v-if="evidence.tool_calls && evidence.tool_calls.length" title="工具调用" name="tools">
             <pre class="pre">{{ JSON.stringify(evidence.tool_calls, null, 2) }}</pre>
           </el-collapse-item>
-          <el-collapse-item title="Usage / Timing" name="meta">
+          <el-collapse-item v-if="evidence.usage || evidence.timing" title="Usage / Timing" name="meta">
             <pre class="pre">{{ JSON.stringify({ usage: evidence.usage, timing: evidence.timing }, null, 2) }}</pre>
           </el-collapse-item>
           <el-collapse-item v-if="evidence.error_type" title="错误信息" name="err">
@@ -616,10 +703,14 @@ const compareA = ref(null)
 const compareB = ref(null)
 const compareData = ref(null)
 const curRunId = ref(null)
+// P2-9 评测态追溯：当前 run 评测时的 gq 知识版本（list_runs env_snapshot 回填透出）
+const curRunKnowledge = ref(null)
 const resultsLoading = ref(false)
 const runResults = ref([])
+// P2-9 应用缓存命中聚合：run_results 每行 cache_hit（usage.cached=True）为真即计入
+const cacheHitCount = computed(() => runResults.value.filter((r) => r.cache_hit).length)
 const exporting = ref(false)
-const runFailures = ref([])
+const runFailures = ref({ items: [], top_reasons: [] })
 const triggerVisible = ref(false)
 const triggering = ref(false)
 const triggerForm = reactive({ agent_id: null, suite_id: null, version: '', trigger_type: 'manual' })
@@ -648,6 +739,16 @@ const pfLabel = (v) => (PF[v] || {}).label || v
 const isActive = (s) => ACTIVE.includes(s)
 const fmtTime = (t) => (t ? new Date(t).toLocaleString('zh-CN') : '-')
 const fmtRate = (r) => (r == null ? 'N/A' : `${(r * 100).toFixed(1)}%`)
+// #12 预计剩余时长：s / m+s / h+m
+const fmtDuration = (sec) => {
+  if (sec == null) return '—'
+  if (sec < 60) return `${sec}s`
+  if (sec < 3600) return `${Math.floor(sec / 60)}m${sec % 60 ? ` ${sec % 60}s` : ''}`
+  return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`
+}
+// #12 单 case 状态流（stage 推断）
+const STAGE_LABEL = { error: '失败', judging: '判分中', judge_failed: '判分失败', completed: '完成' }
+const stageLabel = (s) => STAGE_LABEL[s] || s
 // 分数统一兜底：保留 2 位小数并去尾零（避免 100.0 / 2.092 这类长尾展示，走查 #3）
 const fmtScore = (v) => (v == null ? 'N/A' : Number(Number(v).toFixed(2)))
 // P2-C4：tooltip 走 ECharts HTML 渲染，任何动态串进 HTML 前必须转义（存量恶意 version 兜底）
@@ -904,9 +1005,10 @@ function resetDrill() {
   compareB.value = null
   compareData.value = null
   curRunId.value = null
+  curRunKnowledge.value = null
   detailVisible.value = false
   runResults.value = []
-  runFailures.value = []
+  runFailures.value = { items: [], top_reasons: [] }
   evidence.value = null
 }
 
@@ -917,6 +1019,7 @@ async function doCompare() {
 
 async function openRunDetail(row) {
   curRunId.value = row.id
+  curRunKnowledge.value = row.knowledge_version || null
   resultsLoading.value = true
   detailVisible.value = true
   try {
@@ -1018,17 +1121,42 @@ async function doCancel(row) {
 }
 
 async function doRerun(row) {
+  // 子集 run 重跑同一批：显式传 case_ids（=row.case_ids），全量 run 传 null → 后端继承原 run 子集（null=全量）
+  const scope = row.case_ids?.length ? `（子集 ${row.case_ids.length} 例）` : ''
   try {
     await ElMessageBox.confirm(
-      `确认重跑 run #${row.id}（${row.version}）？将真实调用 agent，耗时/费用。`,
+      `确认重跑 run #${row.id}（${row.version}）${scope}？将真实调用 agent，耗时/费用。`,
       '重跑评测',
       { type: 'warning' }
     )
   } catch {
     return
   }
-  const res = await rerunRun(row.id)
+  const res = await rerunRun(row.id, { case_ids: row.case_ids })
   ElMessage.success(`已创建 run #${res.id}`)
+  refreshAll()
+  startPoll()
+}
+
+// 定向重跑未达标（#3）：拉 run_failures 失败 case_ids，仅重跑这批（P2-6 起返回 {items, top_reasons}）
+async function doRerunFailed(row) {
+  const failures = await listRunFailures(row.id)
+  const ids = (failures.items || []).map((f) => f.case_id)
+  if (!ids.length) {
+    ElMessage.info('该 run 无未达标用例，无需定向重跑')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认仅重跑 run #${row.id} 的 ${ids.length} 个未达标用例？将真实调用 agent，耗时/费用。`,
+      '定向重跑未达标',
+      { type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  const res = await rerunRun(row.id, { case_ids: ids })
+  ElMessage.success(`已创建定向 run #${res.id}（${ids.length} 例）`)
   refreshAll()
   startPoll()
 }
@@ -1210,6 +1338,55 @@ onBeforeUnmount(() => {
   font-size: 13px;
   line-height: 22px;
   padding-left: 8px;
+}
+/* P2-6 行内明细（expand）+ top 扣分原因 */
+.row-detail {
+  padding: 8px 12px;
+}
+.detail-sec {
+  margin-bottom: 8px;
+}
+.detail-sec:last-child {
+  margin-bottom: 0;
+}
+.detail-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 4px;
+}
+.detail-empty {
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+}
+.top-reasons {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+}
+.top-reasons-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 6px;
+}
+.top-reason-item {
+  margin-bottom: 6px;
+}
+.top-reason-item:last-child {
+  margin-bottom: 0;
+}
+.top-reason-count {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.top-reason-sample {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  padding-left: 8px;
+  line-height: 20px;
 }
 .pre {
   background: var(--el-fill-color-light);

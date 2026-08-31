@@ -3,13 +3,13 @@
 核心逻辑：N/A 归一化加权、门禁判定、judge_incomplete 权重、成本计算、target 接口覆盖。
 不触 DB：score_case/_enabled_dims/_total_cost/_resolve_targets/_unified/_aggregate_precomputed。
 """
-import asyncio
+from asyncio_util import run_in_isolated_loop
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.runner.scorer import (
-    _aggregate_precomputed, _enabled_dims, _resolve_targets, _resolve_weights,
+    _aggregate_precomputed, _enabled_dims, _gate_met, _resolve_targets, _resolve_weights,
     _score_executed_results, _total_cost, _unified, score_case,
 )
 
@@ -105,6 +105,146 @@ class TestGate(unittest.TestCase):
             targets={"ttft": 1000.0})  # 性能维度不在门禁范围
         self.assertEqual(r.pass_fail, "pass")
 
+    def test_gate_uses_aggregated_majority_score(self):
+        # P0-1：judge 多次采样聚合 result（顶层 score=多数档 80 + repeats 明细）
+        # → 门禁按聚合分判，不因 repeats 键存在偏移
+        agg = {
+            "dimension": "factuality", "level": 4, "score": 80.0,
+            "reason": "答案准确", "rubric_version": "1.2", "repeat": 3,
+            "repeats": [
+                {"level": 4, "score": 80.0, "reason": "答案准确"},
+                {"level": 4, "score": 80.0, "reason": "与参考一致"},
+                {"level": 3, "score": 60.0, "reason": "有明显缺陷"},
+            ],
+        }
+        common = {"completeness": [{"dimension": "completeness", "pass": True}],
+                  "tool_usage": [{"dimension": "tool_usage", "pass": True}]}
+        # #2 档位化：80 与 85 同档（4 档）→ 不再悬崖 fail（修复硬伤 P1-2「85 只有 100 能过」）
+        r_met = _base(assertion_results=common["completeness"] + common["tool_usage"],
+                      judge_results=[agg], targets={"factuality": 85.0})
+        self.assertEqual(r_met.pass_fail, "pass")
+        self.assertFalse(r_met.gate_failed)
+        # 跨档仍 fail：80（4 档）对 100（5 档）不达标
+        r_fail = _base(assertion_results=common["completeness"] + common["tool_usage"],
+                       judge_results=[agg], targets={"factuality": 100.0})
+        self.assertEqual(r_fail.pass_fail, "fail")
+        self.assertTrue(r_fail.gate_failed)
+        # 同档下限边界：target 92 也归 4 档，80 可过
+        r_floor = _base(assertion_results=common["completeness"] + common["tool_usage"],
+                        judge_results=[agg], targets={"factuality": 92.0})
+        self.assertEqual(r_floor.pass_fail, "pass")
+
+
+class TestGateMet(unittest.TestCase):
+    """#2 门禁档位化判定矩阵：语义维度 floor 档、规则维度连续分、异常回退。"""
+
+    def test_semantic_floor_bucket(self):
+        # 85/92 target 归 4 档：80 可过（消除「85 只有 100 能过」悬崖）
+        for t in (80.0, 85.0, 92.0):
+            self.assertTrue(_gate_met(80.0, t, "factuality"), f"80 对 {t} 应过")
+        # 100 target 归 5 档：80/92 均不过，100 过
+        self.assertFalse(_gate_met(80.0, 100.0, "factuality"))
+        self.assertFalse(_gate_met(92.0, 100.0, "factuality"))
+        self.assertTrue(_gate_met(100.0, 100.0, "factuality"))
+        # 跨档下探仍不过：60（3 档）对 80（4 档）
+        self.assertFalse(_gate_met(60.0, 80.0, "factuality"))
+
+    def test_semantic_low_target(self):
+        # target 归 0 档：任何非负语义分（≥0 档）都过
+        self.assertTrue(_gate_met(0.0, 0.0, "reasoning_quality"))
+        self.assertTrue(_gate_met(20.0, 0.0, "reasoning_quality"))
+        self.assertTrue(_gate_met(0.0, 5.0, "reasoning_quality"))
+
+    def test_rule_dimension_continuous(self):
+        # 规则维度通过率连续分：79 对 80 不过（档位化会错误放宽，保持连续比较）
+        self.assertFalse(_gate_met(79.0, 80.0, "completeness"))
+        self.assertTrue(_gate_met(80.0, 80.0, "completeness"))
+        self.assertTrue(_gate_met(90.0, 80.0, "completeness"))
+        self.assertFalse(_gate_met(79.0, 80.0, "tool_usage"))
+
+    def test_none_or_negative_fallback(self):
+        # 无档位语义 → 连续分比较（fail 方向保守）
+        self.assertFalse(_gate_met(None, 85.0, "factuality"))
+        self.assertFalse(_gate_met(80.0, None, "factuality"))
+        self.assertFalse(_gate_met(-5.0, 85.0, "factuality"))
+        # 负数回退连续分比较：-5 ≥ -10 过，-20 < -10 不过
+        self.assertTrue(_gate_met(-5.0, -10.0, "factuality"))
+        self.assertFalse(_gate_met(-20.0, -10.0, "factuality"))
+
+
+class TestNaProtection(unittest.TestCase):
+    """硬伤 #6 judge 判分失败 N/A 保护：judge_failed_dims 权重占比超阈值 → na。
+
+    只对「该 case 有 judge 任务但判分失败」的维度保护；judge 未配置/无任务不触发。
+    """
+
+    def _pass_rules(self):
+        return [{"dimension": "completeness", "pass": True},
+                {"dimension": "completeness", "pass": True},
+                {"dimension": "tool_usage", "pass": True}]
+
+    def _judge_fail(self, dim="factuality"):
+        return [{"dimension": dim, "level": 1, "score": 0.0}]
+
+    def test_factuality_fail_triggers_na(self):
+        # factuality 权重 0.35/1.0 = 0.35 > 阈值 0.3 → na（决策点 A1 明示的不对称触发侧）
+        r = _base(assertion_results=self._pass_rules(),
+                  judge_results=self._judge_fail(),
+                  judge_failed_dims={"factuality"})
+        self.assertEqual(r.pass_fail, "na")
+        self.assertEqual(r.na_reason, "semantic_na_high")
+
+    def test_reasoning_fail_not_triggers(self):
+        # A1 明示：reasoning 权重 0.15 < 0.3 → 不触发，pass（已知不对称行为）
+        r = _base(assertion_results=self._pass_rules(),
+                  judge_results=self._judge_fail("reasoning_quality"),
+                  judge_failed_dims={"reasoning_quality"})
+        self.assertEqual(r.pass_fail, "pass")
+        self.assertFalse(r.gate_failed)
+
+    def test_combined_semantic_fail_triggers(self):
+        # factuality + reasoning = 0.5 > 0.3 → na
+        r = _base(assertion_results=self._pass_rules(),
+                  judge_results=self._judge_fail(),
+                  judge_failed_dims={"factuality", "reasoning_quality"})
+        self.assertEqual(r.pass_fail, "na")
+
+    def test_no_failed_dims_not_triggers(self):
+        # judge 未配置（judge_failed_dims=None）/无判分失败（空集）→ 不保护，pass
+        r1 = _base(assertion_results=self._pass_rules(),
+                   judge_results=self._judge_fail())
+        self.assertEqual(r1.pass_fail, "pass")
+        r2 = _base(assertion_results=self._pass_rules(),
+                   judge_results=self._judge_fail(), judge_failed_dims=set())
+        self.assertEqual(r2.pass_fail, "pass")
+
+    def test_gate_fail_not_masked(self):
+        # 门禁 fail 优先：judge 失败占比超阈值也不把 fail 掩蔽成 na（保护放门禁后）
+        r = _base(assertion_results=[
+            {"dimension": "completeness", "pass": True},
+            {"dimension": "completeness", "pass": False},  # 50
+            {"dimension": "tool_usage", "pass": True}],
+            judge_results=self._judge_fail(),
+            judge_failed_dims={"factuality"},
+            targets={"completeness": 60.0})
+        self.assertEqual(r.pass_fail, "fail")
+        self.assertTrue(r.gate_failed)
+
+    def test_zero_weight_all_na_no_crash(self):
+        # 除零守卫：四维权重全 0 + 全 N/A → score_total=None 走 na，不除零不崩
+        r = _base(assertion_results=[], judge_results=None,
+                  judge_failed_dims={"factuality"},
+                  weights={d: 0.0 for d in DEF_WEIGHTS})
+        self.assertEqual(r.pass_fail, "na")
+        self.assertIsNone(r.score_total)
+
+    def test_custom_threshold_low(self):
+        # judge_na_threshold 调低（0.1）后 reasoning 单独失败也触发
+        r = _base(assertion_results=self._pass_rules(),
+                  judge_results=self._judge_fail("reasoning_quality"),
+                  judge_failed_dims={"reasoning_quality"}, judge_na_threshold=0.1)
+        self.assertEqual(r.pass_fail, "na")
+
 
 class TestJudgeIncomplete(unittest.TestCase):
     def test_semantic_na_weight_ratio(self):
@@ -123,6 +263,38 @@ class TestJudgeIncomplete(unittest.TestCase):
                 {"dimension": "reasoning_quality", "score": 60.0}])
         self.assertEqual(r.semantic_na_weight, 0.0)
         self.assertAlmostEqual(r.score_total, 87.0)
+
+
+class TestEnabledDenominator(unittest.TestCase):
+    """P2-A4：评分完整度分母按 enabled 过滤（修复前恒全四维和，低估不完整）。"""
+
+    def test_total_accuracy_weight_filters_enabled(self):
+        # 只启用 completeness+factuality（0.3+0.35）：分母收紧到 0.65（修复前恒 1.0）
+        r = _base(case_metrics={"completeness": {"enabled": True},
+                                "factuality": {"enabled": True}})
+        self.assertAlmostEqual(r.total_accuracy_weight, 0.65)
+
+    def test_incomplete_cross_threshold_enabled_filter(self):
+        # 仅启用 reasoning_quality(0.15) 且该维度 N/A：修复前 0.15/1.0=0.15 不标
+        # incomplete；修复后 0.15/0.15=1.0 标 → run 级 judge_incomplete 翻转
+        r = _base(case_metrics={"reasoning_quality": {"enabled": True}})
+        self.assertAlmostEqual(r.total_accuracy_weight, 0.15)
+        self.assertAlmostEqual(r.semantic_na_weight, 0.15)
+        self.assertGreater(r.semantic_na_weight / r.total_accuracy_weight, 0.3)
+
+    def test_na_protection_cross_threshold_enabled_filter(self):
+        # 同一配置 + judge_failed_dims：修复前 0.15/1.0 不触发（pass）；
+        # 修复后 0.15/0.15=1.0 触发 → na（#6 保护翻转）
+        r = _base(case_metrics={"reasoning_quality": {"enabled": True}},
+                  judge_results=[{"dimension": "reasoning_quality", "level": 1, "score": 0.0}],
+                  judge_failed_dims={"reasoning_quality"})
+        self.assertEqual(r.pass_fail, "na")
+        self.assertEqual(r.na_reason, "semantic_na_high")
+
+    def test_unconfigured_metrics_full_weight(self):
+        # case_metrics=None → enabled=全四维 → 分母 1.0（回归，既有行为不变）
+        r = _base()
+        self.assertAlmostEqual(r.total_accuracy_weight, 1.0)
 
 
 class TestCost(unittest.TestCase):
@@ -287,7 +459,7 @@ class TestRunLevelAggregation(unittest.TestCase):
             ok = await _score_executed_results(db, run, results, weight_rows,
                                                targets or {}, {}, {})
             return ok
-        ok = asyncio.run(_go())
+        ok = run_in_isolated_loop(_go())
         return run, ok
 
     def test_zero_cases_score(self):

@@ -3,7 +3,10 @@
 覆盖：verdict 解析（合法/包裹/非法）、prompt 组装（注入防护 + schema 约束）、
 allowlist 校验、rubric 模板完整性、退避计算、scorer 建任务/结果组装辅助函数。
 """
+from asyncio_util import run_in_isolated_loop
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from app.judge.client import (
     JudgeError, _validate_allowlist, build_messages, extract_verdict, is_configured,
@@ -11,7 +14,7 @@ from app.judge.client import (
 from app.judge.rubric import (
     RATINGS, anchors_of, fallback_rubric,
 )
-from app.judge.worker import backoff_seconds
+from app.judge.worker import backoff_seconds, done_threshold_for
 from app.runner.scorer import _enabled_semantic_dims, _judge_results_by_case
 
 DIM = "factuality"
@@ -124,6 +127,33 @@ class TestBuildMessages(unittest.TestCase):
         # 默认不传 reference_docs：既有 case 行为零变化（不渲染该段落）
         self.assertNotIn("参考依据文档", self.msg[1]["content"])
 
+    def test_reasoning_tool_calls_rendered_when_provided(self):
+        # P2-A3：reasoning/tool_calls 透传 → evaluation_data 内渲染两行（evidence 供 reasoning 判分）
+        msg = build_messages(dimension=DIM, template=TEMPLATE,
+                             case_input=CASE, golden_answer=GOLDEN,
+                             agent_output="mock agent 的最终回答",
+                             agent_reasoning="先查库，再比对，最后下结论",
+                             agent_tool_calls=[{"name": "search", "arguments": {"q": "A"}}])
+        user = msg[1]["content"]
+        self.assertIn("推理链：先查库，再比对，最后下结论", user)
+        self.assertIn("工具调用序列", user)
+        self.assertIn("search", user)
+
+    def test_reasoning_empty_string_not_rendered(self):
+        # P2-A3：空串不渲染空行（truthy 判定）；空列表 tool_calls 同理
+        msg = build_messages(dimension=DIM, template=TEMPLATE,
+                             case_input=CASE, golden_answer=GOLDEN,
+                             agent_output="mock agent 的最终回答",
+                             agent_reasoning="", agent_tool_calls=[])
+        user = msg[1]["content"]
+        self.assertNotIn("推理链", user)
+        self.assertNotIn("工具调用序列", user)
+
+    def test_reasoning_omitted_when_none(self):
+        # 默认不传：既有 case 行为零变化
+        self.assertNotIn("推理链", self.msg[1]["content"])
+        self.assertNotIn("工具调用序列", self.msg[1]["content"])
+
 
 class TestAllowlist(unittest.TestCase):
     def test_allowed_host(self):
@@ -184,6 +214,15 @@ class TestWorkerBackoff(unittest.TestCase):
     def test_cap(self):
         self.assertEqual(backoff_seconds(10), 30)
 
+    def test_done_threshold_never_single_sample_for_repeat_gt1(self):
+        # P0-1 补强：repeat>1 时多数决至少需 2 个成功样本（repeat=2 不退化单样本对冲）
+        self.assertEqual(done_threshold_for(1), 1)   # repeat=1 显式单次判分（关闭对冲）
+        self.assertEqual(done_threshold_for(2), 2)   # 修复点：不退化
+        self.assertEqual(done_threshold_for(3), 2)
+        self.assertEqual(done_threshold_for(4), 2)
+        self.assertEqual(done_threshold_for(5), 3)
+        self.assertEqual(done_threshold_for(10), 5)
+
 
 class TestScorerHelpers(unittest.TestCase):
     def test_enabled_semantic_dims_all(self):
@@ -216,6 +255,88 @@ class TestScorerHelpers(unittest.TestCase):
         self.assertEqual(len(out[1]), 2)               # case1 两维度都有
         self.assertEqual(len(out[2]), 1)               # case2 failed 维度被跳过
         self.assertEqual(out[2][0]["dimension"], "reasoning_quality")
+
+    def test_judge_results_by_case_new_majority_structure(self):
+        # P0-1：result 带 repeat/repeats 的聚合结构 → 顶层 score/reason 仍被提取
+        # （消费端零改动：_judge_results_by_case 只读顶层，repeats 不进 case 分维度结果）
+        from types import SimpleNamespace
+        tasks = [
+            SimpleNamespace(
+                status="done", case_id=1, dimension_code="factuality",
+                result={"dimension": "factuality", "level": 4, "score": 80.0,
+                        "reason": "答案准确", "rubric_version": "1.2",
+                        "repeat": 3,
+                        "repeats": [{"level": 4, "score": 80.0},
+                                    {"level": 4, "score": 80.0},
+                                    {"level": 3, "score": 60.0}]}),
+        ]
+        out = _judge_results_by_case(tasks)
+        self.assertEqual(out[1][0]["score"], 80.0)
+        self.assertEqual(out[1][0]["reason"], "答案准确")
+        self.assertNotIn("repeats", out[1][0])  # 只取消费端字段
+
+
+class TestProcessOneNonJudgeError(unittest.TestCase):
+    """C4：aggregate_verdicts 抛非 JudgeError（真实 bug）→ 外层 logger.exception 完整栈可见，
+    attempts 按现有重试/标 failed 逻辑推进（不静默当单次判分失败）。"""
+
+    def _scenario(self, max_retries, with_logs=False):
+        from contextlib import nullcontext
+
+        from app.judge import worker
+
+        async def _run():
+            db = AsyncMock()
+            db.add = Mock()  # 普通方法（_process_one 只 add 不 await）
+            result = SimpleNamespace(answer="a", reasoning="", tool_calls=None,
+                                     case_id=1, case_version_id=2)
+            db.execute.return_value = SimpleNamespace(
+                scalars=lambda: SimpleNamespace(first=lambda: result))
+            db.get.return_value = SimpleNamespace(snapshot={"input": "x"})
+
+            class _SL:  # SessionLocal 假 async 上下文（函数内 import 解析时被 patch）
+                async def __aenter__(self):
+                    return db
+
+                async def __aexit__(self, *a):
+                    return False
+
+            client = Mock()
+            client.judge = AsyncMock(return_value=SimpleNamespace(level=4))
+
+            t = SimpleNamespace(run_id=1, case_id=1, dimension_code="factuality",
+                                attempts=0, status="processing",
+                                claim_id="c", lease_until=None, result=None)
+
+            logs_ctx = (self.assertLogs("app.judge.worker", level="ERROR") if with_logs
+                        else nullcontext())
+            with patch("app.core.db.SessionLocal", _SL), \
+                 patch.object(worker, "load_rubric", new=AsyncMock(return_value={"instruction": "x"})), \
+                 patch.object(worker, "_rubric_version", new=AsyncMock(return_value="1.0")), \
+                 patch.object(worker, "aggregate_verdicts",
+                              side_effect=ValueError("aggregate 内部 bug（非 JudgeError）")), \
+                 logs_ctx as logs:
+                await worker._process_one(
+                    t, {"judge_repeat": 1, "judge_max_retries": max_retries},
+                    interface_id=0, client=client)
+            return t, (logs if with_logs else None)
+
+        return run_in_isolated_loop(_run())
+
+    def test_aggregate_non_judge_error_over_limit_failed(self):
+        # 非 JudgeError 不被静默当单次判分失败：attempts 照常推进，超限标 failed
+        t, logs = self._scenario(max_retries=1, with_logs=True)
+        self.assertEqual(t.attempts, 1)
+        self.assertEqual(t.status, "failed")
+        # logger.exception（ERROR 级）完整栈可见（原 logger.warning 只打 e，改后附 traceback）
+        self.assertTrue(any("judge 重试 1 次仍失败" in m for m in logs.output),
+                        f"应记录 logger.exception，实际 logs={logs.output}")
+
+    def test_aggregate_non_judge_error_under_limit_pending(self):
+        # attempts 未达上限 → 回 pending 重试（终态保护不破坏；该路径不打 ERROR 日志）
+        t, _ = self._scenario(max_retries=3)
+        self.assertEqual(t.attempts, 1)
+        self.assertEqual(t.status, "pending")
 
 
 if __name__ == "__main__":

@@ -40,7 +40,9 @@ async def gate(user: User = Depends(get_current_user), db: AsyncSession = Depend
     # P2-D8：看板为常规评测视图，排除留出集复测 run（不展示其聚合结果，也防其污染
     #「最新版本门禁分」等常规指标；留出集结果走 /runs 列表 + 详情查看）
     runs = (await db.execute(select(EvalRun).where(
-        EvalRun.trigger_type != "held_out"))).scalars().all()
+        EvalRun.trigger_type != "held_out",
+        EvalRun.status.in_(TERMINAL_STATUS),  # B7：终态过滤下推 SQL（build_gate_cards 本就在 Python 层过滤，纯性能）
+    ))).scalars().all()
     suites = (await db.execute(select(TestSuite))).scalars().all()
     case_cnt = {sid: n for sid, n in (await db.execute(
         select(TestCase.suite_id, func.count()).group_by(TestCase.suite_id))).all()}
@@ -137,18 +139,24 @@ async def _agent_dim_series(db: AsyncSession, agent_id: int) -> dict[str, list[f
         EvalRun.agent_id == agent_id, EvalRun.trigger_type != "held_out",  # P2-D8：排除留出集
         EvalRun.status.in_(TERMINAL_STATUS),
     ))).scalars().all()
+    if not rows:
+        return {}
+    # B7：N+1（每 run 一次 EvalResult 全表查询，还拖回 MEDIUMTEXT answer/reasoning）→
+    # 批量列投影单次 in_ 查询，只取 run_id + score_per_dimension，Python 层按 run_id 分组；
+    # 与 cost 面板 :193 的 in_ 批量取数同款。等价性：原逻辑逐 run 维度聚合后取 mean，
+    # 分组合并后按 run 取维度均值，分组归属不变。
+    by_run: dict[int, dict[str, list[float]]] = {}
+    for rid, score_dim in (await db.execute(select(
+            EvalResult.run_id, EvalResult.score_per_dimension).where(
+        EvalResult.run_id.in_([r.id for r in rows])))).all():
+        for entry in score_dim or []:
+            code = entry.get("code")
+            if code not in ACCURACY or entry.get("na") or entry.get("value") is None:
+                continue
+            by_run.setdefault(rid, {}).setdefault(code, []).append(float(entry["value"]))
     history: dict[str, list[float]] = {}
     for r in rows:
-        results = (await db.execute(select(EvalResult).where(
-            EvalResult.run_id == r.id))).scalars().all()
-        buf: dict[str, list[float]] = {}
-        for res in results:
-            for entry in res.score_per_dimension or []:
-                code = entry.get("code")
-                if code not in ACCURACY or entry.get("na") or entry.get("value") is None:
-                    continue
-                buf.setdefault(code, []).append(float(entry["value"]))
-        for code, vals in buf.items():
+        for code, vals in by_run.get(r.id, {}).items():
             history.setdefault(code, []).append(mean(vals))
     return history
 

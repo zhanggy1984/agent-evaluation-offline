@@ -149,7 +149,11 @@ class RefreshBody(BaseModel):
 async def refresh(body: RefreshBody, db: AsyncSession = Depends(get_db)):
     """轮换 refresh：检测旧 token 复用 → 整族撤销。"""
     h = _sha256(body.refresh_token)
-    row = (await db.execute(select(RefreshToken).where(RefreshToken.token_hash == h))).scalar_one_or_none()
+    # B6：with_for_update 锁定读——并发同 token 两个 refresh 串行化，第二个醒来读到
+    # 已 revoked（第一个已轮换撤销）→ 命中 :161 复用检测整族撤销，防绕过复用检测拿双 token。
+    row = (await db.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == h).with_for_update()
+    )).scalar_one_or_none()
     # naive UTC：DB 列 DATETIME 读出为 naive，aware now 与其比较必 TypeError（同 login:94 处理）
     now = datetime.utcnow()
     if row is None or row.expires_at < now:

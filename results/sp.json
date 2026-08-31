@@ -1,0 +1,369 @@
+{
+  "agent": "smart-procurement",
+  "base_url": "http://host.docker.internal:18002",
+  "started_at": "2026-08-30 16:32:49",
+  "discover": {
+    "ok": true,
+    "contract_version": "2.0",
+    "adapter_drift": []
+  },
+  "adapter": {
+    "contract_version": "2.0",
+    "requires_auth": true,
+    "input_fields": [
+      "bid_id",
+      "dimension_id",
+      "question"
+    ],
+    "warnings": []
+  },
+  "interfaces": {
+    "created": [],
+    "skipped": [
+      {
+        "name": "chat",
+        "path": "/api/v1/reviews/{review_id}/chat",
+        "method": "POST"
+      },
+      {
+        "name": "score",
+        "path": "/api/v1/reviews/{review_id}/score",
+        "method": "POST"
+      }
+    ],
+    "renamed": []
+  },
+  "scenes": {
+    "created": [],
+    "skipped": [
+      {
+        "tag": "tech_scheme"
+      },
+      {
+        "tag": "price"
+      },
+      {
+        "tag": "conflict_interest"
+      },
+      {
+        "tag": "collusion"
+      }
+    ]
+  },
+  "auth": {
+    "auth_configured": true
+  },
+  "probe": {
+    "ok": true,
+    "interfaces": [
+      {
+        "interface_id": 3,
+        "contract_type": "sse",
+        "ok": true,
+        "http_status": 200,
+        "elapsed_ms": 16307,
+        "fields": {
+          "meta": true,
+          "stage": false,
+          "reasoning": true,
+          "tool_call": true,
+          "answer": true,
+          "usage": true,
+          "done": true,
+          "error": false,
+          "events": [
+            "answer",
+            "done",
+            "meta",
+            "reasoning",
+            "thinking",
+            "thought",
+            "tool_call",
+            "usage"
+          ],
+          "ttft_ms": 16292
+        },
+        "errors": [],
+        "raw_sample": "{\"agent\": \"smart-procurement\", \"model\": \"deepseek-chat\", \"interface\": \"POST /reviews/{review_id}/chat\", \"contract_version\": \"1.0\", \"git_sha\": \"\", \"knowledge_version\": \"\", \"ts\": 1788078770763}",
+        "input_error": false
+      },
+      {
+        "interface_id": 2120,
+        "contract_type": "sse",
+        "ok": true,
+        "http_status": 200,
+        "elapsed_ms": 24798,
+        "fields": {
+          "meta": true,
+          "stage": false,
+          "reasoning": true,
+          "tool_call": true,
+          "answer": true,
+          "usage": true,
+          "done": true,
+          "error": false,
+          "events": [
+            "answer",
+            "done",
+            "meta",
+            "reasoning",
+            "thinking",
+            "thought",
+            "tool_call",
+            "usage"
+          ],
+          "ttft_ms": 24753
+        },
+        "errors": [],
+        "raw_sample": "{\"agent\": \"smart-procurement\", \"model\": \"deepseek-chat\", \"interface\": \"POST /reviews/{review_id}/chat\", \"contract_version\": \"1.0\", \"git_sha\": \"\", \"knowledge_version\": \"\", \"ts\": 1788078787155}",
+        "input_error": false
+      }
+    ]
+  },
+  "skeleton": {
+    "agent_name": "smart-procurement",
+    "suite": {
+      "name": "smart-procurement 接入示例",
+      "description": "Q5 自动生成的示例骨架：input 已预填，expected/golden_answer/reference_docs 需人工补全"
+    },
+    "interfaces": [
+      {
+        "name": "chat",
+        "path": "/api/v1/reviews/{review_id}/chat",
+        "contract_type": "sse"
+      },
+      {
+        "name": "score",
+        "path": "/api/v1/reviews/{review_id}/score",
+        "contract_type": "sse"
+      }
+    ],
+    "cases": [
+      {
+        "name": "tech_scheme-chat",
+        "interface_name": "chat",
+        "scene_tag": "tech_scheme",
+        "input_type": "text",
+        "input": {
+          "bid_id": "BID-024",
+          "dimension_id": "DIM-LOT-008-1",
+          "question": "请从技术指标、商务报价、履约能力三个维度评审该供应商报价，并指出风险点"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "tech_scheme-score",
+        "interface_name": "score",
+        "scene_tag": "tech_scheme",
+        "input_type": "text",
+        "input": {
+          "bid_id": "BID-024",
+          "dimension_id": "DIM-LOT-008-1",
+          "question": "请从技术指标、商务报价、履约能力三个维度评审该供应商报价，并指出风险点"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "price-chat",
+        "interface_name": "chat",
+        "scene_tag": "price",
+        "input_type": "text",
+        "input": {
+          "bid_id": "BID-024",
+          "dimension_id": "DIM-LOT-008-1",
+          "question": "请从技术指标、商务报价、履约能力三个维度评审该供应商报价，并指出风险点"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "price-score",
+        "interface_name": "score",
+        "scene_tag": "price",
+        "input_type": "text",
+        "input": {
+          "bid_id": "BID-024",
+          "dimension_id": "DIM-LOT-008-1",
+          "question": "请从技术指标、商务报价、履约能力三个维度评审该供应商报价，并指出风险点"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "conflict_interest-chat",
+        "interface_name": "chat",
+        "scene_tag": "conflict_interest",
+        "input_type": "text",
+        "input": {
+          "bid_id": "BID-024",
+          "dimension_id": "DIM-LOT-008-1",
+          "question": "请从技术指标、商务报价、履约能力三个维度评审该供应商报价，并指出风险点"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "conflict_interest-score",
+        "interface_name": "score",
+        "scene_tag": "conflict_interest",
+        "input_type": "text",
+        "input": {
+          "bid_id": "BID-024",
+          "dimension_id": "DIM-LOT-008-1",
+          "question": "请从技术指标、商务报价、履约能力三个维度评审该供应商报价，并指出风险点"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "collusion-chat",
+        "interface_name": "chat",
+        "scene_tag": "collusion",
+        "input_type": "text",
+        "input": {
+          "bid_id": "BID-024",
+          "dimension_id": "DIM-LOT-008-1",
+          "question": "请从技术指标、商务报价、履约能力三个维度评审该供应商报价，并指出风险点"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "collusion-score",
+        "interface_name": "score",
+        "scene_tag": "collusion",
+        "input_type": "text",
+        "input": {
+          "bid_id": "BID-024",
+          "dimension_id": "DIM-LOT-008-1",
+          "question": "请从技术指标、商务报价、履约能力三个维度评审该供应商报价，并指出风险点"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      }
+    ],
+    "agent_id": 3
+  },
+  "persist": {
+    "suite_id": 2095,
+    "case_ids": [
+      3039,
+      3040,
+      3041,
+      3042,
+      3043,
+      3044,
+      3045,
+      3046
+    ]
+  },
+  "passed": 11,
+  "failed": 0,
+  "completed_at": "2026-08-30 16:33:32"
+}

@@ -1,0 +1,210 @@
+{
+  "agent": "customer-service",
+  "base_url": "http://host.docker.internal:8000",
+  "started_at": "2026-08-30 16:20:37",
+  "discover": {
+    "ok": true,
+    "contract_version": "2.0",
+    "adapter_drift": [
+      "平台无 manifest 快照（手工配置 adapter 或非 v2 seed），无法对比漂移"
+    ]
+  },
+  "adapter": {
+    "contract_version": "2.0",
+    "requires_auth": true,
+    "input_fields": [
+      "content"
+    ],
+    "warnings": []
+  },
+  "interfaces": {
+    "created": [],
+    "skipped": [
+      {
+        "name": "chat",
+        "path": "/api/v1/sessions/{sid}/messages",
+        "method": "POST"
+      }
+    ],
+    "renamed": []
+  },
+  "scenes": {
+    "created": [],
+    "skipped": [
+      {
+        "tag": "greeting"
+      },
+      {
+        "tag": "order_query"
+      },
+      {
+        "tag": "after_sales"
+      },
+      {
+        "tag": "human_handoff"
+      }
+    ]
+  },
+  "auth": {
+    "auth_configured": true
+  },
+  "probe": {
+    "ok": true,
+    "interfaces": [
+      {
+        "interface_id": 1,
+        "contract_type": "sse",
+        "ok": true,
+        "http_status": 200,
+        "elapsed_ms": 2900,
+        "fields": {
+          "meta": true,
+          "stage": false,
+          "reasoning": true,
+          "tool_call": false,
+          "answer": true,
+          "usage": true,
+          "done": true,
+          "error": false,
+          "events": [
+            "answer",
+            "done",
+            "meta",
+            "reasoning",
+            "status",
+            "usage"
+          ],
+          "ttft_ms": 1824
+        },
+        "errors": [],
+        "raw_sample": "{\"type\": \"meta\", \"agent\": \"customer-service\", \"model\": \"deepseek-chat\", \"interface\": \"sessions/{sid}/messages\", \"contract_version\": \"1.0\", \"git_sha\": \"\", \"knowledge_version\": \"\", \"ts\": 1788078039131}",
+        "input_error": false
+      }
+    ]
+  },
+  "skeleton": {
+    "agent_name": "customer-service",
+    "suite": {
+      "name": "customer-service 接入示例",
+      "description": "Q5 自动生成的示例骨架：input 已预填，expected/golden_answer/reference_docs 需人工补全"
+    },
+    "interfaces": [
+      {
+        "name": "chat",
+        "path": "/api/v1/sessions/{sid}/messages",
+        "contract_type": "sse"
+      }
+    ],
+    "cases": [
+      {
+        "name": "greeting-chat",
+        "interface_name": "chat",
+        "scene_tag": "greeting",
+        "input_type": "text",
+        "input": {
+          "content": "你好"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "order_query-chat",
+        "interface_name": "chat",
+        "scene_tag": "order_query",
+        "input_type": "text",
+        "input": {
+          "content": "你好"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "after_sales-chat",
+        "interface_name": "chat",
+        "scene_tag": "after_sales",
+        "input_type": "text",
+        "input": {
+          "content": "你好"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "human_handoff-chat",
+        "interface_name": "chat",
+        "scene_tag": "human_handoff",
+        "input_type": "text",
+        "input": {
+          "content": "你好"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      }
+    ],
+    "agent_id": 1
+  },
+  "persist": {
+    "suite_id": 2093,
+    "case_ids": [
+      3030,
+      3031,
+      3032,
+      3033
+    ]
+  },
+  "passed": 6,
+  "failed": 0,
+  "completed_at": "2026-08-30 16:20:42"
+}

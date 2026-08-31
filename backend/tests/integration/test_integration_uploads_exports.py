@@ -185,6 +185,10 @@ async def test_download_export_ok_then_once(tmp_path, db, env, monkeypatch):
         await exports_mod.download_export(tk, _req(ip), db, _staff)
     assert ei.value.status_code == 400
     assert ei.value.code == E_VALIDATION
+    # download_export 异常路径（with_for_update 后）不自动回滚：空事务 commit 释放
+    # ExportToken X 锁 + eval_run 父行 S 锁（否则 env.cleanup 删 eval_run 撞 50s 锁等待）。
+    # 不能用 rollback：会 expire 对象 → env 清理访问 env.runs 撞 MissingGreenlet
+    await db.commit()
     await _clean_audit(ip)
 
 
@@ -212,6 +216,9 @@ async def test_download_expired(tmp_path, db, env, monkeypatch):
         await exports_mod.download_export(tk, _req(ip), db, _staff)
     assert ei.value.status_code == 400
     assert ei.value.code == E_VALIDATION
+    # 同 test_download_export_ok_then_once：空事务 commit 释放锁（rollback 会 expire 对象
+    # → env 清理访问 env.runs 撞 MissingGreenlet）
+    await db.commit()
     await _clean_audit(ip)
 
 
@@ -225,6 +232,9 @@ async def test_download_wrong_owner(tmp_path, db, env, monkeypatch):
     with pytest.raises(ApiError) as ei:
         await exports_mod.download_export(tk, _req(ip), db, _staff)
     assert ei.value.status_code == 403 and ei.value.code == E_NO_PERMISSION
+    # 同 test_download_export_ok_then_once：空事务 commit 释放锁（rollback 会 expire 对象
+    # → env 清理访问 env.runs 撞 MissingGreenlet）
+    await db.commit()
     await _clean_audit(ip)
 
 

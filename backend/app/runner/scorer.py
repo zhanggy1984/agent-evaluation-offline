@@ -35,6 +35,22 @@ logger = logging.getLogger(__name__)
 JUDGE_INCOMPLETE_THRESHOLD = 0.3
 
 
+def _gate_met(value: float | None, target: float | None, dim: str) -> bool:
+    """门禁判定单一来源（硬伤 #2 区间化）：语义维度档位化、规则维度连续分。
+
+    语义维度 judge 分恒为 20 倍数（judge/rubric.py RATINGS × 100），target 是连续双签值：
+    直接连续比较产生 85 target 只能 100 过的悬崖（80<85）。档位化 = target 归 floor 档，
+    value 达到 floor 档即过（85/92 → 4 档，80 可过）。规则维度 value 是连续通过率
+    （passed/total×100），档位化会反向变严（79% 归档到 3 档 fail），保持连续分比较。
+    语义维度 None/负数无档位语义，回退连续分比较（fail 方向保守）。
+    """
+    if value is None or target is None:
+        return False
+    if dim in SEMANTIC_DIMENSIONS and value >= 0 and target >= 0:
+        return int(value // 20) >= int(target // 20)
+    return value >= target
+
+
 @dataclass
 class CaseScore:
     """单 case 评分产物（score_case 返回，score_run 落库）。"""
@@ -60,12 +76,17 @@ def score_case(
     model: str | None = None,
     model_price: dict | None = None,
     weights: dict, targets: dict,
+    judge_na_threshold: float = JUDGE_INCOMPLETE_THRESHOLD,
+    judge_failed_dims: set[str] | None = None,
 ) -> CaseScore:
     """纯函数评分：一个 case 的 accuracy 加权分 + 门禁 + 成本。
 
     - enabled：case_metrics 声明启用的维度（未配置视为 accuracy 四维全启用）
     - N/A 维度剔除后按剩余权重重归一化（§15.2）
-    - 门禁：baseline_target 配置了 target 的 accuracy 维度，任一 score < target → fail
+    - 门禁：baseline_target 配置了 target 的 accuracy 维度，任一不达标 → fail（#2 档位化判定）
+    - 硬伤 #6 N/A 保护：judge_failed_dims（该 case 有 judge 任务但判分失败）权重占比超
+      judge_na_threshold → 本会 pass 的 case 标 na（放门禁后：门禁 fail 不被掩蔽）。
+      judge 未配置/无任务（judge_failed_dims=None）不触发——平台级能力缺失非 case 失败，避免全 na 误伤
     - judge_incomplete：语义维度 N/A 权重（返回供 run 级聚合）
     - total_cost：无条件算（成本独立呈现，有 price 才算）
     """
@@ -96,17 +117,21 @@ def score_case(
         acc.append((dim, mr.score, weight))
 
     total_w = sum(w for _, _, w in acc)
-    total_accuracy_weight = sum(weights.get(d, DEFAULT_WEIGHTS[d]) for d in ACCURACY_DIMENSIONS)
+    # P2-A4：分母只累 enabled 维度（与 semantic_na_weight / judge_failed_dims 同口径）。
+    # 修复前遍历全四维使「评分完整度」= 已判权重/应判权重 的分母偏大 → run 级
+    # judge_incomplete 与 #6 N/A 保护被低估。case_metrics 未配置 → enabled=全四维 → 不变。
+    total_accuracy_weight = sum(weights.get(d, DEFAULT_WEIGHTS[d])
+                                for d in ACCURACY_DIMENSIONS if d in enabled)
     score_total = sum(s * w for _, s, w in acc) / total_w if acc else None
 
-    # 门禁：配置了 target 的 accuracy 维度，任一不达标 → fail（N/A 维度不判）
+    # 门禁：配置了 target 的 accuracy 维度，任一不达标 → fail（N/A 维度不判；#2 档位化判定）
     gate_failed = False
     if score_total is not None:
         for dim, target in targets.items():
             if dim not in ACCURACY_DIMENSIONS:
                 continue
             entry = next((p for p in per_dim if p["code"] == dim and not p["na"]), None)
-            if entry is not None and entry["value"] < target:
+            if entry is not None and not _gate_met(entry["value"], target, dim):
                 gate_failed = True
                 break
 
@@ -116,6 +141,18 @@ def score_case(
     elif gate_failed:
         pass_fail = "fail"
         na_reason = None
+    elif (judge_failed_dims
+          and total_accuracy_weight > 0  # #6 除零守卫（四维权重全 0 是合法输入）
+          and sum(weights.get(d, DEFAULT_WEIGHTS[d]) for d in judge_failed_dims)
+              / total_accuracy_weight > judge_na_threshold):
+        # 硬伤 #6 N/A 保护：该 case 有 judge 任务但判分失败（judge_failed_dims）权重占比
+        # 超阈值 → 本会 pass 的 case 标 na 待复核。放门禁后：门禁 fail 不被掩蔽（否则修复
+        # fail 的筛选会漏掉它）。judge 未配置/无任务不触发——平台级能力缺失不是 case 失败，
+        # 全部标 na 会让只配规则断言的用户整批瘫痪。分母 = 全四维权重和（与 run 级
+        # judge_incomplete 同口径）。reasoning 单独失败（0.15 < 0.3）不触发、factuality
+        #（0.35）触发——不对称是已知行为（决策点 A1）。
+        pass_fail = "na"
+        na_reason = "semantic_na_high"
     else:
         pass_fail = "pass"
         na_reason = None
@@ -204,6 +241,8 @@ async def score_run(run_id: int) -> None:
 
         # ---- 3.4 建 judge 任务（enabled 语义维度；judge 已配置才建，复合主键幂等）----
         judge_by_case: dict[int, list[dict]] = {}
+        # #6 判分失败保护：judge 未配置时为空 dict（平台级能力缺失非 case 失败，不触发 N/A 保护）
+        judge_failed_by_case: dict[int, set[str]] = {}
         if await _judge_configured(db):
             tasks = (await db.execute(select(JudgeTask).where(
                 JudgeTask.run_id == run_id))).scalars().all()
@@ -232,15 +271,20 @@ async def score_run(run_id: int) -> None:
             if any(t.status in ("pending", "processing") for t in tasks):
                 logger.info("run %s judge 任务未完成，保持 scoring（%d 个）", run_id, len(tasks))
                 return
+            for t in tasks:
+                if t.status == "failed":
+                    judge_failed_by_case.setdefault(t.case_id, set()).add(t.dimension_code)
             judge_by_case = _judge_results_by_case(tasks)
 
         await _score_executed_results(
-            db, run, results, weights, targets, interface_by_case, judge_by_case)
+            db, run, results, weights, targets, interface_by_case, judge_by_case,
+            judge_failed_by_case=judge_failed_by_case)
 
 
 async def _score_executed_results(
     db, run, results, weights, targets, interface_by_case, judge_by_case,
-    *, keep_terminal: str | None = None,
+    *, judge_failed_by_case: dict[int, set[str]] | None = None,
+    keep_terminal: str | None = None,
 ) -> bool:
     """对已采集结果评分 + run 聚合 + 状态落库（score_run 与 score_run_salvage 共用）。
 
@@ -273,6 +317,8 @@ async def _score_executed_results(
                 model_price=await _load_price(db, r.model),
                 weights=_resolve_weights(weights, interface_by_case.get(r.case_id, 0)),
                 targets=_resolve_targets(targets, interface_by_case.get(r.case_id, 0)),
+                judge_na_threshold=na_threshold,
+                judge_failed_dims=(judge_failed_by_case or {}).get(r.case_id),
             )
             r.assertion_results = assertion_results
             r.judge_results = judge_results or None
@@ -322,7 +368,7 @@ async def score_run_salvage(run_id: int) -> None:
     timeout/scoring_failed 不翻转，只回填评分数据。幂等：已出分或非目标态直接返回。
     """
     from app.core.db import SessionLocal
-    from app.models import EvalResult, EvalRun, JudgeTask, TestCase
+    from app.models import EvalResult, EvalRun, JudgeTask
 
     async with SessionLocal() as db:
         run = await db.get(EvalRun, run_id)
@@ -335,9 +381,9 @@ async def score_run_salvage(run_id: int) -> None:
         results = (await db.execute(select(EvalResult).where(
             EvalResult.run_id == run_id))).scalars().all()
         if len(results) < run.total_case:
-            for case in (await db.execute(select(TestCase).where(
-                    TestCase.suite_id == run.suite_id, TestCase.status == "active",
-                    TestCase.is_held_out == (run.trigger_type == "held_out")))).scalars():
+            # 延迟 import：保持本模块顶层零 DB 依赖（scorer 不得 import orchestrator，case_loader 无环）
+            from app.runner.case_loader import _load_run_cases
+            for case in await _load_run_cases(db, run):
                 if any(r.case_id == case.id for r in results):
                     continue
                 db.add(EvalResult(
@@ -364,9 +410,14 @@ async def score_run_salvage(run_id: int) -> None:
         weights = await _load_weights(db, run.agent_id)
         targets = await _load_targets(db, run.agent_id)
         interface_by_case = await _interface_by_case(db, [r.case_id for r in results])
-        judge_by_case = _judge_results_by_case(tasks)  # 仅采纳 done；failed 维度 → N/A
+        judge_failed_by_case: dict[int, set[str]] = {}
+        for t in tasks:
+            if t.status == "failed":
+                judge_failed_by_case.setdefault(t.case_id, set()).add(t.dimension_code)
+        judge_by_case = _judge_results_by_case(tasks)  # 仅采纳 done；failed 维度 → 判分失败保护
         await _score_executed_results(
             db, run, results, weights, targets, interface_by_case, judge_by_case,
+            judge_failed_by_case=judge_failed_by_case,
             keep_terminal=run.status)
 
 

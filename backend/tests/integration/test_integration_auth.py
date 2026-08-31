@@ -13,6 +13,7 @@
 直调路由函数不触发 FastAPI Depends 链：me/change-password 的鉴权拦截已由
 test_auth_guard.py（deps.py）覆盖，此处聚焦业务分支本身。
 """
+import asyncio
 import types
 import uuid
 
@@ -197,6 +198,33 @@ async def test_change_password_wrong_old(db, auth_user):
             user=auth_user, db=db)
     assert ei.value.status_code == 400
     assert ei.value.code == E_VALIDATION
+
+
+# ---------------- refresh 并发（B6） ----------------
+@pytest.mark.asyncio(loop_scope="session")
+async def test_refresh_concurrent_same_token_one_wins(db, auth_user):
+    """B6：并发两 refresh 同一 token → with_for_update 串行化，恰一个成功，
+    另一个醒来读到已 revoked 命中复用检测 → 整族撤销（防并发绕过复用检测拿双 token）。"""
+    fam = auth_mod.new_family_id()
+    t = auth_mod.new_token_value()
+    now = datetime.now(timezone.utc)
+    db.add(RefreshToken(user_id=auth_user.id, token_hash=auth_mod._sha256(t), family_id=fam,
+                        expires_at=now + timedelta(days=7), revoked=False))
+    await db.commit()
+
+    async def _call():  # 独立 session 并发（AsyncSession 不支持共享并发操作）
+        async with SessionLocal() as s:
+            return await auth_mod.refresh(auth_mod.RefreshBody(refresh_token=t), s)
+
+    results = await asyncio.gather(_call(), _call(), return_exceptions=True)
+    ok = [r for r in results if not isinstance(r, Exception)]
+    errs = [r for r in results if isinstance(r, Exception)]
+    assert len(ok) == 1          # 恰一个拿到新 token
+    assert len(errs) == 1        # 另一个 401
+    assert errs[0].status_code == 401
+    assert "复用" in errs[0].message  # 命中复用检测（非「无效/过期」）
+    rows = (await db.execute(select(RefreshToken).where(RefreshToken.family_id == fam))).scalars().all()
+    assert all(r.revoked for r in rows)  # 整族撤销
 
 
 # ---------------- me ----------------

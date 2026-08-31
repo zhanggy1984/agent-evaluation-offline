@@ -55,6 +55,8 @@ services:
       - ./backend:/app
       # 文件型用例自存文件（决策 #12）：宿主 ./uploads ↔ 容器 /app/uploads
       - ./uploads:/app/uploads
+      # B5 导出文件目录：宿主 ./backend/exports ↔ 容器 /app/exports（独立挂载根 → 777，appuser 可写）
+      - ./backend/exports:/app/exports
     # P2-D14：容器资源限制（FastAPI + scanner + judge worker + reportlab PDF 导出）
     mem_limit: 1024m
     cpus: "1.0"

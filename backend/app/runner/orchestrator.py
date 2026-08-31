@@ -5,7 +5,7 @@
 - 熔断：agent 级 CircuitBreaker；熔断期用例直接标 error（circuit_open）
 - 重试：指数退避，仅可重试技术失败
 - 心跳：run 内后台 task 周期刷新 lease_until（防 scanner 误标 timeout）
-- generation fencing：cancel 自增令牌，执行循环轮询中断
+- 取消：API 置 DB status=cancelled + 进程内 _cancel 标志（_run_one 循环轮询中断）
 - 性能重复测量：用例启用 ttft/e2e 维度时按 perf_repeat_count 重复执行，聚合 P50/P95
 - 收尾：对账 total_case vs eval_result，缺失回填 error；更新 run 统计与状态
 评分（score_total/score_per_dimension）由阶段三 scorer 接管，本模块只采数与落原始结果。
@@ -17,7 +17,7 @@ import math
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from app.adapters.engine import ConfigEngine
 from app.core import circuit_repo
@@ -29,7 +29,8 @@ from app.core.lock import agent_mutex
 from app.core.probe import probe_interface
 from app.core.retry import retry_with_backoff
 from app.core.security import fernet_decrypt
-from app.models import Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, TestCase, TestSuite
+from app.models import Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, TestSuite
+from app.runner.case_loader import _load_run_cases
 from app.runner.executor import RETRYABLE_ERRORS, CaseOutcome, execute_case
 from app.runner.scorer import _enabled_semantic_dims, score_run
 
@@ -75,7 +76,15 @@ def estimate_run_timeout(*, n_cases: int, active_runs: int, repeat: int,
     eff_cases = math.ceil(n_cases / max(1, active_runs + 1))
     exec_s = eff_cases * repeat * max_iface_timeout * (max_retries + 1) * 1.5
     judge_s = math.ceil(semantic_tasks * judge_repeat / max(1, judge_concurrency)) * judge_call_timeout
-    return min(RUN_TIMEOUT_CAP_S, math.ceil(exec_s + judge_s))
+    raw = math.ceil(exec_s + judge_s)
+    if raw > RUN_TIMEOUT_CAP_S:
+        # C8 封顶命中：估算超 120min，scanner 会按 hard_deadline 误杀合法大 run。
+        # 兜底文案给可执行路径：显式配 run_timeout 或调小 perf_repeat_count。
+        logger.warning(
+            "run_timeout 估算 %ss 超封顶 %ss（cases=%d repeat=%d），run 可能被 scanner 误回收；"
+            "请显式配置 run_timeout 或调小 perf_repeat_count",
+            raw, RUN_TIMEOUT_CAP_S, n_cases, repeat)
+    return min(RUN_TIMEOUT_CAP_S, raw)
 
 
 def _content_hash(snapshot: dict) -> str:
@@ -91,7 +100,7 @@ class RunOrchestrator:
         # 7.6 C3 熔断器 DB 化：不再持有进程内 agent 级 dict（多 worker 各自内存不共享），
         # 状态经 agent_circuit 表 load/save（见 _run_one）
         self._limiter = KeyedLimiter()
-        self._cancel: dict[int, int] = {}   # run_id -> generation
+        self._cancel: dict[int, bool] = {}   # run_id -> 取消标志（_finish/_fail_run/probe 失败清理）
         self._heartbeats: dict[int, asyncio.Task] = {}
         self._run_limits: dict[int, tuple[int, int]] = {}  # run_id -> (global, per_agent)
 
@@ -132,11 +141,9 @@ class RunOrchestrator:
                 return
             agent = await db.get(Agent, run.agent_id)
             suite = await db.get(TestSuite, run.suite_id)
-            # 6.4b 留出集：held_out run 只跑 is_held_out 用例，manual run 排除留出集
-            held_out = run.trigger_type == "held_out"
-            cases = (await db.execute(select(TestCase).where(
-                TestCase.suite_id == run.suite_id, TestCase.status == "active",
-                TestCase.is_held_out == held_out))).scalars().all()
+            # 6.4b 留出集 + #3 定向重跑：case 过滤单一来源
+            # （执行/probe/对账/salvage 四处同源，过滤规则变更只改 _load_run_cases 一处）
+            cases = await _load_run_cases(db, run)
             run_config = run.run_config or {}
             # 冻结 scope=run 的并发/超时/重复数配置（run_config 由创建接口快照）
             global_limit = run_config.get("global_max_inflight", 16)
@@ -165,7 +172,7 @@ class RunOrchestrator:
                     n_cases=len(cases), active_runs=active_runs, repeat=repeat,
                     max_iface_timeout=max_iface_timeout, max_retries=max_retries,
                     semantic_tasks=semantic_tasks,
-                    judge_repeat=int(run_config.get("judge_repeat", 2)),
+                    judge_repeat=int(run_config.get("judge_repeat", 3)),
                     judge_concurrency=int(run_config.get("judge_concurrency", 4)),
                     judge_call_timeout=int(run_config.get("judge_call_timeout", 120)))
 
@@ -183,22 +190,33 @@ class RunOrchestrator:
                 logger.warning("run %s suite 无 active 用例", run_id)
                 return
 
-            # 状态初始化：running + 心跳租约 + 硬超时 + 用例总数（scanner 靠 lease_until 判断存活）
-            run.status = RUNNING
-            run.started_at = _now()
-            run.total_case = len(cases)
-            run.lease_until = _now() + timedelta(seconds=lease_sec)
-            run.hard_deadline = _now() + timedelta(seconds=hard_deadline_s)
-            run.env_snapshot = {
+            # A1 状态初始化改原子条件更新：仅 pending 可进 running（防取消/终态 run 复活）。
+            # DB 已 cancelled（API 取消失效落库）或 timeout（scanner 回收）→ rowcount 0 放弃；
+            # 取消落库与执行竞态同样被 WHERE status='pending' 拦下（快照守卫本质是 TOCTOU 堵不严）。
+            env_snapshot = {
                 "contract_version": agent.contract_version,
                 "adapter_config_hash": _content_hash(agent.adapter_config or {}),
             }
+            upd = await db.execute(
+                update(EvalRun)
+                .where(EvalRun.id == run_id, EvalRun.status == "pending")
+                .values(status=RUNNING, started_at=_now(), total_case=len(cases),
+                        lease_until=_now() + timedelta(seconds=lease_sec),
+                        hard_deadline=_now() + timedelta(seconds=hard_deadline_s),
+                        env_snapshot=env_snapshot))
+            if upd.rowcount == 0:
+                logger.info("run %s 状态非 pending（已取消/终态），放弃执行，防复活", run_id)
+                return
             await db.commit()
 
+        # A1 取消标志检查前置 set_run_limits 之前：取消的 run 根本不建限流桶（防 H1 桶泄漏）。
+        # 此处不 pop 旧标志——run_id 自增不复用，无「历史标志」可清，pop 只会清掉 cancel_run
+        # 为本 run 刚写入的取消标志（取消失效）；标志统一由 _finish/_fail_run/probe 失败清理。
+        if self._is_cancelled(run_id):
+            logger.info("run %s 已被取消，放弃执行", run_id)
+            return
         # 7.6 C3 熔断参数按 run 级配置传入 _run_one 构造（DB 化后无进程内单例可设置）
         self.set_run_limits(run_id, global_limit, per_agent)  # 应用 run 级并发参数
-        generation = run.generation
-        self._cancel.pop(run_id, None)
 
         # 心跳 task：刷新 lease_until
         hb = asyncio.create_task(self._heartbeat(run_id, hb_interval, lease_sec))
@@ -213,10 +231,13 @@ class RunOrchestrator:
                 # B.5 跑前探测（决策 #21）：契约不达标直接拦截，不执行任何用例
                 if not await self._probe_before_run(run_id, agent, run.suite_id, secret, client,
                                                     timeout_s):
+                    # B3 probe 失败是唯一不经 _finish/_fail_run 的退出路径 → 手动清桶 + 清取消标志
                     self._heartbeats.pop(run_id, None)
+                    self.drop_run_limits(run_id)
+                    self._cancel.pop(run_id, None)
                     return
                 tasks = [self._run_one(run_id, run, agent, case, secret, client, timeout_s,
-                                       repeat, max_retries, generation, breaker_th, breaker_open)
+                                       repeat, max_retries, breaker_th, breaker_open)
                          for case in cases]
                 await asyncio.gather(*tasks)
         finally:
@@ -226,7 +247,7 @@ class RunOrchestrator:
         await self._finish(run_id)
 
     async def _run_one(self, run_id, run, agent, case, secret, client, timeout_s,
-                       repeat, max_retries, generation, breaker_th, breaker_open) -> None:
+                       repeat, max_retries, breaker_th, breaker_open) -> None:
         """单用例（含熔断/限流/重试/性能重复测量），结果落库。"""
         # 取消检查
         if self._is_cancelled(run_id):
@@ -272,10 +293,9 @@ class RunOrchestrator:
         """
         async with SessionLocal() as db:
             run = await db.get(EvalRun, run_id)
-            held_out = run.trigger_type == "held_out" if run else False
-            cases = (await db.execute(select(TestCase).where(
-                TestCase.suite_id == suite_id, TestCase.status == "active",
-                TestCase.is_held_out == held_out))).scalars().all()
+            if run is None:
+                return False  # run 已不存在，中止探测（原逻辑 run None 兜底 held_out=False，路径实际不可达）
+            cases = await _load_run_cases(db, run)
         if not cases:
             return True  # 无 active case 在前面已被拦截，双保险
         probe_case = cases[0]
@@ -376,6 +396,19 @@ class RunOrchestrator:
         """落 eval_result（usage/timing 存全 attempt 数组，看板只读预聚合列）。"""
         case_version_id = await self._ensure_case_version(case)
         async with SessionLocal() as db:
+            # P2-9 评测态追溯：回填 knowledge_version（agent SSE meta 提供，库级文档时间戳锚）。
+            # 条件 UPDATE 首写胜（WHERE 该键 IS NULL）：同 run agent→library 固定值一致，
+            # 并发 case 各自执行同值更新幂等不覆盖；truthy 判定防 gq 空串 "" 落库。
+            meta_kv = ((outcome.unified.get("meta") or {}).get("knowledge_version")
+                       if outcome else None)
+            if meta_kv:
+                await db.execute(
+                    update(EvalRun)
+                    .where(EvalRun.id == run_id,
+                           func.json_extract(EvalRun.env_snapshot, '$.knowledge_version').is_(None))
+                    .values(env_snapshot=func.json_set(
+                        func.coalesce(EvalRun.env_snapshot, '{}'),
+                        '$.knowledge_version', meta_kv)))
             existing = (await db.execute(select(EvalResult).where(
                 EvalResult.run_id == run_id, EvalResult.case_id == case.id))).first()
             if existing:
@@ -494,9 +527,7 @@ class RunOrchestrator:
             total = len(results)
             # 对账：total_case 与结果条数差 → 缺失回填 error（cancel 或熔断未落）
             if total < run.total_case:
-                for case in (await db.execute(select(TestCase).where(
-                        TestCase.suite_id == run.suite_id, TestCase.status == "active",
-                        TestCase.is_held_out == (run.trigger_type == "held_out")))).scalars():
+                for case in await _load_run_cases(db, run):
                     if not any(r.case_id == case.id for r in results):
                         # P2-D6：事务内直插 error 结果（复用本事务 db）。本事务持 run 行
                         # FOR UPDATE 锁；若走 _save_result 自开 session，插 eval_result 的
@@ -524,6 +555,7 @@ class RunOrchestrator:
             logger.info("run %s _finish 完成（status=%s pass=%s err=%s）", run_id, run.status, passed, error)
             final_status = run.status  # 块内捕获（commit 后属性已刷新），防 detached 读
         self._heartbeats.pop(run_id, None)
+        self._cancel.pop(run_id, None)  # A1 清取消标志（:530 已消费 _is_cancelled 判定 CANCELLED 之后）
         # 阶段三评分：执行成功且非外部终态的 run 交给 scorer（重算 pass/fail + 落分）
         if final_status == SCORING:
             await score_run(run_id)
@@ -544,6 +576,7 @@ class RunOrchestrator:
                 await db.commit()
         self._heartbeats.pop(run_id, None)
         self.drop_run_limits(run_id)  # 异常路径同清理 per-run 桶
+        self._cancel.pop(run_id, None)  # A1 异常路径同清取消标志
 
 
 orchestrator = RunOrchestrator()  # 单进程全局实例（workers=1 前提成立）

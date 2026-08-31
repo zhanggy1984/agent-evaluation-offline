@@ -89,3 +89,26 @@ def test_rule_fail_but_judge_ok():
         {"completeness": [90.0, 70.0, 90.0], "factuality": [90.0, 90.0, 90.0]},
         {"completeness": 80.0, "factuality": 60.0})
     assert ok is False and jok is True
+
+
+# ---------------- #2 档位化：消除 85 target 的 80 悬崖 ----------------
+def test_judge_80_meets_85_target_floor_bucket():
+    # 80 与 85 同档（4 档）：3 次全 80 不再 fail（修复「85 只有 100 能过」硬伤 P1-2）
+    ok, jok, rr, jr = decide_case({"factuality": [80.0, 80.0, 80.0]},
+                                  {"factuality": 85.0})
+    assert jok is True
+    assert jr == []
+
+
+def test_judge_60_still_fails_85():
+    # 跨档仍 fail：60（3 档）对 85（4 档）不过
+    ok, jok, rr, jr = decide_case({"factuality": [60.0, 60.0, 60.0]},
+                                  {"factuality": 85.0})
+    assert jok is False
+
+
+def test_judge_80_fails_100_target():
+    # 100 target 归 5 档：80（4 档）仍 fail（多数决 + 档位化双层都不放水跨档）
+    ok, jok, rr, jr = decide_case({"factuality": [80.0, 80.0, 80.0]},
+                                  {"factuality": 100.0})
+    assert jok is False

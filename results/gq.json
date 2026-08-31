@@ -1,0 +1,209 @@
+{
+  "agent": "good-question",
+  "base_url": "http://host.docker.internal:8080",
+  "started_at": "2026-08-30 16:18:22",
+  "discover": {
+    "ok": true,
+    "contract_version": "2.0",
+    "adapter_drift": [
+      "平台无 manifest 快照（手工配置 adapter 或非 v2 seed），无法对比漂移"
+    ]
+  },
+  "adapter": {
+    "contract_version": "2.0",
+    "requires_auth": true,
+    "input_fields": [
+      "content"
+    ],
+    "warnings": []
+  },
+  "interfaces": {
+    "created": [],
+    "skipped": [
+      {
+        "name": "chat",
+        "path": "/api/chat/{session_id}",
+        "method": "POST"
+      }
+    ],
+    "renamed": []
+  },
+  "scenes": {
+    "created": [],
+    "skipped": [
+      {
+        "tag": "greeting"
+      },
+      {
+        "tag": "doc_qa"
+      },
+      {
+        "tag": "no_hit"
+      },
+      {
+        "tag": "summarize"
+      }
+    ]
+  },
+  "auth": {
+    "auth_configured": true
+  },
+  "probe": {
+    "ok": true,
+    "interfaces": [
+      {
+        "interface_id": 4,
+        "contract_type": "sse",
+        "ok": true,
+        "http_status": 200,
+        "elapsed_ms": 1291,
+        "fields": {
+          "meta": true,
+          "stage": false,
+          "reasoning": true,
+          "tool_call": false,
+          "answer": true,
+          "usage": true,
+          "done": true,
+          "error": false,
+          "events": [
+            "answer",
+            "done",
+            "meta",
+            "reasoning",
+            "usage"
+          ],
+          "ttft_ms": 1063
+        },
+        "errors": [],
+        "raw_sample": "{\"agent\": \"good-question\", \"model\": \"deepseek-chat\", \"interface\": \"/api/chat\", \"contract_version\": \"1.0\", \"git_sha\": \"unknown\", \"knowledge_version\": \"\", \"ts\": 1788077903433}",
+        "input_error": false
+      }
+    ]
+  },
+  "skeleton": {
+    "agent_name": "good-question",
+    "suite": {
+      "name": "good-question 接入示例",
+      "description": "Q5 自动生成的示例骨架：input 已预填，expected/golden_answer/reference_docs 需人工补全"
+    },
+    "interfaces": [
+      {
+        "name": "chat",
+        "path": "/api/chat/{session_id}",
+        "contract_type": "sse"
+      }
+    ],
+    "cases": [
+      {
+        "name": "greeting-chat",
+        "interface_name": "chat",
+        "scene_tag": "greeting",
+        "input_type": "text",
+        "input": {
+          "content": "你好"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "doc_qa-chat",
+        "interface_name": "chat",
+        "scene_tag": "doc_qa",
+        "input_type": "text",
+        "input": {
+          "content": "你好"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "no_hit-chat",
+        "interface_name": "chat",
+        "scene_tag": "no_hit",
+        "input_type": "text",
+        "input": {
+          "content": "你好"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "summarize-chat",
+        "interface_name": "chat",
+        "scene_tag": "summarize",
+        "input_type": "text",
+        "input": {
+          "content": "你好"
+        },
+        "expected": {},
+        "assertions": [
+          {
+            "dimension": "completeness",
+            "op": "field_nonempty",
+            "args": {
+              "path": "answer"
+            }
+          }
+        ],
+        "metrics": {
+          "completeness": {
+            "enabled": true
+          }
+        }
+      }
+    ],
+    "agent_id": 4
+  },
+  "persist": {
+    "suite_id": 2092,
+    "case_ids": [
+      3026,
+      3027,
+      3028,
+      3029
+    ]
+  },
+  "passed": 6,
+  "failed": 0,
+  "completed_at": "2026-08-30 16:18:24"
+}

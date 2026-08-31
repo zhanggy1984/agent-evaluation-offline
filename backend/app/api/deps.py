@@ -90,9 +90,20 @@ async def require_owner_or_qa(agent_owner_id: int | None, user: User) -> None:
         raise ApiError(E_NO_PERMISSION, "owner 不可标/改自己 agent 的 golden_answer/assertions", 403)
 
 
-def viewer_sees_evidence(user: User) -> bool:
-    """viewer 可见性：L4 证据（reasoning 原文/judge 理由/tool_calls/source_detail）viewer 不可达。"""
+def sees_evidence_basic(user: User) -> bool:
+    """D3 基础证据：answer（截断 500）+ 断言明细——所有登录用户（含 viewer）可见。
+    「为什么扣分」的定位信息；run_results 内联 / result_evidence 裁剪用。"""
+    return True
+
+
+def sees_evidence_full(user: User) -> bool:
+    """D3 完整证据：reasoning 原文 / tool_calls / usage / judge reason——仅 staff（非 viewer）。"""
     return user.role != ROLE_VIEWER
+
+
+def viewer_sees_evidence(user: User) -> bool:
+    """（旧名，等价 sees_evidence_full）完整证据 viewer 不可达。"""
+    return sees_evidence_full(user)
 
 
 def is_held_out_visible(trigger_type: str, current_user: User, agent_owner_id: int | None) -> bool:

@@ -6,11 +6,19 @@
 """
 import time
 
+from app.core.sse_parser import SSEParseError
+
+# C7：answer/reasoning 累积上限（对齐 DB MEDIUMTEXT 16MB）。agent 异常流把 answer 撑到无界
+# 不再现实（列本身 16MB），提前拦截防内存峰值与后续入库撑爆；超限报契约错误。
+MAX_ANSWER_CHARS = 16 * 1024 * 1024
+
 
 class ResultAssembler:
     def __init__(self) -> None:
         self._answer: list[str] = []
         self._reasoning: list[str] = []
+        self._answer_len = 0  # C7：累计字符数（避免每次 join 求 len 的 O(n²)）
+        self._reasoning_len = 0
         self._tool_calls: list[dict] = []
         self._usage: dict | None = None
         self._meta: dict | None = None
@@ -52,11 +60,18 @@ class ResultAssembler:
             # 兼容读 delta 或 content（路径 A：good-question 双字段都发；只发 content 的 agent 也能采）
             delta = ev.data.get("delta") or ev.data.get("content", "")
             if delta:
+                # C7：16MB 保护，超限报契约错误（异常流提前拦截）
+                if self._answer_len + len(delta) > MAX_ANSWER_CHARS:
+                    raise SSEParseError("answer 累积超 16MB 上限，疑似异常流")
                 self._answer.append(delta)
+                self._answer_len += len(delta)
         elif t == "reasoning":
             delta = ev.data.get("delta") or ev.data.get("content", "")
             if delta:
+                if self._reasoning_len + len(delta) > MAX_ANSWER_CHARS:
+                    raise SSEParseError("reasoning 累积超 16MB 上限，疑似异常流")
                 self._reasoning.append(delta)
+                self._reasoning_len += len(delta)
         elif t == "tool_call":
             self._tool_calls.append(ev.data)
         elif t == "usage":
@@ -70,10 +85,17 @@ class ResultAssembler:
             self._meta = unified["meta"]
         ans = unified.get("answer")
         if ans:
+            # C7：同步灌入路径同样受 16MB 上限保护
+            if self._answer_len + len(ans) > MAX_ANSWER_CHARS:
+                raise SSEParseError("answer 累积超 16MB 上限，疑似异常流")
             self._answer.append(ans)
+            self._answer_len += len(ans)
         rs = unified.get("reasoning")
         if rs:
+            if self._reasoning_len + len(rs) > MAX_ANSWER_CHARS:
+                raise SSEParseError("reasoning 累积超 16MB 上限，疑似异常流")
             self._reasoning.append(rs)
+            self._reasoning_len += len(rs)
         for tc in unified.get("tool_calls") or []:
             self._tool_calls.append(tc)
         if unified.get("usage"):
