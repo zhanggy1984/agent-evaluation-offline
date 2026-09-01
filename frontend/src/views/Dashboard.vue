@@ -191,7 +191,7 @@
           </el-table>
         </el-tab-pane>
 
-        <el-tab-pane label="成本" name="cost">
+        <el-tab-pane label="成本" name="cost" lazy>
           <el-alert
             v-if="costNoPrice"
             type="warning"
@@ -253,7 +253,7 @@
           <el-empty v-if="!modelPrices.length" description="暂无单价配置" />
         </el-tab-pane>
 
-        <el-tab-pane label="覆盖" name="coverage">
+        <el-tab-pane label="覆盖" name="coverage" lazy>
           <el-row :gutter="12">
             <el-col :xs="24" :md="12">
               <div class="cov-title">接口覆盖</div>
@@ -1030,10 +1030,25 @@ const costTokensOption = computed(() => ({
           position: 'insideTop',
           color: '#999',
           fontSize: 10,
-          formatter: (p) => `${p.value[0]} N/A`,
         },
+        // 灰条 label 用静态字符串（数据项带 run_id）：纯 region 的 markArea（只指定 xAxis）
+        // label formatter 参数没有 value 属性，读 p.value[0] 会抛 TypeError，故改为 data item 自带 label
         data: costRows.value.flatMap((r) =>
-          r.total_tokens == null ? [[{ xAxis: costCat(r) }, { xAxis: costCat(r) }]] : []),
+          r.total_tokens == null
+            ? [[
+                {
+                  xAxis: costCat(r),
+                  label: {
+                    show: true,
+                    position: 'insideTop',
+                    color: '#999',
+                    fontSize: 10,
+                    formatter: `${costCat(r)} N/A`,
+                  },
+                },
+                { xAxis: costCat(r) },
+              ]]
+            : []),
       },
     },
   ],
@@ -1082,10 +1097,25 @@ const costMoneyOption = computed(() => ({
           position: 'insideTop',
           color: '#999',
           fontSize: 10,
-          formatter: (p) => `${p.value[0]} N/A`,
         },
+        // 灰条 label 用静态字符串（数据项带 run_id）：纯 region 的 markArea（只指定 xAxis）
+        // label formatter 参数没有 value 属性，读 p.value[0] 会抛 TypeError，故改为 data item 自带 label
         data: costRows.value.flatMap((r) =>
-          r.total_cost == null ? [[{ xAxis: costCat(r) }, { xAxis: costCat(r) }]] : []),
+          r.total_cost == null
+            ? [[
+                {
+                  xAxis: costCat(r),
+                  label: {
+                    show: true,
+                    position: 'insideTop',
+                    color: '#999',
+                    fontSize: 10,
+                    formatter: `${costCat(r)} N/A`,
+                  },
+                },
+                { xAxis: costCat(r) },
+              ]]
+            : []),
       },
     },
   ],
