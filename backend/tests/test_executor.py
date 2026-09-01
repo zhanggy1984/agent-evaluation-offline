@@ -7,6 +7,7 @@ SSE 正常/断流无 done/无 usage/HTTP 非 2xx/超时/连接错误/解析错�
 用 httpx.MockTransport 模拟 agent 网络层，chunk 走真实 SSEParser 解析。
 """
 from asyncio_util import run_in_isolated_loop
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -424,4 +425,51 @@ def test_prepare_pool_timeout():
             out = await execute_case(
                 _SSEAdapter(prepare_error=httpx.PoolTimeout("pool busy")), c, _case())
         assert not out.ok and out.error_type == ERROR_POOL_TIMEOUT
+    run_in_isolated_loop(main())
+
+
+# ---------------- P1-4 wall-clock deadline + SSE 空闲超时 ----------------
+def _hung_stream(first_chunk: bytes, hang_s: float = 3600):
+    """先吐一段真实 SSE 字节、随后挂起的流（模拟 agent 连接假活 / 永不结束）。"""
+    async def gen():
+        yield first_chunk
+        await asyncio.sleep(hang_s)
+        yield b""  # 永不抵达
+    return gen()
+
+
+def test_sse_wallclock_deadline(monkeypatch):
+    # P1-4：发送+解析段 wall-clock 封顶 case_timeout + 宽限。SSE 流挂起（无空闲超时
+    # 触发点也耗尽）→ asyncio.timeout 到期 → ERROR_TIMEOUT。原实现无墙钟总超时，
+    # 只能靠 run 级 hard_deadline（7200s）兜底。monkeypatch 掉 60s 宽限加速触发。
+    monkeypatch.setattr(executor, "_WALLCLOCK_GRACE_S", 0)
+    body = _hung_stream(_sse_bytes(("answer", {"delta": "x"}, "a1")))
+
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=body)) as c:
+            out = await execute_case(_SSEAdapter(), c, _case(), timeout_s=0.1)
+        assert not out.ok and out.error_type == ERROR_TIMEOUT
+    run_in_isolated_loop(main())
+
+
+def test_sse_idle_timeout(monkeypatch):
+    # P1-4：SSE 相邻 chunk 空闲超 _SSE_IDLE_TIMEOUT → wait_for 抛超时 → ERROR_TIMEOUT。
+    # 覆盖「连接假活」：agent 只发了一个 chunk 就卡死，无 done、无续推断点——原 async for
+    # 靠逐 chunk 读超时在"持续有数据"时才触发，单点卡死会拖到墙钟 deadline。
+    monkeypatch.setattr(executor, "_SSE_IDLE_TIMEOUT", 0.05)
+    body = _hung_stream(b"event: answer\ndata: {}\n\n")
+
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=body)) as c:
+            out = await execute_case(_SSEAdapter(), c, _case())
+        assert not out.ok and out.error_type == ERROR_TIMEOUT
+    run_in_isolated_loop(main())
+
+
+def test_sse_normal_under_idle_limit():
+    # P1-4 回归护栏：正常有界 SSE 流不被 wait_for 误超时（首帧即取到，后续立即结束）
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=_NORMAL)) as c:
+            out = await execute_case(_SSEAdapter(chunks=_NORMAL), c, _case())
+        assert out.ok
     run_in_isolated_loop(main())
