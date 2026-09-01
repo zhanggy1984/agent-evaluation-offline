@@ -11,7 +11,8 @@ from dataclasses import dataclass, field, replace
 
 import httpx
 
-from app.adapters.base import AdapterHTTPError, AgentAdapter, request_kwargs, send_request
+from app.adapters.base import (MAX_ERROR_BODY, MAX_SSE_BODY, AdapterHTTPError,
+                               AgentAdapter, read_body_capped, request_kwargs, send_request)
 from app.core.assembler import ResultAssembler
 from app.core.sse_parser import SSEParseError
 
@@ -25,6 +26,7 @@ ERROR_HTTP = "http_error"          # 非 2xx（3xx/5xx，可重试技术失败�
 ERROR_HTTP_CLIENT = "http_client_error"  # HTTP 4xx 业务错（重试无益，不重试不熔断）
 ERROR_CONNECT = "connect_error"    # 建连/网络错误
 ERROR_SSE_PARSE = "sse_parse_error"
+ERROR_BODY_TOO_LARGE = "body_too_large"  # 响应体超上限（P1-1：SSE 累计 >8MB），疑似 agent 异常输出
 ERROR_CONTRACT = "contract_error"  # 其他契约/解析异常
 
 # 可重试的技术失败（指数退避重试适用）。B2：HTTP 4xx 业务错（ERROR_HTTP_CLIENT）不在
@@ -104,16 +106,24 @@ async def execute_case(
                     # 7.5c 续推：带 Last-Event-ID 头从断点续传（标准契约，agent 侧按需适配）
                     spec_for_send = replace(
                         spec, headers={**spec.headers, "Last-Event-ID": adapter.last_event_id})
+                stream_bytes = 0
                 async with client.stream(
                     spec_for_send.method, spec_for_send.url,
                     **request_kwargs(spec_for_send, timeout_s),
                 ) as resp:
                     status_code = resp.status_code
                     if status_code != 200:
-                        body = (await resp.aread()).decode("utf-8", errors="replace")[:200]
+                        # P1-1：错误体限长读取（原 aread() 全量缓冲，错误体无上限时内存暴涨）
+                        body = (await read_body_capped(resp, MAX_ERROR_BODY))[:200]
                         err = ERROR_HTTP_CLIENT if 400 <= status_code < 500 else ERROR_HTTP
                         return _fail(err, f"HTTP {status_code}: {body}")
                     async for chunk in resp.aiter_bytes():
+                        stream_bytes += len(chunk)
+                        if stream_bytes > MAX_SSE_BODY:
+                            # P1-1：SSE 累计超限 → 非重试技术失败（agent 异常输出，重试复现）
+                            return _fail(
+                                ERROR_BODY_TOO_LARGE,
+                                f"SSE 流累计超 {MAX_SSE_BODY // 1024 // 1024}MB，疑似 agent 异常输出")
                         elapsed = time.perf_counter() - start
                         for ev in adapter.parse_stream_chunk(chunk):
                             assembler.on_event(ev, elapsed)
@@ -129,8 +139,9 @@ async def execute_case(
             resp = await send_request(client, spec, timeout=timeout_s)
             status_code = resp.status_code
             if status_code != 200:
+                # P1-1：resp.text 全量解码超大错误体徒耗内存 → 只解码前 200 字节
                 err = ERROR_HTTP_CLIENT if 400 <= status_code < 500 else ERROR_HTTP
-                return _fail(err, f"HTTP {status_code}: {resp.text[:200]}")
+                return _fail(err, f"HTTP {status_code}: {resp.content[:200].decode('utf-8', errors='replace')}")
             try:
                 unified = adapter.parse_sync(resp.json())
             except Exception as exc:

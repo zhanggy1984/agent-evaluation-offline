@@ -13,12 +13,13 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.adapters.base import AdapterHTTPError, RequestSpec
+from app.adapters.base import (MAX_ERROR_BODY, MAX_SSE_BODY, AdapterHTTPError,
+                               RequestSpec, read_body_capped)
 from app.core.sse_parser import SSEParseError, SSEParser
 from app.runner import executor
-from app.runner.executor import ERROR_CONNECT, ERROR_CONTRACT, ERROR_HTTP, \
-    ERROR_HTTP_CLIENT, ERROR_NO_DONE, ERROR_NO_USAGE, ERROR_SSE_PARSE, ERROR_TIMEOUT, \
-    execute_case
+from app.runner.executor import ERROR_BODY_TOO_LARGE, ERROR_CONNECT, ERROR_CONTRACT, \
+    ERROR_HTTP, ERROR_HTTP_CLIENT, ERROR_NO_DONE, ERROR_NO_USAGE, ERROR_SSE_PARSE, \
+    ERROR_TIMEOUT, execute_case
 
 
 def _sse_bytes(*frames) -> bytes:
@@ -355,4 +356,48 @@ def test_sse_resume_exhausted_no_done():
             out = await execute_case(_ResumeAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_NO_DONE
         assert len(seen) == 2  # 首流 + 1 次续推
+    run_in_isolated_loop(main())
+
+
+# ---------------- P1-1 出站响应体上限 ----------------
+def test_sse_body_too_large():
+    # P1-1：SSE 流累计超 8MB → ERROR_BODY_TOO_LARGE（非重试技术失败，防超大 body 耗尽内存）
+    big = b"x" * (MAX_SSE_BODY + 1)
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=big)) as c:
+            out = await execute_case(_SSEAdapter(chunks=big), c, _case())
+        assert not out.ok and out.error_type == ERROR_BODY_TOO_LARGE
+        assert "MB" in out.error_detail
+    run_in_isolated_loop(main())
+
+
+def test_sse_under_body_limit_ok():
+    # P1-1 回归护栏：正常 SSE 流（远小于 8MB）不被误判超限
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=_NORMAL)) as c:
+            out = await execute_case(_SSEAdapter(chunks=_NORMAL), c, _case())
+        assert out.ok
+    run_in_isolated_loop(main())
+
+
+def test_error_body_capped_read():
+    # P1-1：非 200 错误体限长读取——只读前 limit 字节，超大错误体不触发全量缓冲
+    big = b"a" * (100 * 1024)
+
+    async def main():
+        async with _client(lambda req: httpx.Response(500, content=big)) as c:
+            async with c.stream("POST", "http://mock-agent.test/x") as resp:
+                body = await read_body_capped(resp, MAX_ERROR_BODY)
+        assert len(body) == MAX_ERROR_BODY  # 只保留 64KB，未全量缓冲
+    run_in_isolated_loop(main())
+
+
+def test_sync_error_body_capped_decode():
+    # P1-1：sync 非 200 错误体不再全量解码（resp.text），只解码前 200 字节进 error_detail
+    big = b"a" * (100 * 1024)
+    async def main():
+        async with _client(lambda req: httpx.Response(502, content=big)) as c:
+            out = await execute_case(_SyncAdapter(), c, _case())
+        assert not out.ok and out.error_type == ERROR_HTTP
+        assert len(out.error_detail) < 500  # detail 仅截断样本，未吞入整段错误体
     run_in_isolated_loop(main())

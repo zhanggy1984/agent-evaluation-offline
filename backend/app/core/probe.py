@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 import httpx
 
 from app.adapters.base import (
-    _UPLOADS_DIR, _assert_inside_uploads, request_kwargs, send_request,
+    MAX_ERROR_BODY, _UPLOADS_DIR, _assert_inside_uploads, read_body_capped,
+    request_kwargs, send_request,
 )
 from app.core.sse_parser import SSEParseError
 
@@ -154,7 +155,8 @@ async def probe_interface(adapter, client, case, timeout_s: float = 120.0) -> Pr
                                      **request_kwargs(spec, timeout_s)) as resp:
                 pr.http_status = resp.status_code
                 if resp.status_code != 200:
-                    body = (await resp.aread()).decode("utf-8", errors="replace")[:200]
+                    # P1-1：错误体限长读取（原 aread() 全量缓冲，错误体无上限时内存暴涨）
+                    body = (await read_body_capped(resp, MAX_ERROR_BODY))[:200]
                     pr.errors.append(f"HTTP {resp.status_code}: {body}")
                     pr.raw_sample = body
                 else:
@@ -178,14 +180,16 @@ async def probe_interface(adapter, client, case, timeout_s: float = 120.0) -> Pr
             resp = await send_request(client, spec, timeout=timeout_s)
             pr.http_status = resp.status_code
             if resp.status_code != 200:
-                pr.errors.append(f"HTTP {resp.status_code}: {resp.text[:200]}")
-                pr.raw_sample = resp.text[:200]
+                # P1-1：resp.text 全量解码超大错误体徒耗内存 → 只解码前 200 字节
+                body = resp.content[:200].decode("utf-8", errors="replace")
+                pr.errors.append(f"HTTP {resp.status_code}: {body}")
+                pr.raw_sample = body
             else:
                 try:
                     data = resp.json()
                 except Exception as exc:
                     pr.errors.append(f"响应非 JSON: {exc}")
-                    pr.raw_sample = resp.text[:200]
+                    pr.raw_sample = resp.content[:200].decode("utf-8", errors="replace")
                 else:
                     pr.raw_sample = json.dumps(data, ensure_ascii=False)[:500]
                     if not isinstance(data, dict):
