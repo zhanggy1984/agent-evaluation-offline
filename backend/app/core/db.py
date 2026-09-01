@@ -13,6 +13,9 @@ engine = create_async_engine(
     settings.sqlalchemy_url,
     pool_size=10,
     max_overflow=10,
+    pool_timeout=10,         # P1-5：池耗尽等待上限。默认 30s 后抛池 TimeoutError → 500 且
+                             # 请求挂 30s；降到 10s 快速落 P1-3 的 503（dependency_unavailable），
+                             # 让平台容量问题尽快暴露、不长时间占用 worker 连接。
     pool_pre_ping=True,      # 心跳探测，防 MySQL wait_timeout 断连
     pool_recycle=3600,       # 防 NAT/网关侧空闲回收
     echo=False,
