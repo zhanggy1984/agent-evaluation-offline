@@ -1198,11 +1198,12 @@ watch([runSearch, runStatusFilter], () => { runPage.value = 1 })
 
 async function loadTrend(agentId) {
   trendData.value = await getTrend(agentId)
-  // 有 ≥2 次终态 run 时自动预选最近两次对比
+  // 有 ≥2 次终态 run 时自动预选最近两次对比。
+  // 语义约定：A=历史（基准）、B=最新（被测）——后端 Δ = B−A，B 为最新时 Δ 即"新版本较历史的变化"。
   const len = trendData.value.length
   if (len >= 2) {
-    compareA.value = trendData.value[len - 1].run_id
-    compareB.value = trendData.value[len - 2].run_id
+    compareA.value = trendData.value[len - 2].run_id
+    compareB.value = trendData.value[len - 1].run_id
     await doCompare()
   } else {
     compareA.value = len ? trendData.value[0].run_id : null

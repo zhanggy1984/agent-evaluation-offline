@@ -108,3 +108,29 @@ describe('看板 agent 下钻联动评测记录', () => {
     expect(wrapper.find('.el-pagination').exists()).toBe(true)
   })
 })
+
+describe('版本对比默认预选（A=历史、B=最新）', () => {
+  // 语义约定：后端 Δ = B−A（dashboard.py:101）。trendData 按 started_at 升序，
+  // 默认 A=次新(历史基准)、B=最新(被测)，保证 Δ = 最新−历史 = 新版本较历史的变化。
+  const TREND = [
+    { run_id: 100, version: '0.1.0', status: 'completed', agent_score: 90, started_at: '2026-09-01T00:00:00Z' },
+    { run_id: 101, version: '0.2.0', status: 'completed', agent_score: 95, started_at: '2026-09-01T01:00:00Z' },
+    { run_id: 102, version: '0.3.0', status: 'completed', agent_score: 99, started_at: '2026-09-01T02:00:00Z' },
+  ]
+
+  it('下钻后自动预选最近两次：A=次新(历史)、B=最新，且 doCompare 按 (A, B) 调用', async () => {
+    getTrend.mockResolvedValue(TREND)
+    getCompare.mockResolvedValue({ a: { run_id: 101 }, b: { run_id: 102 }, dims: [] })
+    const wrapper = mountDashboard()
+    await flushPromises()
+    await wrapper.findAll('.gate-card')[0].trigger('click') // 下钻 → loadTrend
+    await flushPromises()
+    // 下拉框顺序：第一个=A(历史/次新 101)，第二个=B(最新 102)
+    const selects = wrapper.findAll('.compare-bar .el-select')
+    expect(selects.length).toBeGreaterThanOrEqual(2)
+    expect(selects[0].text()).toContain('#101')
+    expect(selects[1].text()).toContain('#102')
+    // doCompare 按 (compareA=历史, compareB=最新) 调后端；Δ=B−A=最新−历史（后端 dashboard.py:101）
+    expect(getCompare).toHaveBeenCalledWith(101, 102)
+  })
+})
