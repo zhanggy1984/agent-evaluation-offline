@@ -419,11 +419,19 @@
           <el-table-column label="Δ">
             <template #default="{ row }">{{ fmtScore(row.delta) }}</template>
           </el-table-column>
-          <el-table-column label="显著性（2σ）" width="150">
+          <el-table-column label="显著性（2σ）" width="190">
+            <template #header>
+              <el-tooltip
+                placement="top"
+                content="A、B 两次跑分差多少，要和这个 agent 平时分数的波动幅度比：差距明显大于平时波动，才算显著（提升/下降）；差距没超过平时波动，就是「差异不显著」——变化太小，分不清是版本真有差别，还是跑分本身忽高忽低。"
+              >
+                <span>显著性（2σ）<span class="sig-hint">ⓘ</span></span>
+              </el-tooltip>
+            </template>
             <template #default="{ row }">
               <span v-if="row.significant === 'up'" class="sig up">↑ 显著提升</span>
               <span v-else-if="row.significant === 'down'" class="sig down">↓ 显著下降</span>
-              <span v-else-if="row.significant === 'flat'" class="sig flat">持平</span>
+              <span v-else-if="row.significant === 'flat'" class="sig flat">差异不显著</span>
               <span v-else class="sig na">数据不足</span>
             </template>
           </el-table-column>
@@ -1198,11 +1206,12 @@ watch([runSearch, runStatusFilter], () => { runPage.value = 1 })
 
 async function loadTrend(agentId) {
   trendData.value = await getTrend(agentId)
-  // 有 ≥2 次终态 run 时自动预选最近两次对比
+  // 有 ≥2 次终态 run 时自动预选最近两次对比。
+  // 语义约定：A=历史（基准）、B=最新（被测）——后端 Δ = B−A，B 为最新时 Δ 即"新版本较历史的变化"。
   const len = trendData.value.length
   if (len >= 2) {
-    compareA.value = trendData.value[len - 1].run_id
-    compareB.value = trendData.value[len - 2].run_id
+    compareA.value = trendData.value[len - 2].run_id
+    compareB.value = trendData.value[len - 1].run_id
     await doCompare()
   } else {
     compareA.value = len ? trendData.value[0].run_id : null
@@ -1556,6 +1565,12 @@ onBeforeUnmount(() => {
 }
 .sig.na {
   color: var(--el-text-color-placeholder);
+}
+.sig-hint {
+  margin-left: 2px;
+  color: var(--el-text-color-placeholder);
+  cursor: help;
+  font-size: 12px;
 }
 .dim-line {
   display: flex;
