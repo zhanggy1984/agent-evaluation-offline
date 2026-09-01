@@ -49,6 +49,8 @@ scripts/reset_passwords_*.py
 # 例外：无凭据的 seed 修正工具纳入版本控制
 !scripts/_sync_refdocs.py
 !scripts/_fix_seed_chat.py
+!scripts/_add_gq_scene_cases.py
+!scripts/_gq_new_cases_detail.py
 
 # ---- 本地调试临时目录（cc 测试 PDF 上传产物，体积大）----
 .tmp_cc_uploads/
