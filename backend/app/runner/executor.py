@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 
 import httpx
 
-from app.adapters.base import AgentAdapter, request_kwargs, send_request
+from app.adapters.base import AdapterHTTPError, AgentAdapter, request_kwargs, send_request
 from app.core.assembler import ResultAssembler
 from app.core.sse_parser import SSEParseError
 
@@ -64,7 +64,25 @@ async def execute_case(
     """执行单个用例。outcome.ok 为 True 时 unified/timing 有效。"""
     try:
         await adapter.prepare(case, client)
-    except Exception as exc:  # 前置失败（登录/建 session/上传）：配置/凭证错误，不熔断
+    except AdapterHTTPError as exc:
+        # P0-2：prepare HTTP 错误按状态码分流——4xx（429 除外）是凭证/配置错归 contract 不重试；
+        # 5xx/429 临时服务故障归 ERROR_HTTP 可重试（orchestrator 按 RETRYABLE_ERRORS 重试 + 熔断累计）。
+        if 400 <= exc.status_code < 500 and exc.status_code != 429:
+            logger.warning("prepare HTTP %s case=%s: %s", exc.status_code,
+                           getattr(case, "id", None), exc)
+            return _fail(ERROR_CONTRACT, f"prepare: {exc}")
+        logger.warning("prepare 临时失败 HTTP %s case=%s: %s", exc.status_code,
+                       getattr(case, "id", None), exc)
+        return _fail(ERROR_HTTP, f"prepare: {exc}")
+    except httpx.TimeoutException as exc:
+        # P0-2：prepare 超时 → 可重试（ERROR_TIMEOUT），不再误判 agent contract bug
+        logger.warning("prepare 超时 case=%s: %s", getattr(case, "id", None), exc)
+        return _fail(ERROR_TIMEOUT, f"prepare: {exc}")
+    except httpx.RequestError as exc:
+        # P0-2：prepare 建连/网络错 → 可重试（ERROR_CONNECT）
+        logger.warning("prepare 网络错 case=%s: %s", getattr(case, "id", None), exc)
+        return _fail(ERROR_CONNECT, f"prepare: {exc}")
+    except Exception as exc:  # 前置失败（模板/提取等契约错）：配置/凭证错误，不熔断
         logger.warning("prepare 失败 case=%s: %s", getattr(case, "id", None), exc)
         return _fail(ERROR_CONTRACT, f"prepare: {exc}")
 

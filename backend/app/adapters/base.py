@@ -27,6 +27,19 @@ class RequestSpec:
     timeout: float = 120.0
 
 
+class AdapterHTTPError(RuntimeError):
+    """adapter 出站 HTTP 非 2xx（prepare/reset 步骤）。
+
+    携带 status_code 供 executor 分流：5xx/429 临时服务故障 → 可重试技术失败（ERROR_HTTP），
+    4xx 凭证/配置错 → contract（不重试）。继承 RuntimeError 保持既有
+    `assertRaisesRegex(RuntimeError, ...)` 断言兼容（test_engine 轮询/reset HTTP 500）。
+    """
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def multipart_files(files: dict) -> dict:
     """{表单字段: 文件路径} → httpx multipart files（读字节 + basename 文件名 + MIME 类型）。
 

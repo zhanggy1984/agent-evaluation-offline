@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.adapters.base import RequestSpec
+from app.adapters.base import AdapterHTTPError, RequestSpec
 from app.core.sse_parser import SSEParseError, SSEParser
 from app.runner import executor
 from app.runner.executor import ERROR_CONNECT, ERROR_CONTRACT, ERROR_HTTP, \
@@ -181,6 +181,58 @@ def test_prepare_error():
             out = await execute_case(_SSEAdapter(prepare_error=RuntimeError("login failed")), c, _case())
         assert not out.ok and out.error_type == ERROR_CONTRACT
         assert "prepare" in out.error_detail
+    run_in_isolated_loop(main())
+
+
+def test_prepare_http_5xx_retryable():
+    # P0-2：prepare 5xx 临时服务故障 → ERROR_HTTP（可重试 + 熔断累计），不再误判 agent bug
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            err = AdapterHTTPError("prepare.login HTTP 500: boom", 500)
+            out = await execute_case(_SSEAdapter(prepare_error=err), c, _case())
+        assert not out.ok and out.error_type == ERROR_HTTP
+        assert "500" in out.error_detail
+    run_in_isolated_loop(main())
+
+
+def test_prepare_http_429_retryable():
+    # P0-2：429 限流 → ERROR_HTTP 可重试（退避后可能恢复），不归 contract
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            err = AdapterHTTPError("prepare.login HTTP 429: limited", 429)
+            out = await execute_case(_SSEAdapter(prepare_error=err), c, _case())
+        assert not out.ok and out.error_type == ERROR_HTTP
+    run_in_isolated_loop(main())
+
+
+def test_prepare_http_4xx_contract():
+    # P0-2：prepare 4xx（凭证/配置错）→ ERROR_CONTRACT 不重试
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            err = AdapterHTTPError("prepare.login HTTP 401: bad credentials", 401)
+            out = await execute_case(_SSEAdapter(prepare_error=err), c, _case())
+        assert not out.ok and out.error_type == ERROR_CONTRACT
+        assert "401" in out.error_detail
+    run_in_isolated_loop(main())
+
+
+def test_prepare_network_retryable():
+    # P0-2：prepare 建连失败（agent 临时不可达）→ ERROR_CONNECT 可重试
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            out = await execute_case(
+                _SSEAdapter(prepare_error=httpx.ConnectError("conn refused")), c, _case())
+        assert not out.ok and out.error_type == ERROR_CONNECT
+    run_in_isolated_loop(main())
+
+
+def test_prepare_timeout_retryable():
+    # P0-2：prepare 超时（上游慢）→ ERROR_TIMEOUT 可重试
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            out = await execute_case(
+                _SSEAdapter(prepare_error=httpx.ReadTimeout("timeout")), c, _case())
+        assert not out.ok and out.error_type == ERROR_TIMEOUT
     run_in_isolated_loop(main())
 
 
