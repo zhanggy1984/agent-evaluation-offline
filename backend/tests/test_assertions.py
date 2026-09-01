@@ -180,6 +180,59 @@ class TestKeywordContains(unittest.TestCase):
             self.op.run(UNIFIED, {"keywords": []})
 
 
+class TestKeywordNotContains(unittest.TestCase):
+    """keyword_not_contains：防御性金丝雀断言——answer 残留工具调用声明（DSML/XML 泄漏）即 fail。
+
+    通用负向文本算子（客观公平）：任何 agent 的 answer 含任一泄漏标记都 fail，
+    不偏袒单一 agent；gq 3161 根因（DeepSeek V4 DSML 声明泄漏进 answer）用其作防御哨兵。
+    """
+
+    def setUp(self):
+        self.op = get_op("keyword_not_contains")
+
+    def test_clean_answer_passes(self):
+        ok, _ = self.op.run(UNIFIED, {"keywords": ["DSML", "tool_calls"]})
+        self.assertTrue(ok)
+
+    def test_dsml_markup_fails(self):
+        ok, _ = self.op.run(
+            {"answer": "我再查一下<DSML><DSML>tool_calls"}, {"keywords": ["DSML", "tool_calls"]})
+        self.assertFalse(ok)
+
+    def test_standard_xml_markup_fails(self):
+        ok, _ = self.op.run(
+            {"answer": "<tool_calls><invoke name=\"hybrid_retrieve\">..</tool_calls>"},
+            {"keywords": ["DSML", "tool_calls"]})
+        self.assertFalse(ok)
+
+    def test_partial_markup_fails(self):
+        # 残留开标签/孤立 DSML 标记任一出现即 fail（改动 1 拦截失败的极端兜底）
+        ok, _ = self.op.run({"answer": "未闭合<DSML>tool_calls"}, {"keywords": ["DSML", "tool_calls"]})
+        self.assertFalse(ok)
+
+    def test_match_any_semantics(self):
+        # match="any"：仅当全部关键词都出现才 fail（至少一个不出现即通过）
+        ok, _ = self.op.run({"answer": "含DSML标记但无工具调用声明"},
+                            {"keywords": ["DSML", "tool_calls"], "match": "any"})
+        self.assertTrue(ok)
+        ok2, _ = self.op.run({"answer": "含DSML标记且残留tool_calls声明"},
+                             {"keywords": ["DSML", "tool_calls"], "match": "any"})
+        self.assertFalse(ok2)
+
+    def test_custom_path(self):
+        ok, _ = self.op.run(UNIFIED, {"path": "reasoning", "keywords": ["DSML"]})
+        self.assertTrue(ok)
+
+    def test_non_text_fails(self):
+        ok, actual = self.op.run(UNIFIED, {"path": "usage.total_tokens", "keywords": ["1"]})
+        self.assertFalse(ok)
+        self.assertIn("非文本", actual)
+
+    def test_empty_keywords_raises(self):
+        with self.assertRaises(AssertionOpError):
+            self.op.run(UNIFIED, {"keywords": []})
+
+
 class TestToolCalled(unittest.TestCase):
     def test_called(self):
         ok, actual = get_op("tool_called").run(UNIFIED, {"tool": "search"})

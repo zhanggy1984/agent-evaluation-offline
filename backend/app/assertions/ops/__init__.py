@@ -8,6 +8,7 @@ for _cls in (
     structure.ValueEqualsOp,
     structure.ValueRangeOp,
     text.KeywordContainsOp,
+    text.KeywordNotContainsOp,
     tool.ToolCalledOp,
     tool.ToolNotCalledOp,
     retrieval.SourceHitOp,

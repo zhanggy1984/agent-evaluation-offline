@@ -834,6 +834,15 @@ GQ_DOCS = (
 )
 GQ_EMPTY_NOTE = "no_hit 用例口径：该问题相关但文档库 3 未收录（如工资发放日/生育津贴），应如实回复未找到，不得编造。"
 
+# gq 全 case 金丝雀断言（评测侧防御，3161 根因）：answer 不得残留工具调用声明。
+# DeepSeek V4 偶发把二次检索意图渲染成 DSML/XML 声明泄漏进 answer（改动 1 拦截失效的哨兵），
+# 任一泄漏标记（"DSML" 覆盖四种竖线变体、"tool_calls" 覆盖标准/DSML 开闭标签）出现即 fail。
+_GQ_CANARY = _mk_assertion(
+    "keyword_not_contains",
+    {"path": "answer", "keywords": ["DSML", "tool_calls"]},
+    "completeness",
+)
+
 
 def _gq_content(text: str) -> dict:
     return {"content": text}
@@ -1043,6 +1052,10 @@ def seed(agent: str) -> None:
 
         # 1) 骨架补足
         skel_updates = globals().get(f"{agent.upper()}_SKELETON_UPDATES", {})
+        # gq 全 case 金丝雀（改动评测侧防御）：骨架补足断言也带，防既有 case 漏网
+        if agent == "gq":
+            for body in skel_updates.values():
+                body.setdefault("assertions", []).append(_GQ_CANARY)
         for cid, body in skel_updates.items():
             iface = body.pop("interface_id", None)
             if iface:
@@ -1053,6 +1066,11 @@ def seed(agent: str) -> None:
         # 2) 新 suite
         cases_builder = globals().get(f"{agent}_real_cases", lambda: [])
         cases = cases_builder()
+        # gq 全 case 金丝雀：真实 case 统一追加（DRY，新增 case 不手写；算子为通用负向断言，
+        # 任何 agent 的 answer 残留工具调用声明都会被判 fail，平台侧客观公平）
+        if agent == "gq":
+            for body in cases:
+                body.setdefault("assertions", []).append(_GQ_CANARY)
         if not cases:
             print(f"  - 无新用例（{agent} 未实现或不需要）")
             return
