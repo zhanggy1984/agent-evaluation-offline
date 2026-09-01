@@ -134,3 +134,36 @@ describe('版本对比默认预选（A=历史、B=最新）', () => {
     expect(getCompare).toHaveBeenCalledWith(101, 102)
   })
 })
+
+describe('显著性标签渲染（2σ 检验）', () => {
+  // 后端 dashboard_rules.significance()：|Δ|>2σ → up/down，否则 flat；样本不足 → insufficient。
+  // 前端语义：flat 文案为「差异不显著」（不显著≠无差异，可能是历史波动大），列头 tooltip 说明规则。
+  const TREND = [
+    { run_id: 100, version: '0.1.0', status: 'completed', agent_score: 90, started_at: '2026-09-01T00:00:00Z' },
+    { run_id: 101, version: '0.2.0', status: 'completed', agent_score: 95, started_at: '2026-09-01T01:00:00Z' },
+  ]
+  const DIMS = [
+    { code: 'factuality', mean_a: 90, mean_b: 90, delta: 0, significant: 'flat' },
+    { code: 'completeness', mean_a: 80, mean_b: 95, delta: 15, significant: 'up' },
+    { code: 'reasoning', mean_a: 95, mean_b: 80, delta: -15, significant: 'down' },
+    { code: 'tool_usage', mean_a: null, mean_b: null, delta: 0, significant: 'insufficient' },
+  ]
+
+  it('下钻后显著性列四态正确渲染，flat 显示「差异不显著」，列头带 2σ tooltip', async () => {
+    getTrend.mockResolvedValue(TREND)
+    getCompare.mockResolvedValue({ a: { run_id: 100 }, b: { run_id: 101 }, dims: DIMS })
+    const wrapper = mountDashboard()
+    await flushPromises()
+    await wrapper.findAll('.gate-card')[0].trigger('click')
+    await flushPromises()
+    // compare 表格在下钻后才渲染，位于评测记录表之后，取最后一张 el-table
+    const tables = wrapper.findAll('.el-table')
+    const tableText = tables[tables.length - 1].text()
+    expect(tableText).toContain('差异不显著')
+    expect(tableText).toContain('↑ 显著提升')
+    expect(tableText).toContain('↓ 显著下降')
+    expect(tableText).toContain('数据不足')
+    // 列头 tooltip 触发器（ⓘ）：element-plus el-tooltip 内容 hover 才挂载，此处只验证触发点存在
+    expect(wrapper.find('.sig-hint').exists()).toBe(true)
+  })
+})
