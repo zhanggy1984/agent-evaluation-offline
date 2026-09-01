@@ -24,7 +24,15 @@ logger = logging.getLogger(__name__)
 
 
 class JudgeError(Exception):
-    """judge 调用失败（超时/HTTP/解析/等级非法）。worker 依据 attempts 重试或标 failed。"""
+    """judge 调用失败（超时/HTTP/解析/等级非法）。worker 依据 attempts 重试或标 failed。
+
+    permanent=True 表示配置/凭证类错误（HTTP 4xx：key 无效/endpoint 错），重试无益，
+    worker 据此直接标 failed 而非空转退避（P0-4）。
+    """
+
+    def __init__(self, message: str, *, permanent: bool = False):
+        super().__init__(message)
+        self.permanent = permanent
 
 
 @dataclass
@@ -79,6 +87,33 @@ def extract_verdict(text: str) -> dict:
     if not isinstance(reason, str) or not reason.strip():
         raise JudgeError("judge reason 缺失或为空")
     return {"level": level, "reason": reason.strip()}
+
+
+# 显式拒答/无法评估模式（P0-6 轻量检测）。保守词表——宁漏勿杀：
+# 仅匹配「自指拒答」（judge 表示无法评估该回答/无法作答/无法给出判定/信息不足无法评估等），
+# 不匹配正常判据（如「标书未明确，无法确认报价是否编造」是实质性结论，含「无法确认」但不含
+# 自指拒答动词，不误伤）。判为拒答的样本由 worker 视为失败，避免「自信乱判」被当分数信任。
+_REFUSAL_PATTERNS = (
+    "无法作答",
+    "无法评估",
+    "无法给出评估", "无法给出评价", "无法给出判定", "无法给出判断",
+    "无法判断该回答", "无法判断该内容", "无法判断该答案",
+    "信息不足，无法评估", "信息不足,无法评估", "信息不足无法评估",
+    "信息不足，无法判断", "信息不足,无法判断", "信息不足无法判断",
+    "cannot determine", "unable to assess", "unable to evaluate", "unable to judge",
+    "cannot assess", "cannot evaluate", "cannot judge",
+)
+
+
+def detect_refusal(reason: str) -> bool:
+    """轻量拒答检测：judge reason 含显式拒答/无法评估模式 → True（纯函数，单测）。
+
+    与 extract_verdict 解耦：extract_verdict 仍是纯解析（只校验 level/reason 结构），
+    拒答检测放 worker verdict 循环（样本失败语义），不污染解析契约（TestExtractVerdict 全量覆盖）。
+    """
+    if not reason:
+        return False
+    return any(p in reason for p in _REFUSAL_PATTERNS)
 
 
 def _render_anchors(template: dict) -> str:
@@ -225,7 +260,12 @@ class JudgeClient:
         except Exception as e:
             raise JudgeError(f"judge 请求异常: {type(e).__name__}: {e}") from e
         if resp.status_code != 200:
-            raise JudgeError(f"judge HTTP {resp.status_code}: {resp.text[:300]}")
+            # P0-4：HTTP 4xx（400/401/403/404）是配置/凭证错（key 无效/endpoint 错），重试无益
+            # 标 permanent 让 worker 直接 failed；429/5xx 可重试（退避后可能恢复）。
+            raise JudgeError(
+                f"judge HTTP {resp.status_code}: {resp.text[:300]}",
+                permanent=resp.status_code in (400, 401, 403, 404),
+            )
         try:
             body = resp.json()
             content = body["choices"][0]["message"]["content"]

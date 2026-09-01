@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.judge.client import (
-    JudgeError, _validate_allowlist, build_messages, extract_verdict, is_configured,
+    JudgeError, _validate_allowlist, build_messages, detect_refusal, extract_verdict, is_configured,
 )
 from app.judge.rubric import (
     RATINGS, anchors_of, fallback_rubric,
@@ -417,6 +417,164 @@ class TestProcessOneNonJudgeError(unittest.TestCase):
         t, _ = self._scenario(max_retries=3)
         self.assertEqual(t.attempts, 1)
         self.assertEqual(t.status, "pending")
+
+
+class TestDetectRefusal(unittest.TestCase):
+    """P0-6：拒答检测纯函数——显式自指拒答命中，正常判据（如「无法确认报价是否编造」）不误伤。"""
+
+    def test_self_referential_refusal_hits(self):
+        for reason in ("无法评估该回答", "无法作答", "无法给出评估", "无法判断该内容",
+                       "信息不足，无法判断", "cannot determine", "unable to assess"):
+            self.assertTrue(detect_refusal(reason), f"应命中拒答: {reason!r}")
+
+    def test_normal_judgment_not_refusal(self):
+        # 实质性判据：对 agent 内容下结论（哪怕带"无法确认"），不属自指拒答
+        for reason in ("标书未明确，无法确认报价是否编造", "无法确认该报价的真实性",
+                       "回答引用了标书内容，与参考文档一致", "证据不足但综合判断 level 3",
+                       ""):
+            self.assertFalse(detect_refusal(reason), f"不应误伤: {reason!r}")
+
+
+class TestReclaimStaleAttempts(unittest.TestCase):
+    """P0-5：processing 超时回收=一次失败尝试，毒任务不再每次重启从 0 重来。"""
+
+    def _run(self, db):
+        from app.judge import worker
+        return run_in_isolated_loop(
+            worker._reclaim_stale(db, __import__("datetime").datetime.utcnow()))
+
+    def test_reclaim_increments_attempts(self):
+        db = AsyncMock()
+        db.commit = AsyncMock()
+        rows = [
+            SimpleNamespace(status="processing", claim_id="c", lease_until=None, attempts=0),
+            SimpleNamespace(status="processing", claim_id="d", lease_until=None, attempts=None),
+        ]
+        db.execute.return_value = SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: rows))
+        n = self._run(db)
+        self.assertEqual(n, 2)
+        for r in rows:
+            self.assertEqual(r.status, "pending")
+            self.assertIsNone(r.claim_id)
+            self.assertEqual(r.attempts, 1)   # 0→1、None→1
+        db.commit.assert_awaited_once()
+
+
+class TestDrainOnceAllowlistGuard(unittest.TestCase):
+    """P0-1：judge base_url 不在 llm_allowlist（配置错）→ claim 前校验失败 → pending 任务
+    快速 failed + 显式触发 score_run 收敛，不再无限循环空转（run 不再卡 scoring）。"""
+
+    def test_config_error_fails_pending_and_scores(self):
+        from datetime import datetime
+
+        from app.judge import worker
+
+        db = AsyncMock()
+        db.commit = AsyncMock()
+        stale = [
+            SimpleNamespace(run_id=7, status="pending", claim_id=None, lease_until=None),
+            SimpleNamespace(run_id=7, status="pending", claim_id=None, lease_until=None),
+            SimpleNamespace(run_id=8, status="pending", claim_id=None, lease_until=None),
+        ]
+        db.execute.return_value = SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: stale))
+
+        class _SL:
+            async def __aenter__(self):
+                return db
+
+            async def __aexit__(self, *a):
+                return False
+
+        async def _go():
+            with patch("app.core.db.SessionLocal", _SL), \
+                 patch.object(worker, "_load_global_cfg", new=AsyncMock(return_value={
+                     "base_url": "https://bad-not-in-allowlist.example.com",
+                     "model": "m", "allowlist": ["api.deepseek.com"], "concurrency": 2})), \
+                 patch.object(worker, "is_configured", return_value=True), \
+                 patch.object(worker, "_reclaim_stale", new=AsyncMock(return_value=0)), \
+                 patch.object(worker, "score_run", new=AsyncMock()) as score_run, \
+                 patch.object(worker, "_claim_batch", new=AsyncMock()) as claim:
+                await worker._drain_once()
+                return score_run, claim, stale
+
+        score_run, claim, stale = run_in_isolated_loop(_go())
+        self.assertTrue(all(t.status == "failed" for t in stale))  # 全部快速 failed
+        self.assertEqual(score_run.await_count, 2)   # run 7、run 8 都显式触发收敛
+        claim.assert_not_awaited()                    # 配置错不再认领（不死循环）
+        db.commit.assert_awaited_once()
+
+
+class TestProcessOnePermanentAndRefusal(unittest.TestCase):
+    """P0-4/P0-6：permanent JudgeError（HTTP 4xx 配置错）与全样本拒答 → 直接 failed
+    不耗 attempts/退避；可重试错误仍走退避。"""
+
+    def _scenario(self, judge_side_effect, max_retries=5, repeat=1):
+        from app.judge import worker
+
+        async def _run():
+            db = AsyncMock()
+            db.add = Mock()
+            result = SimpleNamespace(answer="a", reasoning="", tool_calls=None,
+                                     case_id=1, case_version_id=2, pass_fail="pass")
+            db.execute.return_value = SimpleNamespace(
+                scalars=lambda: SimpleNamespace(first=lambda: result))
+            db.get.return_value = SimpleNamespace(snapshot={"input": "x"})
+
+            class _SL:
+                async def __aenter__(self):
+                    return db
+
+                async def __aexit__(self, *a):
+                    return False
+
+            client = Mock()
+            client.judge = AsyncMock(side_effect=judge_side_effect)
+            t = SimpleNamespace(run_id=1, case_id=1, dimension_code="factuality",
+                                attempts=0, status="processing",
+                                claim_id="c", lease_until=None, result=None)
+            with patch("app.core.db.SessionLocal", _SL), \
+                 patch.object(worker, "load_rubric", new=AsyncMock(return_value={"instruction": "x"})), \
+                 patch.object(worker, "_rubric_version", new=AsyncMock(return_value="1.0")):
+                await worker._process_one(
+                    t, {"judge_repeat": repeat, "judge_max_retries": max_retries},
+                    interface_id=0, client=client)
+            return t, db
+
+        return run_in_isolated_loop(_run())
+
+    def test_permanent_http_4xx_direct_failed(self):
+        # 凭证/配置错（HTTP 4xx permanent）：max_retries=5 也不退避，attempts=1 直接 failed
+        t, _ = self._scenario(JudgeError("judge HTTP 401", permanent=True))
+        self.assertEqual(t.status, "failed")
+        self.assertEqual(t.attempts, 1)
+
+    def test_retryable_error_still_backoff(self):
+        # 临时错（超时）permanent=False → attempts 未达上限回 pending 退避
+        t, _ = self._scenario(JudgeError("judge 超时"), max_retries=5)
+        self.assertEqual(t.status, "pending")
+        self.assertEqual(t.attempts, 1)
+        self.assertIsNotNone(t.next_retry_at)
+
+    def test_all_samples_refusal_direct_failed(self):
+        # P0-6：全部样本拒答（无法评估）→ 同永久语义直接 failed，不耗重采样 quota
+        verdict = SimpleNamespace(level=3, reason="无法评估该回答")
+        t, _ = self._scenario(lambda **kw: verdict, max_retries=5)
+        self.assertEqual(t.status, "failed")
+        self.assertEqual(t.attempts, 1)
+
+    def test_partial_refusal_still_aggregates(self):
+        # P0-6：repeat=3，1 拒答 + 2 合法 → 够到 done_threshold=2 仍聚合 done（不误伤）
+        def _v(level, reason):
+            return SimpleNamespace(level=level, reason=reason, dimension="factuality",
+                                   rubric_version="1.0")
+        verdicts = [_v(3, "无法评估该回答"),
+                    _v(4, "事实准确"),
+                    _v(4, "事实准确")]
+        t, _ = self._scenario(lambda **kw: verdicts.pop(0), max_retries=5, repeat=3)
+        self.assertEqual(t.status, "done")
+        self.assertEqual(t.attempts, 0)
 
 
 if __name__ == "__main__":
