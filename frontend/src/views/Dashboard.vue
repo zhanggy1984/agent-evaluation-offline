@@ -162,22 +162,28 @@
     <el-card v-if="activeAgentId" shadow="never" class="block">
       <el-tabs v-model="activePanel">
         <el-tab-pane label="性能" name="perf">
+          <el-alert
+            v-if="perfRows.length && !perfHasTTFT"
+            type="info" :closable="false" show-icon
+            title="该 agent 为同步接口（无流式首字），无 TTFT 数据，仅展示 E2E"
+            style="margin-bottom: 12px"
+          />
           <EChart v-if="perfRows.length" :option="perfOption" height="300px" />
           <el-empty v-else description="该 agent 暂无终态评测记录" />
           <el-table v-if="perfRows.length" :data="perfRows" size="small" stripe style="margin-top: 12px">
             <el-table-column prop="run_id" label="Run" width="70" />
             <el-table-column prop="version" label="版本" width="100" />
-            <el-table-column label="TTFT p50" width="110">
-              <template #default="{ row }">{{ row.ttft_p50 ?? 'N/A' }}</template>
+            <el-table-column label="TTFT p50" width="120">
+              <template #default="{ row }">{{ fmtMs(row.ttft_p50) }}</template>
             </el-table-column>
-            <el-table-column label="TTFT p95" width="110">
-              <template #default="{ row }">{{ row.ttft_p95 ?? 'N/A' }}</template>
+            <el-table-column label="TTFT p95" width="120">
+              <template #default="{ row }">{{ fmtMs(row.ttft_p95) }}</template>
             </el-table-column>
-            <el-table-column label="E2E p50" width="110">
-              <template #default="{ row }">{{ row.e2e_p50 ?? 'N/A' }}</template>
+            <el-table-column label="E2E p50" width="120">
+              <template #default="{ row }">{{ fmtMs(row.e2e_p50) }}</template>
             </el-table-column>
-            <el-table-column label="E2E p95" width="110">
-              <template #default="{ row }">{{ row.e2e_p95 ?? 'N/A' }}</template>
+            <el-table-column label="E2E p95" width="120">
+              <template #default="{ row }">{{ fmtMs(row.e2e_p95) }}</template>
             </el-table-column>
             <el-table-column label="开始时间" min-width="160">
               <template #default="{ row }">{{ fmtTime(row.started_at) }}</template>
@@ -187,14 +193,32 @@
 
         <el-tab-pane label="成本" name="cost">
           <el-alert
-            v-if="costRows.length && costRows.every((r) => r.total_cost == null)"
+            v-if="costNoPrice"
             type="warning"
             :closable="false"
             show-icon
             title="该模型未配置单价，成本为 N/A（见下方模型单价表）"
             style="margin-bottom: 12px"
           />
-          <EChart v-if="costRows.length" :option="costOption" height="300px" />
+          <EChart v-if="costRows.length" :option="costTokensOption" height="200px" />
+          <div v-if="costRows.length && costHasMoney" style="margin-top: 12px">
+            <EChart :option="costMoneyOption" height="200px" />
+          </div>
+          <div
+            v-if="costRows.length"
+            style="margin-top: 4px; display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 12px; color: #909399"
+          >
+            <span>图例：</span>
+            <span style="display: inline-flex; align-items: center">
+              <span :style="{ width: '16px', height: '2px', background: COLOR_TOKEN, display: 'inline-block', marginRight: '4px' }"></span>Token 总量
+            </span>
+            <span v-if="costHasMoney" style="display: inline-flex; align-items: center">
+              <span :style="{ width: '16px', height: '2px', background: COLOR_COST, display: 'inline-block', marginRight: '4px' }"></span>成本(元)
+            </span>
+            <span style="display: inline-flex; align-items: center">
+              <span :style="{ width: '14px', height: '12px', background: COLOR_NA_AREA, border: '1px solid #d0d0d0', display: 'inline-block', marginRight: '4px' }"></span>灰色竖条 = 该 run 无该维度数据（N/A，非 0）
+            </span>
+          </div>
           <el-empty v-else description="该 agent 暂无终态评测记录" />
           <el-table v-if="costRows.length" :data="costRows" size="small" stripe style="margin-top: 12px">
             <el-table-column prop="run_id" label="Run" width="70" />
@@ -425,27 +449,31 @@
         </span>
       </template>
       <el-table :data="runResults" v-loading="resultsLoading" size="small" stripe>
-        <!-- P2-6 行内明细：失败断言（basic，含 actual）+ judge 判定（staff 才返回） -->
+        <!-- 行内明细「维度判定」：四维统一展示。语义维度（事实性/思考链）judge 判分+理由（staff）；
+             准确率维度（完成度/工具使用）规则断言判，展示通过数/总数；失败断言明细挂末尾 -->
         <el-table-column type="expand">
           <template #default="{ row }">
             <div class="row-detail">
-              <div v-if="(row.assertion_results || []).length" class="detail-sec">
-                <div class="detail-title">断言失败</div>
-                <div v-for="(a, i) in row.assertion_results" :key="i" class="fail-dim">
-                  [{{ a.dimension || '-' }}] {{ a.op }} args={{ JSON.stringify(a.args) }} → actual={{ a.actual }}
+              <div v-if="(row.score_per_dimension || []).length" class="detail-sec">
+                <div class="detail-title">维度判定</div>
+                <div v-for="d in row.score_per_dimension" :key="d.code" class="fail-dim">
+                  <span class="dim-label">{{ DIM_LABEL[d.code] || d.code }}</span>
+                  <span v-if="d.na" class="dim-na">N/A{{ d.na_reason ? '（' + d.na_reason + '）' : '' }}</span>
+                  <template v-else>
+                    <span class="dim-score">{{ fmtScore(d.value) }}</span>
+                    <span v-if="judgeReason(row, d.code)" class="dim-reason">— {{ judgeReason(row, d.code) }}</span>
+                    <span v-else-if="d.detail && typeof d.detail.pass === 'number'" class="dim-reason">
+                      — 断言 {{ d.detail.pass }}/{{ d.detail.total }} 通过
+                    </span>
+                  </template>
+                </div>
+                <div v-for="(a, i) in row.assertion_results" :key="'a' + i" class="fail-dim assert-fail">
+                  <el-tag size="small" type="danger">{{ DIM_LABEL[a.dimension] || a.dimension }} 断言失败</el-tag>
+                  <span class="assert-op">[{{ a.op }}] args={{ JSON.stringify(a.args) }} → actual={{ a.actual }}</span>
                 </div>
               </div>
-              <div v-if="(row.judge_results || []).length" class="detail-sec">
-                <div class="detail-title">Judge 判定</div>
-                <div v-for="(j, i) in row.judge_results" :key="i" class="fail-dim">
-                  {{ DIM_LABEL[j.dimension] || j.dimension }}: {{ fmtScore(j.score) }} — {{ j.reason }}
-                </div>
-              </div>
-              <div
-                v-if="!(row.assertion_results || []).length && !(row.judge_results || []).length"
-                class="detail-sec detail-empty"
-              >
-                无失败断言 / judge 判定
+              <div v-if="!(row.score_per_dimension || []).length" class="detail-sec detail-empty">
+                无维度判定
               </div>
             </div>
           </template>
@@ -599,11 +627,15 @@
           <el-collapse-item title="Reasoning（思考链全文）" name="reasoning">
             <pre class="pre">{{ evidence.reasoning || '(空)' }}</pre>
           </el-collapse-item>
-          <el-collapse-item v-if="evidence.judge_results && evidence.judge_results.length" title="Judge 判定" name="judge">
-            <div v-for="(j, i) in evidence.judge_results" :key="i" class="judge-row">
-              <el-tag size="small">{{ DIM_LABEL[j.dimension] || j.dimension }}</el-tag>
-              <span class="judge-score">score={{ fmtScore(j.score) }}</span>
-              <div class="judge-reason">{{ j.reason }}</div>
+          <el-collapse-item v-if="evidenceDims(evidence).length" title="维度判定" name="judge">
+            <!-- 四维判定：语义维度 judge 判（score+reason）；准确率维度规则断言判（通过数/总数） -->
+            <div v-for="(d, i) in evidenceDims(evidence)" :key="i" class="judge-row">
+              <el-tag size="small">{{ DIM_LABEL[d.code] || d.code }}</el-tag>
+              <template v-if="d.kind === 'judge'">
+                <span class="judge-score">score={{ fmtScore(d.score) }}</span>
+                <div class="judge-reason">{{ d.reason }}</div>
+              </template>
+              <span v-else class="judge-assert">{{ d.reason }}</span>
             </div>
           </el-collapse-item>
           <el-collapse-item
@@ -624,7 +656,23 @@
             <pre class="pre">{{ JSON.stringify(evidence.tool_calls, null, 2) }}</pre>
           </el-collapse-item>
           <el-collapse-item v-if="evidence.usage || evidence.timing" title="Usage / Timing" name="meta">
-            <pre class="pre">{{ JSON.stringify({ usage: evidence.usage, timing: evidence.timing }, null, 2) }}</pre>
+            <!-- P2-D16：原始 JSON 改可读说明（usage/timing 各 attempt 逐条展示；ts 为毫秒时间戳→可读时间） -->
+            <div v-for="(u, i) in (evidence.usage || [])" :key="'u' + i" class="meta-block">
+              <div class="meta-title">调用 #{{ i + 1 }} · token 用量</div>
+              <div class="meta-row">输入 token：{{ u?.prompt_tokens ?? 'N/A' }}</div>
+              <div class="meta-row">输出 token：{{ u?.completion_tokens ?? 'N/A' }}</div>
+              <div class="meta-row">总 token：{{ u?.total_tokens ?? 'N/A' }}</div>
+              <div class="meta-row">应用缓存命中：{{ u?.cached ? '是' : '否' }}</div>
+              <div class="meta-row">时间：{{ u?.ts ? fmtTime(u.ts) : '—' }}</div>
+            </div>
+            <div v-for="(t, i) in (evidence.timing || [])" :key="'t' + i" class="meta-block">
+              <div class="meta-title">调用 #{{ i + 1 }} · 耗时</div>
+              <div class="meta-row">首字延迟（TTFT）：{{ fmtMs(t?.first_token_ts) }}</div>
+              <div class="meta-row">端到端（E2E）：{{ fmtMs(t?.end_ts) }}</div>
+            </div>
+            <div v-if="!(evidence.usage?.length) && !(evidence.timing?.length)" class="dim-note">
+              无 Usage / Timing 数据
+            </div>
           </el-collapse-item>
           <el-collapse-item v-if="evidence.error_type" title="错误信息" name="err">
             <pre class="pre">{{ evidence.error_type }}: {{ evidence.error_detail }}</pre>
@@ -665,6 +713,33 @@ const DIM_LABEL = {
   ttft: '首字延迟',
   e2e: '端到端延迟',
   token_cost: 'Token 成本',
+}
+// 展开行「维度判定」：语义维度 judge 理由。读 row.judge_results（staff 才有，viewer 为 null → 权限天然正确）。
+// 不能读 score_per_dimension.detail.reason——该字段未做 staff 过滤，直接展示会向 viewer 泄露 judge 证据（D3）
+const judgeReason = (row, code) => {
+  const j = (row.judge_results || []).find((x) => x.dimension === code)
+  return j ? j.reason : null
+}
+// 证据面板四维判定组装：语义维度取 judge_results（score+reason）；准确率维度从全量断言反推统计
+// （证据接口不返回 score_per_dimension，断言明细 basic 级 viewer 可见，统计同级别）
+const evidenceDims = (ev) => {
+  if (!ev) return []
+  const dims = []
+  const seen = new Set()
+  for (const j of ev.judge_results || []) {
+    dims.push({ code: j.dimension, score: j.score, reason: j.reason, kind: 'judge' })
+    seen.add(j.dimension)
+  }
+  const byDim = {}
+  for (const a of ev.assertion_results || []) {
+    (byDim[a.dimension] = byDim[a.dimension] || []).push(a)
+  }
+  for (const [dim, rows] of Object.entries(byDim)) {
+    if (seen.has(dim)) continue
+    const pass = rows.filter((r) => r.pass).length
+    dims.push({ code: dim, score: null, reason: `断言 ${pass}/${rows.length} 通过`, kind: 'assert' })
+  }
+  return dims
 }
 const RUN_STATUS = {
   pending: { label: '等待中', type: 'info' },
@@ -727,6 +802,10 @@ const costRows = ref([])
 const modelPrices = ref([])
 const coverage = ref(null)
 const baseline = ref({ run: null, interfaces: [], is_gold_count: 0 })
+// P2-D16 展示态：同步接口（contract-check）无 TTFT 全 null，需隐藏系列+说明；成本拆图需判空
+const perfHasTTFT = computed(() => perfRows.value.some((r) => r.ttft_p50 != null))
+const costNoPrice = computed(() => costRows.value.length && costRows.value.every((r) => r.total_cost == null))
+const costHasMoney = computed(() => costRows.value.some((r) => r.total_cost != null))
 
 let pollTimer = null
 let pollCount = 0
@@ -751,6 +830,8 @@ const STAGE_LABEL = { error: '失败', judging: '判分中', judge_failed: '判�
 const stageLabel = (s) => STAGE_LABEL[s] || s
 // 分数统一兜底：保留 2 位小数并去尾零（避免 100.0 / 2.092 这类长尾展示，走查 #3）
 const fmtScore = (v) => (v == null ? 'N/A' : Number(Number(v).toFixed(2)))
+// P2-D16 性能时间：后端存秒，前端统一转毫秒显示（TTFT/E2E 行业惯例 ms）
+const fmtMs = (v) => (v == null ? 'N/A' : `${Math.round(v * 1000)} ms`)
 // P2-C4：tooltip 走 ECharts HTML 渲染，任何动态串进 HTML 前必须转义（存量恶意 version 兜底）
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 
@@ -764,8 +845,8 @@ const trendOption = computed(() => ({
         `#${r.run_id} ${esc(r.version)}（${esc(runStatus(r.status).label)}）`,
         `总分：${fmtScore(r.agent_score)}`,
         `通过率：${fmtRate(r.pass_rate)}（${r.pass_case}/${r.total_case}）`,
-        `TTFT p50：${fmtScore(r.ttft_p50)}`,
-        `E2E p50：${fmtScore(r.e2e_p50)}`,
+        `TTFT p50：${fmtMs(r.ttft_p50)}`,
+        `E2E p50：${fmtMs(r.e2e_p50)}`,
         `${fmtTime(r.started_at)}`,
       ].join('<br/>')
     },
@@ -773,7 +854,11 @@ const trendOption = computed(() => ({
   grid: { left: 48, right: 24, top: 24, bottom: 32 },
   xAxis: {
     type: 'category',
+    // 横轴带版本（如 #3027 / 0.2.0）展示版本演进，与成本图的纯 run_id 不同是有意的：
+    // 趋势图无 markArea 定位需求，标签带版本更有信息量；成本图 markArea 需精确 category 匹配才用纯 run_id
     data: trendData.value.map((r) => `#${r.run_id}\n${r.version}`),
+    // 标签放不下时自动隐藏中间部分（ECharts hideOverlap），run 多不互相遮挡
+    axisLabel: { interval: 'auto', hideOverlap: true },
   },
   yAxis: { type: 'value', min: 0, max: 100, name: '总分' },
   series: [
@@ -789,84 +874,219 @@ const trendOption = computed(() => ({
 
 const headLabel = (h) => `#${h.run_id} ${h.version}`
 
+// P2-D16：版本对比改雷达图（双版本多边形叠加），下方表格保留精确 Δ
 const compareOption = computed(() => {
   if (!compareData.value) return {}
   const dims = compareData.value.dims
+  const la = headLabel(compareData.value.a)
+  const lb = headLabel(compareData.value.b)
+  // 雷达 data 需数值：mean 为 null（数据不足）以 0 占位，tooltip 回显真实值避免误导
+  const num = (v) => (v == null ? 0 : Number(v))
+  const dimName = (i) => DIM_LABEL[dims[i].code] || dims[i].code
+  const fmtVal = (i, key) => (dims[i][key] == null ? 'N/A' : fmtScore(dims[i][key]))
   return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: [headLabel(compareData.value.a), headLabel(compareData.value.b)] },
-    grid: { left: 48, right: 24, top: 36, bottom: 28 },
-    xAxis: {
-      type: 'category',
-      data: dims.map((d) => DIM_LABEL[d.code] || d.code),
+    tooltip: {
+      trigger: 'item',
+      formatter: (params) => {
+        const lines = [`<b>${esc(params.name)}</b>`]
+        dims.forEach((d, i) => {
+          lines.push(`${dimName(i)}：A=${fmtVal(i, 'mean_a')}　B=${fmtVal(i, 'mean_b')}`)
+        })
+        return lines.join('<br/>')
+      },
     },
-    yAxis: { type: 'value', min: 0, max: 100, name: '维度均分' },
+    legend: { data: [la, lb], bottom: 0 },
+    radar: {
+      indicator: dims.map((d) => ({ name: DIM_LABEL[d.code] || d.code, max: 100 })),
+      radius: '65%',
+      splitArea: { areaStyle: { color: ['rgba(84,112,198,0.03)', 'rgba(84,112,198,0.06)'] } },
+      axisName: { color: '#606266' },
+    },
     series: [
       {
-        name: headLabel(compareData.value.a),
-        type: 'bar',
-        data: dims.map((d) => d.mean_a),
-        itemStyle: { color: '#5470c6' },
-      },
-      {
-        name: headLabel(compareData.value.b),
-        type: 'bar',
-        data: dims.map((d) => d.mean_b),
-        itemStyle: { color: '#91cc75' },
+        type: 'radar',
+        symbolSize: 5,
+        data: [
+          {
+            name: la,
+            value: dims.map((d) => num(d.mean_a)),
+            lineStyle: { color: '#5470c6', width: 2 },
+            itemStyle: { color: '#5470c6' },
+            areaStyle: { color: 'rgba(84,112,198,0.15)' },
+          },
+          {
+            name: lb,
+            value: dims.map((d) => num(d.mean_b)),
+            lineStyle: { color: '#91cc75', width: 2 },
+            itemStyle: { color: '#91cc75' },
+            areaStyle: { color: 'rgba(145,204,117,0.15)' },
+          },
+        ],
       },
     ],
   }
 })
 
+// P2-D16：性能系列动态生成——全 null（同步接口无 TTFT）的系列不渲染也不进 legend；
+// 后端存秒 ×1000 转 ms 显示；TTFT 用虚线、E2E 用实线区分（首字≈终答时两线易重叠）
+const perfSeries = computed(() => {
+  const defs = [
+    { name: 'TTFT p50', key: 'ttft_p50', dashed: true },
+    { name: 'TTFT p95', key: 'ttft_p95', dashed: true },
+    { name: 'E2E p50', key: 'e2e_p50', dashed: false },
+    { name: 'E2E p95', key: 'e2e_p95', dashed: false },
+  ]
+  const has = (key) => perfRows.value.some((r) => r[key] != null)
+  return defs
+    .filter((d) => has(d.key))
+    .map((d) => ({
+      name: d.name,
+      type: 'line',
+      smooth: true,
+      symbolSize: 8,
+      data: perfRows.value.map((r) => (r[d.key] == null ? null : Math.round(r[d.key] * 1000))),
+      lineStyle: { width: 2, type: d.dashed ? 'dashed' : 'solid' },
+    }))
+})
+
 const perfOption = computed(() => {
-  const names = ['TTFT p50', 'TTFT p95', 'E2E p50', 'E2E p95']
-  const keys = ['ttft_p50', 'ttft_p95', 'e2e_p50', 'e2e_p95']
+  const series = perfSeries.value
   return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: names },
-    grid: { left: 48, right: 24, top: 36, bottom: 32 },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        const r = perfRows.value[params[0].dataIndex]
+        const lines = [`<b>#${r.run_id} ${esc(r.version)}</b>`]
+        for (const p of params) {
+          lines.push(`${p.marker}${p.seriesName}：${p.value == null ? 'N/A' : `${p.value} ms`}`)
+        }
+        lines.push(fmtTime(r.started_at))
+        return lines.join('<br/>')
+      },
+    },
+    legend: { data: series.map((s) => s.name) },
+    grid: { left: 56, right: 24, top: 36, bottom: 32 },
     xAxis: {
       type: 'category',
       data: perfRows.value.map((r) => `#${r.run_id}\n${r.version}`),
     },
     yAxis: { type: 'value', name: 'ms' },
-    series: names.map((name, i) => ({
-      name,
-      type: 'line',
-      smooth: true,
-      symbolSize: 8,
-      data: perfRows.value.map((r) => r[keys[i]]),
-      lineStyle: { width: 2 },
-    })),
+    series,
   }
 })
 
-const costOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  legend: { data: ['Token 总量', '成本(元)'] },
-  grid: { left: 56, right: 56, top: 36, bottom: 32 },
+// P2-D16：成本拆两图——Token 总量与成本量级差 5 个数量级，双轴混排把成本压成贴底线；
+// 成本 tab 系列色：series itemStyle 与图例块共用，避免多处硬编码色值（换主题只改这里）
+const COLOR_TOKEN = '#5470c6'
+const COLOR_COST = '#67c23a'
+const COLOR_NA_AREA = 'rgba(150,150,150,0.12)'
+
+// 成本图横轴 category 值：仅 run_id（自增主键，纯数字，无拼接歧义，排序变化不标错列）。
+// 版本只在 tooltip / 表格展示，不拼进横轴——标签更短，run 多时也能放下。
+// xAxis.data 与 markArea 定位同源共用此函数，避免两处表达式漂移
+const costCat = (r) => `#${r.run_id}`
+
+// 各自独立单轴，成本波动才可读
+const costTokensOption = computed(() => ({
+  tooltip: {
+    trigger: 'axis',
+    formatter: (params) => {
+      const r = costRows.value[params[0].dataIndex]
+      return [
+        `<b>#${r.run_id} ${esc(r.version)}</b>`,
+        `Token 总量：${r.total_tokens ?? 'N/A'}`,
+        fmtTime(r.started_at),
+      ].join('<br/>')
+    },
+  },
+  grid: { left: 64, right: 24, top: 28, bottom: 24 },
   xAxis: {
     type: 'category',
-    data: costRows.value.map((r) => `#${r.run_id}\n${r.version}`),
+    data: costRows.value.map(costCat),
+    // 标签放不下时自动隐藏中间部分（ECharts hideOverlap），run 多不互相遮挡；完整 run_id 靠 tooltip 悬浮读取
+    axisLabel: { interval: 'auto', hideOverlap: true },
   },
-  yAxis: [
-    { type: 'value', name: 'tokens' },
-    { type: 'value', name: '元' },
-  ],
+  yAxis: { type: 'value', name: 'tokens' },
   series: [
     {
       name: 'Token 总量',
-      type: 'bar',
+      type: 'line',
       data: costRows.value.map((r) => r.total_tokens),
-      itemStyle: { color: '#5470c6' },
+      smooth: true,
+      // 无成本/无 token 的 run（usage 缺失或模型未配单价）断开折线而非跨 null 直连，
+      // 避免误读成「那段时间数据连续」（tooltip 已显示 N/A）
+      connectNulls: false,
+      symbol: 'circle',
+      symbolSize: 6,
+      itemStyle: { color: COLOR_TOKEN },
+      // 无 token 的 run 处标灰 + 标 #run_id N/A，与断开的折线呼应，避免误读成连续。
+      // 定位用 xAxis 的 category 值（与 xAxis.data 同源共 costCat），排序变化也不标错列。
+      // label 直接带 run_id：即便横轴标签因多 run 被 hideOverlap 隐藏，灰条处也能直读是哪个 run
+      markArea: {
+        silent: true,
+        itemStyle: { color: COLOR_NA_AREA },
+        label: {
+          show: true,
+          position: 'insideTop',
+          color: '#999',
+          fontSize: 10,
+          formatter: (p) => `${p.value[0]} N/A`,
+        },
+        data: costRows.value.flatMap((r) =>
+          r.total_tokens == null ? [[{ xAxis: costCat(r) }, { xAxis: costCat(r) }]] : []),
+      },
     },
+  ],
+}))
+
+const costMoneyOption = computed(() => ({
+  tooltip: {
+    trigger: 'axis',
+    formatter: (params) => {
+      const r = costRows.value[params[0].dataIndex]
+      return [
+        `<b>#${r.run_id} ${esc(r.version)}</b>`,
+        `成本：${r.total_cost == null ? 'N/A' : `${fmtCost(r.total_cost)} 元`}`,
+        fmtTime(r.started_at),
+      ].join('<br/>')
+    },
+  },
+  grid: { left: 64, right: 24, top: 28, bottom: 24 },
+  xAxis: {
+    type: 'category',
+    data: costRows.value.map(costCat),
+    // 标签放不下时自动隐藏中间部分（ECharts hideOverlap），run 多不互相遮挡；完整 run_id 靠 tooltip 悬浮读取
+    axisLabel: { interval: 'auto', hideOverlap: true },
+  },
+  yAxis: { type: 'value', name: '元' },
+  series: [
     {
       name: '成本(元)',
       type: 'line',
-      yAxisIndex: 1,
+      data: costRows.value.map((r) => r.total_cost),
       smooth: true,
-      data: costRows.value.map((r) => r.total_cost), // 无单价时 null → 折线断开
-      itemStyle: { color: '#91cc75' },
+      // 无成本/无 token 的 run（usage 缺失或模型未配单价）断开折线而非跨 null 直连，
+      // 避免误读成「那段时间数据连续」（tooltip 已显示 N/A）
+      connectNulls: false,
+      symbol: 'circle',
+      symbolSize: 6,
+      itemStyle: { color: COLOR_COST },
+      // 无成本（模型未配单价或 usage 缺失）的 run 处标灰 + 标 #run_id N/A，与断开的折线呼应。
+      // 定位用 xAxis 的 category 值（与 xAxis.data 同源共 costCat），排序变化也不标错列。
+      // label 直接带 run_id：即便横轴标签因多 run 被 hideOverlap 隐藏，灰条处也能直读是哪个 run
+      markArea: {
+        silent: true,
+        itemStyle: { color: COLOR_NA_AREA },
+        label: {
+          show: true,
+          position: 'insideTop',
+          color: '#999',
+          fontSize: 10,
+          formatter: (p) => `${p.value[0]} N/A`,
+        },
+        data: costRows.value.flatMap((r) =>
+          r.total_cost == null ? [[{ xAxis: costCat(r) }, { xAxis: costCat(r) }]] : []),
+      },
     },
   ],
 }))
@@ -891,7 +1111,8 @@ const pct = (r) => (r == null ? 0 : Math.round(r * 100))
 async function refreshAll() {
   loading.value = true
   try {
-    await Promise.all([loadAgents(), loadGate(), loadRuns()])
+    // 评测记录跟随当前选中 agent（联动一致）；未选则全量
+    await Promise.all([loadAgents(), loadGate(), loadRuns(activeAgentId.value || undefined)])
     if (activeAgentId.value) {
       await Promise.all([loadTrend(activeAgentId.value), loadPanels(activeAgentId.value)])
     }
@@ -909,15 +1130,17 @@ async function loadGate() {
   gateList.value = await getGate()
 }
 
-async function loadRuns() {
+async function loadRuns(agentId) {
   runsLoading.value = true
   try {
-    // 全量拉取（后端 limit 上限 200）→ 前端本地过滤 + 本地分页，避免 offset 分页与本地过滤冲突
-    runList.value = await listRuns({ limit: 200 })
+    // 全量拉取（后端 limit 上限 200）→ 前端本地过滤 + 本地分页，避免 offset 分页与本地过滤冲突。
+    // agentId 传参：门禁墙/下拉选 agent 后评测记录联动只显示该 agent 的 run（后端已支持 agent_id）
+    const params = agentId ? { limit: 200, agent_id: agentId } : { limit: 200 }
+    runList.value = await listRuns(params)
     runPage.value = 1
     // 截断探测：取第 201 条判断是否还有更早记录（复用现有 offset 参数，零后端改动）；失败静默不阻断
     try {
-      const extra = await listRuns({ limit: 1, offset: 200 })
+      const extra = await listRuns({ limit: 1, offset: 200, ...(agentId ? { agent_id: agentId } : {}) })
       hasMoreRuns.value = extra.length > 0
     } catch (e) {
       hasMoreRuns.value = false
@@ -931,7 +1154,7 @@ async function loadRuns() {
 const runSearch = ref('')
 const runStatusFilter = ref('')
 const runPage = ref(1)
-const PAGE_SIZE = 20
+const PAGE_SIZE = 5
 const filteredRuns = computed(() =>
   filterRuns(runList.value, {
     statusFilter: runStatusFilter.value,
@@ -987,6 +1210,7 @@ function selectAgent(g) {
   resetDrill()
   loadTrend(g.agent_id)
   loadPanels(g.agent_id)
+  loadRuns(g.agent_id)
 }
 
 function onAgentChange() {
@@ -994,8 +1218,10 @@ function onAgentChange() {
   if (activeAgentId.value) {
     loadTrend(activeAgentId.value)
     loadPanels(activeAgentId.value)
+    loadRuns(activeAgentId.value)
   } else {
     loadPanels(null)
+    loadRuns()
   }
 }
 
@@ -1339,6 +1565,22 @@ onBeforeUnmount(() => {
   line-height: 22px;
   padding-left: 8px;
 }
+/* 维度判定：分数高亮 + 判定说明 + 失败断言缩进 */
+.dim-score {
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+.dim-reason {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.assert-fail {
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 /* P2-6 行内明细（expand）+ top 扣分原因 */
 .row-detail {
   padding: 8px 12px;
@@ -1406,6 +1648,11 @@ onBeforeUnmount(() => {
   color: var(--el-color-primary);
   font-weight: 600;
 }
+.judge-assert {
+  margin-left: 8px;
+  color: var(--el-color-success);
+  font-weight: 600;
+}
 .judge-reason {
   font-size: 13px;
   margin-top: 4px;
@@ -1417,6 +1664,20 @@ onBeforeUnmount(() => {
 .assert-op {
   font-weight: 600;
   margin-right: 8px;
+}
+/* P2-D16：证据 Usage/Timing 可读展示 */
+.meta-block {
+  margin-bottom: 10px;
+}
+.meta-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 4px;
+}
+.meta-row {
+  font-size: 13px;
+  line-height: 22px;
 }
 /* 三面板（性能/成本/覆盖合并） */
 .prices-head {

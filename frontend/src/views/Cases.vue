@@ -288,7 +288,13 @@ const loadSuites = async () => {
   loadingSuites.value = true
   try {
     suites.value = await listSuites(curAgentId.value)
-    if (suites.value.length) selectSuite(suites.value[0].id)
+    if (suites.value.length) {
+      // P2-D16：优先选中已指定的 suite（标注待办【去标注】定位），否则默认第一个
+      const target = curSuiteId.value && suites.value.some((s) => s.id === curSuiteId.value)
+        ? curSuiteId.value
+        : suites.value[0].id
+      selectSuite(target)
+    }
   } catch (e) {
     // 拦截器已弹
   } finally {
@@ -591,6 +597,8 @@ const loadTodo = async () => {
 const annotateFromTodo = async (row) => {
   activeTab.value = 'manage'
   curAgentId.value = row.agent_id
+  // P2-D16：待办 case 所在 suite 不一定是第一个——先占位 curSuiteId，loadSuites 会选中该 suite
+  curSuiteId.value = row.suite_id
   await loadSuites()
   const match = cases.value.find((c) => c.id === row.case_id)
   if (match) {
