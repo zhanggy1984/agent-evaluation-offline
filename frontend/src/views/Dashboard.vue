@@ -1228,8 +1228,9 @@ async function loadPanels(agentId) {
     getCoverage(agentId),
     getBaseline(agentId),
   ])
-  perfRows.value = perf
-  costRows.value = cost
+  // 展示最近 10 条终态 run（perf/cost 端点返回全量，低频页面量级小，前端 slice 隔离显示层）
+  perfRows.value = perf.slice(-10)
+  costRows.value = cost.slice(-10)
   modelPrices.value = prices
   coverage.value = cov
   baseline.value = base
