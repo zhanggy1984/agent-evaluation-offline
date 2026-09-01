@@ -41,12 +41,20 @@ def build_networks(cidrs: Iterable[str]) -> list:
     return nets
 
 
+# P1-2：连接池显式配置。agent 出站 client 每 run 独立（orchestrator._run 建一次复用），
+# 并发连接数 ≈ run 内 inflight（默认 global_max_inflight=16），64 留 4x 余量防流式请求互相
+# 挤占；judge 出站 client 每 worker 重建、并发更低，同池足够。池耗尽（PoolTimeout）不再
+# 依赖 httpx 默认隐式值，executor 据此分类为 pool_error（与上游慢 timeout 区分）。
+DEFAULT_OUTBOUND_LIMITS = httpx.Limits(max_connections=64, max_keepalive_connections=16)
+
+
 class AllowlistAsyncClient(httpx.AsyncClient):
     """解析→校验→IP 直连+透传 Host 的出站客户端。follow_redirects 固定 False。"""
 
     def __init__(self, allow_hosts: Iterable[str], allow_cidrs: Iterable[str],
                  deny_cidrs: Iterable[str] = (), timeout: float = 60.0, **kwargs):
         kwargs.setdefault("follow_redirects", False)
+        kwargs.setdefault("limits", DEFAULT_OUTBOUND_LIMITS)
         super().__init__(timeout=timeout, **kwargs)
         self._allow_hosts = {h.strip() for h in allow_hosts if h.strip()}
         self._networks = build_networks(allow_cidrs)

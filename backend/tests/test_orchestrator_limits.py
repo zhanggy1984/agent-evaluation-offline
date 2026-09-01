@@ -119,7 +119,7 @@ class _FakeClient:
 def _patch_externals(monkeypatch, fake_db, orch):
     """mock start_run 的外部依赖（DB/HTTP/熔断/执行细节），保留限流接线真实。"""
     monkeypatch.setattr("app.runner.orchestrator.SessionLocal", lambda: _FakeSession(fake_db))
-    monkeypatch.setattr("app.runner.orchestrator.build_agent_client", lambda: _FakeClient())
+    monkeypatch.setattr("app.runner.orchestrator.build_agent_client", lambda **kw: _FakeClient())
     monkeypatch.setattr(orch, "_decrypt_auth", lambda agent: {})
     monkeypatch.setattr(orch, "_probe_before_run", _no_probe)
     monkeypatch.setattr(orch, "_save_result", _no_save)

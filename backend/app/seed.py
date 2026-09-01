@@ -394,6 +394,13 @@ DEFAULT_SYSTEM_CONFIG = {
                            "meta": {"type": "str", "max_len": 256}},
     "judge_llm.model_name": {"value": "", "scope": "global", "is_hot": True,
                              "meta": {"type": "str", "max_len": 128}},
+    # judge 判分缓存（进程内 LRU，跨 run 复用历史多数决判分，省重复 LLM 调用）。
+    # is_hot：运营发现模型行为漂移时热关，强制重新判分。存量库缺行由 worker._load_global_cfg
+    # 默认值兜底（enabled=True / ttl 86400），无需手动补 seed。
+    "judge_cache_enabled": {"value": True, "scope": "global", "is_hot": True,
+                            "meta": {"type": "bool"}},
+    "judge_cache_ttl_seconds": {"value": 86400, "scope": "global", "is_hot": True,
+                                "meta": {"type": "int", "min": 60, "max": 604800}},
     # P0 补齐：judge 出站域名白名单（SSRF §15.3）。缺失时 worker 读空 → _validate_allowlist
     # 拒绝所有 host（语义维度永远判不出分）且配置中心因"未知 key"无法补救，必须 seed 默认值。
     # 预设常用 OpenAI 兼容厂商（对齐 solution_detail §七配置表），按实际选用在配置中心增删。

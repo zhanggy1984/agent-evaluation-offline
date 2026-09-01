@@ -29,7 +29,7 @@ from app.core.lock import agent_mutex
 from app.core.probe import probe_interface
 from app.core.retry import retry_with_backoff
 from app.core.security import fernet_decrypt
-from app.models import Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, TestSuite
+from app.models import Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, SystemConfig, TestSuite
 from app.runner.case_loader import _load_run_cases
 from app.runner.executor import RETRYABLE_ERRORS, CaseOutcome, execute_case
 from app.runner.scorer import _enabled_semantic_dims, score_run
@@ -224,7 +224,13 @@ class RunOrchestrator:
 
         # 执行（并发由 limiter 控制，不额外起信号量）
         secret = self._decrypt_auth(agent)
-        client = build_agent_client()
+        # P0-3：运行期透传注册期自定义 CIDR 白名单（base_url_allowlist）。
+        # scaffold 探测已传（scaffold.py:63-65），运行路径曾漏传 → 自定义 CIDR 内
+        # agent 执行时被 _resolve 拒绝（SSRF: 不在出站白名单）导致整 run 失败。
+        async with SessionLocal() as _cfg_db:
+            _cfg = await _cfg_db.get(SystemConfig, "base_url_allowlist")
+        allowlist_cidrs = _cfg.value if _cfg and isinstance(_cfg.value, list) else []
+        client = build_agent_client(extra_cidrs=allowlist_cidrs)
         logger.info("run %s 开始执行 %d 个 case", run_id, len(cases))
         try:
             async with client:

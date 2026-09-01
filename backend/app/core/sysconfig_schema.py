@@ -1,8 +1,8 @@
 """system_config 热改校验（P2-C2）。
 
 配置契约 meta 定义在 seed.DEFAULT_SYSTEM_CONFIG（单一真相源），本模块只做校验逻辑。
-规则：type（int/number/str/list）必填；int/number 配 min/max，str 配 max_len，
-list 配 item_type/max_items；nullable=True 允许 None（如 run_timeout=估算）。
+规则：type（int/number/str/bool/list）必填；int/number 配 min/max，str 配 max_len，
+bool 无额外参数，list 配 item_type/max_items；nullable=True 允许 None（如 run_timeout=估算）。
 meta 缺失 → 拒绝（强制新 key 带契约，防「可热改但无校验」的配置项漏网）。
 """
 from __future__ import annotations
@@ -32,6 +32,10 @@ def validate_sysconfig_value(key: str, value: Any, meta: dict | None) -> str | N
         max_len = meta.get("max_len")
         if max_len is not None and len(value) > max_len:
             return f"{key} 长度 {len(value)} 超过上限 {max_len}"
+        return None
+    if vtype == "bool":
+        if not isinstance(value, bool):
+            return f"{key} 应为布尔值，收到 {type(value).__name__}"
         return None
     if vtype == "list":
         if not isinstance(value, list):

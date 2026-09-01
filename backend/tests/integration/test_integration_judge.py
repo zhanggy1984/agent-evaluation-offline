@@ -287,6 +287,59 @@ async def test_process_one_unjudgeable(db, env):
     assert called == []
 
 
+# ---------------- judge 判分缓存（跨 run 复用，纯优化） ----------------
+@pytest.fixture(autouse=True)
+def _reset_judge_cache():
+    """模块级单例防污染：每用例前后强制关缓存 + 清空；缓存用例自行显式开启。
+
+    单测已覆盖 get/set/LRU/TTL/key 细节；这里只验证 _process_one 层面的「跨 run
+    复用」——同 (case, answer) 第二个 run 全命中历史缓存，0 次 LLM 调用。
+    """
+    worker.verdict_cache.configure(enabled=False, ttl=86400.0, max_entries=10000)
+    worker.verdict_cache.clear()
+    yield
+    worker.verdict_cache.configure(enabled=False, ttl=86400.0, max_entries=10000)
+    worker.verdict_cache.clear()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_process_one_cross_run_reuses_cache(db, env):
+    """跨 run 复用：同一 (case, answer) 的第二个 run 全命中历史缓存，judge 调用 0 次。
+
+    缓存值 = 多数决聚合值（写一次，非末位样本）→ 两次 result 逐字节一致；
+    miss(3) → hit(3) 埋点可见；单 run 内 repeat 仍保持独立采样（首个 run 判 3 次）。
+    """
+    worker.verdict_cache.configure(enabled=True, ttl=86400.0, max_entries=10000)
+    run, _, ch = await _seed_judge_env(env, db)
+    v4 = JudgeVerdict(dimension="factuality", level=4, score=80.0, reason="准确", rubric_version="1.2")
+    calls = {"n": 0}
+
+    async def judge(**kwargs):
+        calls["n"] += 1
+        return v4
+
+    # 真实 worker 用 JudgeClient（有 .model/.base_url）；fake 须补齐——key 绑定 judge 模型/endpoint
+    client = types.SimpleNamespace(judge=judge, model="m", base_url="http://fake-judge")
+    cfg = {"judge_max_retries": 2, "judge_repeat": 3}
+
+    # 第一个 run：3 次 miss → 写多数决值，task done
+    await worker._process_one(await _detached_task(run.id), cfg, ch["iface"].id, client)
+    fresh = await _load_task(db, run.id)
+    assert fresh.status == "done"
+    assert calls["n"] == 3
+    assert worker.verdict_cache.stats() == (0, 3)
+
+    # 第二个 run：同 case 快照 + 同 answer → key 相同 → 3 次全命中 → judge 0 次调用
+    run2, _, ch2 = await _seed_judge_env(env, db)
+    await worker._process_one(await _detached_task(run2.id), cfg, ch2["iface"].id, client)
+    fresh2 = await _load_task(db, run2.id)
+    assert fresh2.status == "done"
+    assert calls["n"] == 3                        # 未再产生 LLM 调用
+    assert fresh2.result["level"] == 4
+    assert fresh2.result["reason"] == "准确"
+    assert worker.verdict_cache.stats() == (3, 3)  # hit=3 miss=3
+
+
 # ---------------- _run_judge_done 收尾判定 ----------------
 @pytest.mark.asyncio(loop_scope="session")
 async def test_run_judge_done(db, env):

@@ -11,7 +11,8 @@ from dataclasses import dataclass, field, replace
 
 import httpx
 
-from app.adapters.base import AgentAdapter, request_kwargs, send_request
+from app.adapters.base import (MAX_ERROR_BODY, MAX_SSE_BODY, AdapterHTTPError,
+                               AgentAdapter, read_body_capped, request_kwargs, send_request)
 from app.core.assembler import ResultAssembler
 from app.core.sse_parser import SSEParseError
 
@@ -21,10 +22,12 @@ logger = logging.getLogger(__name__)
 ERROR_NO_DONE = "no_done"          # SSE 流未收到 done
 ERROR_NO_USAGE = "no_usage"        # 未收到 usage（契约违反）
 ERROR_TIMEOUT = "timeout"          # 单用例超时
+ERROR_POOL_TIMEOUT = "pool_error"  # 本地连接池耗尽（P1-2：PoolTimeout，与上游慢区分）
 ERROR_HTTP = "http_error"          # 非 2xx（3xx/5xx，可重试技术失败）
 ERROR_HTTP_CLIENT = "http_client_error"  # HTTP 4xx 业务错（重试无益，不重试不熔断）
 ERROR_CONNECT = "connect_error"    # 建连/网络错误
 ERROR_SSE_PARSE = "sse_parse_error"
+ERROR_BODY_TOO_LARGE = "body_too_large"  # 响应体超上限（P1-1：SSE 累计 >8MB），疑似 agent 异常输出
 ERROR_CONTRACT = "contract_error"  # 其他契约/解析异常
 
 # 可重试的技术失败（指数退避重试适用）。B2：HTTP 4xx 业务错（ERROR_HTTP_CLIENT）不在
@@ -36,6 +39,12 @@ RETRYABLE_ERRORS = {ERROR_TIMEOUT, ERROR_CONNECT, ERROR_SSE_PARSE, ERROR_HTTP, E
 
 # 7.5c SSE 断流续推上限（防无限续推；续推失败退化为 no_done → orchestrator 重试）
 _MAX_SSE_RESUME = 1
+
+# P1-4：发送+解析段 wall-clock deadline 宽限（case_timeout 之上）与 SSE 相邻 chunk
+# 最大空闲间隔。都不复开配置：60s 宽限吸收解析/调度抖动；90s 空闲远超正常 agent
+# 流式节奏（防"连接假活"滴水式慢流拖到 run 级 hard_deadline）。测试可 monkeypatch。
+_WALLCLOCK_GRACE_S = 60
+_SSE_IDLE_TIMEOUT = 90
 
 
 @dataclass
@@ -64,7 +73,30 @@ async def execute_case(
     """执行单个用例。outcome.ok 为 True 时 unified/timing 有效。"""
     try:
         await adapter.prepare(case, client)
-    except Exception as exc:  # 前置失败（登录/建 session/上传）：配置/凭证错误，不熔断
+    except AdapterHTTPError as exc:
+        # P0-2：prepare HTTP 错误按状态码分流——4xx（429 除外）是凭证/配置错归 contract 不重试；
+        # 5xx/429 临时服务故障归 ERROR_HTTP 可重试（orchestrator 按 RETRYABLE_ERRORS 重试 + 熔断累计）。
+        if 400 <= exc.status_code < 500 and exc.status_code != 429:
+            logger.warning("prepare HTTP %s case=%s: %s", exc.status_code,
+                           getattr(case, "id", None), exc)
+            return _fail(ERROR_CONTRACT, f"prepare: {exc}")
+        logger.warning("prepare 临时失败 HTTP %s case=%s: %s", exc.status_code,
+                       getattr(case, "id", None), exc)
+        return _fail(ERROR_HTTP, f"prepare: {exc}")
+    except httpx.PoolTimeout as exc:
+        # P1-2：本地连接池耗尽（并发超 limits 上限）与上游慢区分——平台自身容量问题，
+        # 重试无益（池仍饱和）且会放大负载 → pool_error 非可重试、不累计熔断
+        logger.warning("prepare 连接池耗尽 case=%s: %s", getattr(case, "id", None), exc)
+        return _fail(ERROR_POOL_TIMEOUT, f"prepare: {exc}")
+    except httpx.TimeoutException as exc:
+        # P0-2：prepare 超时 → 可重试（ERROR_TIMEOUT），不再误判 agent contract bug
+        logger.warning("prepare 超时 case=%s: %s", getattr(case, "id", None), exc)
+        return _fail(ERROR_TIMEOUT, f"prepare: {exc}")
+    except httpx.RequestError as exc:
+        # P0-2：prepare 建连/网络错 → 可重试（ERROR_CONNECT）
+        logger.warning("prepare 网络错 case=%s: %s", getattr(case, "id", None), exc)
+        return _fail(ERROR_CONNECT, f"prepare: {exc}")
+    except Exception as exc:  # 前置失败（模板/提取等契约错）：配置/凭证错误，不熔断
         logger.warning("prepare 失败 case=%s: %s", getattr(case, "id", None), exc)
         return _fail(ERROR_CONTRACT, f"prepare: {exc}")
 
@@ -75,49 +107,18 @@ async def execute_case(
         return _fail(ERROR_CONTRACT, f"build_request: {exc}")
 
     start = time.perf_counter()
-    assembler = ResultAssembler()
-    status_code: int | None = None
-    resume_tries = 0
     try:
-        if adapter.contract_type == "sse":
-            while True:
-                spec_for_send = spec
-                if resume_tries > 0 and getattr(adapter, "last_event_id", None):
-                    # 7.5c 续推：带 Last-Event-ID 头从断点续传（标准契约，agent 侧按需适配）
-                    spec_for_send = replace(
-                        spec, headers={**spec.headers, "Last-Event-ID": adapter.last_event_id})
-                async with client.stream(
-                    spec_for_send.method, spec_for_send.url,
-                    **request_kwargs(spec_for_send, timeout_s),
-                ) as resp:
-                    status_code = resp.status_code
-                    if status_code != 200:
-                        body = (await resp.aread()).decode("utf-8", errors="replace")[:200]
-                        err = ERROR_HTTP_CLIENT if 400 <= status_code < 500 else ERROR_HTTP
-                        return _fail(err, f"HTTP {status_code}: {body}")
-                    async for chunk in resp.aiter_bytes():
-                        elapsed = time.perf_counter() - start
-                        for ev in adapter.parse_stream_chunk(chunk):
-                            assembler.on_event(ev, elapsed)
-                # 流自然结束未收 done：支持续推且有断点 → 重发续传（上限内）；否则退出走契约校验
-                if (assembler.done_elapsed is None and resume_tries < _MAX_SSE_RESUME
-                        and getattr(adapter, "supports_resume", False)
-                        and getattr(adapter, "last_event_id", None)):
-                    resume_tries += 1
-                    logger.info("SSE 断流，续推 last_event_id=%s", adapter.last_event_id)
-                    continue
-                break
-        else:
-            resp = await send_request(client, spec, timeout=timeout_s)
-            status_code = resp.status_code
-            if status_code != 200:
-                err = ERROR_HTTP_CLIENT if 400 <= status_code < 500 else ERROR_HTTP
-                return _fail(err, f"HTTP {status_code}: {resp.text[:200]}")
-            try:
-                unified = adapter.parse_sync(resp.json())
-            except Exception as exc:
-                return _fail(ERROR_CONTRACT, f"parse_sync: {exc}")
-            assembler.ingest_sync(unified, time.perf_counter() - start)
+        # P1-4：发送+解析段加 wall-clock deadline（case_timeout + 宽限），到期抛
+        # TimeoutError 落入下方 except asyncio.TimeoutError → ERROR_TIMEOUT。原实现
+        # 外层无总超时，SSE 持续滴流时逐 chunk 读超时永不触发，单 case 只能靠 run 级
+        # hard_deadline（默认 7200s）兜底；现在墙钟封顶 case_timeout + 60s。
+        async with asyncio.timeout(timeout_s + _WALLCLOCK_GRACE_S):
+            outcome = await _dispatch(adapter, spec, client, timeout_s, start)
+        return outcome
+    except httpx.PoolTimeout as exc:
+        # P1-2：必须先于 httpx.TimeoutException（PoolTimeout 是其子类）——本地池耗尽
+        # 归 pool_error 而非误标上游慢 timeout；非可重试（平台容量问题，重试放大负载）
+        return _fail(ERROR_POOL_TIMEOUT, f"连接池耗尽: {exc}")
     except asyncio.TimeoutError:
         return _fail(ERROR_TIMEOUT, f"单用例超时（{timeout_s}s）")
     except httpx.TimeoutException:
@@ -129,6 +130,76 @@ async def execute_case(
     except Exception as exc:  # 未知异常兜底：归类技术失败，不中断 run
         logger.exception("用例执行未知异常 case=%s", getattr(case, "id", None))
         return _fail(ERROR_CONTRACT, f"未知异常: {exc}")
+
+
+async def _dispatch(
+    adapter: AgentAdapter, spec, client: httpx.AsyncClient,
+    timeout_s: float, start: float,
+) -> CaseOutcome:
+    """发送+解析段（运行在 execute_case 的 asyncio.timeout 内）。
+
+    承担 SSE 断流续推、响应体上限、SSE 相邻 chunk 空闲超时；契约校验（done/usage）
+    在此收口并返回最终 outcome。失败路径 return _fail(...)，异常传播给外层分类。
+    """
+    assembler = ResultAssembler()
+    status_code: int | None = None
+    resume_tries = 0
+    if adapter.contract_type == "sse":
+        while True:
+            spec_for_send = spec
+            if resume_tries > 0 and getattr(adapter, "last_event_id", None):
+                # 7.5c 续推：带 Last-Event-ID 头从断点续传（标准契约，agent 侧按需适配）
+                spec_for_send = replace(
+                    spec, headers={**spec.headers, "Last-Event-ID": adapter.last_event_id})
+            stream_bytes = 0
+            async with client.stream(
+                spec_for_send.method, spec_for_send.url,
+                **request_kwargs(spec_for_send, timeout_s),
+            ) as resp:
+                status_code = resp.status_code
+                if status_code != 200:
+                    # P1-1：错误体限长读取（原 aread() 全量缓冲，错误体无上限时内存暴涨）
+                    body = (await read_body_capped(resp, MAX_ERROR_BODY))[:200]
+                    err = ERROR_HTTP_CLIENT if 400 <= status_code < 500 else ERROR_HTTP
+                    return _fail(err, f"HTTP {status_code}: {body}")
+                # P1-4：SSE 相邻 chunk 空闲超过 _SSE_IDLE_TIMEOUT → wait_for 抛
+                # asyncio.TimeoutError 落入外层分类 → ERROR_TIMEOUT。原 async for 逐
+                # chunk 有读超时但 agent 持续滴流（连接假活）时永不触发，会拖到墙钟 deadline。
+                ait = resp.aiter_bytes()
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(anext(ait), _SSE_IDLE_TIMEOUT)
+                    except StopAsyncIteration:
+                        break
+                    stream_bytes += len(chunk)
+                    if stream_bytes > MAX_SSE_BODY:
+                        # P1-1：SSE 累计超限 → 非重试技术失败（agent 异常输出，重试复现）
+                        return _fail(
+                            ERROR_BODY_TOO_LARGE,
+                            f"SSE 流累计超 {MAX_SSE_BODY // 1024 // 1024}MB，疑似 agent 异常输出")
+                    elapsed = time.perf_counter() - start
+                    for ev in adapter.parse_stream_chunk(chunk):
+                        assembler.on_event(ev, elapsed)
+            # 流自然结束未收 done：支持续推且有断点 → 重发续传（上限内）；否则退出走契约校验
+            if (assembler.done_elapsed is None and resume_tries < _MAX_SSE_RESUME
+                    and getattr(adapter, "supports_resume", False)
+                    and getattr(adapter, "last_event_id", None)):
+                resume_tries += 1
+                logger.info("SSE 断流，续推 last_event_id=%s", adapter.last_event_id)
+                continue
+            break
+    else:
+        resp = await send_request(client, spec, timeout=timeout_s)
+        status_code = resp.status_code
+        if status_code != 200:
+            # P1-1：resp.text 全量解码超大错误体徒耗内存 → 只解码前 200 字节
+            err = ERROR_HTTP_CLIENT if 400 <= status_code < 500 else ERROR_HTTP
+            return _fail(err, f"HTTP {status_code}: {resp.content[:200].decode('utf-8', errors='replace')}")
+        try:
+            unified = adapter.parse_sync(resp.json())
+        except Exception as exc:
+            return _fail(ERROR_CONTRACT, f"parse_sync: {exc}")
+        assembler.ingest_sync(unified, time.perf_counter() - start)
 
     # ---- 契约校验 ----
     if adapter.contract_type == "sse" and assembler.done_elapsed is None:

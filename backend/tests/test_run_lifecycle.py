@@ -60,6 +60,13 @@ class _Case:
         self.metrics = {"completeness": {"enabled": True}}
 
 
+class _Cfg:
+    """SystemConfig 假行：仅暴露 value（P0-3 测试用）。"""
+
+    def __init__(self, value):
+        self.value = value
+
+
 class _ScalarResult:
     def __init__(self, rows, rowcount=1):
         self._rows = rows
@@ -130,7 +137,7 @@ class _FakeClient:
 def _patch_externals(monkeypatch, fake_db, orch, *, probe=True):
     """mock _run 的外部依赖（DB/HTTP/执行细节），保留生命周期守卫逻辑真实。"""
     monkeypatch.setattr("app.runner.orchestrator.SessionLocal", lambda: _FakeSession(fake_db))
-    monkeypatch.setattr("app.runner.orchestrator.build_agent_client", lambda: _FakeClient())
+    monkeypatch.setattr("app.runner.orchestrator.build_agent_client", lambda **kw: _FakeClient())
     monkeypatch.setattr(orch, "_decrypt_auth", lambda agent: {})
 
     async def _probe(*a, **k):
@@ -211,6 +218,35 @@ async def test_normal_pending_flow_sets_bucket(monkeypatch):
     await orch._run(RUN_ID)
     assert orch._run_limits[RUN_ID] == (16, 3)   # global_max_inflight / per_agent_concurrency
     assert RUN_ID in orch._limiter._buckets
+
+
+async def test_run_client_carries_allowlist_cidrs(monkeypatch):
+    """P0-3：_run 构建出站 client 透传注册期自定义 CIDR 白名单（base_url_allowlist）。
+
+    曾只 scaffold 探测传 cidrs（scaffold.py:63-65），运行路径漏传 → 自定义 CIDR 内
+    agent 执行时被 _resolve 拒绝（SSRF: 不在出站白名单）导致整 run 失败。
+    """
+    run, db, orch = _make()
+    _patch_externals(monkeypatch, db, orch)
+
+    async def _get_with_cfg(model, pk, with_for_update=False):
+        if getattr(model, "__name__", "") == "SystemConfig" and pk == "base_url_allowlist":
+            return _Cfg(["11.0.0.0/8"])
+        return await _orig_get(model, pk, with_for_update)
+
+    _orig_get = db.get
+    db.get = _get_with_cfg
+
+    calls = {}
+
+    def _recording_client(**kw):
+        calls.update(kw)
+        return _FakeClient()
+
+    # 在 _patch_externals 之后覆盖，保证记录 stub 生效（monkeypatch 后写覆盖前写）
+    monkeypatch.setattr("app.runner.orchestrator.build_agent_client", _recording_client)
+    await orch._run(RUN_ID)
+    assert calls.get("extra_cidrs") == ["11.0.0.0/8"]
 
 
 async def test_probe_fail_drops_bucket(monkeypatch):

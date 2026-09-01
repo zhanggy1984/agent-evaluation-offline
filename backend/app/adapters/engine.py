@@ -29,7 +29,7 @@ import re
 import time
 from typing import Any
 
-from app.adapters.base import AgentAdapter, RequestSpec, send_request
+from app.adapters.base import AdapterHTTPError, AgentAdapter, RequestSpec, send_request
 from app.core.http import build_agent_client
 from app.core.sse_parser import SSEEvent, SSEParser
 
@@ -182,7 +182,11 @@ class ConfigEngine(AgentAdapter):
         )
         resp = await send_request(client, spec)
         if resp.status_code >= 400:
-            raise RuntimeError(f"prepare.{name} HTTP {resp.status_code}: {resp.text[:200]}")
+            # P0-2：HTTP 错误抛 AdapterHTTPError（携带 status_code）供 executor 分流
+            # （5xx/429 可重试、4xx 契约不重试）；继承 RuntimeError 兼容既有断言。
+            raise AdapterHTTPError(
+                f"prepare.{name} HTTP {resp.status_code}: {resp.text[:200]}",
+                resp.status_code)
         try:
             data = resp.json()
         except Exception as exc:
@@ -206,8 +210,9 @@ class ConfigEngine(AgentAdapter):
             resp = await client.request("GET", url, headers=headers,
                                         timeout=min(interval + 10, timeout + 1))
             if resp.status_code >= 400:
-                raise RuntimeError(
-                    f"prepare.{name} 轮询 HTTP {resp.status_code}: {resp.text[:200]}")
+                raise AdapterHTTPError(
+                    f"prepare.{name} 轮询 HTTP {resp.status_code}: {resp.text[:200]}",
+                    resp.status_code)
             try:
                 last = resp.json()
             except Exception as exc:
@@ -266,7 +271,8 @@ class ConfigEngine(AgentAdapter):
             )
             resp = await send_request(client, spec)
             if resp.status_code >= 400:
-                raise RuntimeError(f"reset HTTP {resp.status_code}: {resp.text[:200]}")
+                raise AdapterHTTPError(
+                    f"reset HTTP {resp.status_code}: {resp.text[:200]}", resp.status_code)
             data = resp.json()
             if not isinstance(data, dict):
                 raise RuntimeError("reset 响应应为 JSON 对象")

@@ -14,6 +14,27 @@ import httpx
 # 出站读取一律限定该目录内，防 {case.input.file_path} 路径穿越读容器任意文件（如 .env）。
 _UPLOADS_DIR = os.path.realpath(os.environ.get("UPLOADS_DIR", "/app/uploads"))
 
+# P1-1 出站响应体上限（防异常/恶意 agent 返回超大 body 耗尽内存）：
+# 错误体读取限 64KB；SSE 流累计限 8MB（正常 agent 回答远小于此，超限即疑似异常输出）。
+MAX_ERROR_BODY = 64 * 1024
+MAX_SSE_BODY = 8 * 1024 * 1024
+
+
+async def read_body_capped(resp: httpx.Response, limit: int) -> str:
+    """流式限长读取响应体（超限即止），返回截断文本。
+
+    非 2xx 错误体之前用 resp.aread() 全量读入内存——错误体无上限时一次性缓冲超大响应。
+    改限长累计：只保留前 limit 字节，杜绝内存暴涨（executor/probe 共用）。
+    """
+    chunks = []
+    total = 0
+    async for chunk in resp.aiter_bytes():
+        chunks.append(chunk)
+        total += len(chunk)
+        if total >= limit:
+            break
+    return b"".join(chunks)[:limit].decode("utf-8", errors="replace")
+
 
 @dataclass
 class RequestSpec:
@@ -25,6 +46,19 @@ class RequestSpec:
     files: dict | None = None
     data: dict | None = None
     timeout: float = 120.0
+
+
+class AdapterHTTPError(RuntimeError):
+    """adapter 出站 HTTP 非 2xx（prepare/reset 步骤）。
+
+    携带 status_code 供 executor 分流：5xx/429 临时服务故障 → 可重试技术失败（ERROR_HTTP），
+    4xx 凭证/配置错 → contract（不重试）。继承 RuntimeError 保持既有
+    `assertRaisesRegex(RuntimeError, ...)` 断言兼容（test_engine 轮询/reset HTTP 500）。
+    """
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def multipart_files(files: dict) -> dict:

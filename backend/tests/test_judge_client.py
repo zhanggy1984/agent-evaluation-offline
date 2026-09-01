@@ -164,8 +164,38 @@ async def test_judge_http_500(judge_server, monkeypatch):
     STATE.body = {"error": "upstream boom"}
     client = _client(judge_server, monkeypatch)
     try:
-        with pytest.raises(JudgeError):
+        with pytest.raises(JudgeError) as ei:
             await client.judge(**ARGS)
+        # P0-4：5xx 临时错可重试（permanent=False）
+        assert ei.value.permanent is False
+    finally:
+        await client._http.aclose()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_judge_http_401_permanent(judge_server, monkeypatch):
+    """P0-4：HTTP 401（key 无效）→ permanent=True，worker 据此直接 failed 不耗退避。"""
+    STATE.status = 401
+    STATE.body = {"error": "invalid api key"}
+    client = _client(judge_server, monkeypatch)
+    try:
+        with pytest.raises(JudgeError) as ei:
+            await client.judge(**ARGS)
+        assert ei.value.permanent is True
+    finally:
+        await client._http.aclose()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_judge_http_429_retryable(judge_server, monkeypatch):
+    """P0-4：HTTP 429（限流）→ permanent=False（退避后可能恢复）。"""
+    STATE.status = 429
+    STATE.body = {"error": "rate limited"}
+    client = _client(judge_server, monkeypatch)
+    try:
+        with pytest.raises(JudgeError) as ei:
+            await client.judge(**ARGS)
+        assert ei.value.permanent is False
     finally:
         await client._http.aclose()
 

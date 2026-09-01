@@ -7,18 +7,20 @@ SSE 正常/断流无 done/无 usage/HTTP 非 2xx/超时/连接错误/解析错�
 用 httpx.MockTransport 模拟 agent 网络层，chunk 走真实 SSEParser 解析。
 """
 from asyncio_util import run_in_isolated_loop
+import asyncio
 import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from app.adapters.base import RequestSpec
+from app.adapters.base import (MAX_ERROR_BODY, MAX_SSE_BODY, AdapterHTTPError,
+                               RequestSpec, read_body_capped)
 from app.core.sse_parser import SSEParseError, SSEParser
 from app.runner import executor
-from app.runner.executor import ERROR_CONNECT, ERROR_CONTRACT, ERROR_HTTP, \
-    ERROR_HTTP_CLIENT, ERROR_NO_DONE, ERROR_NO_USAGE, ERROR_SSE_PARSE, ERROR_TIMEOUT, \
-    execute_case
+from app.runner.executor import ERROR_BODY_TOO_LARGE, ERROR_CONNECT, ERROR_CONTRACT, \
+    ERROR_HTTP, ERROR_HTTP_CLIENT, ERROR_NO_DONE, ERROR_NO_USAGE, ERROR_POOL_TIMEOUT, \
+    ERROR_SSE_PARSE, ERROR_TIMEOUT, execute_case
 
 
 def _sse_bytes(*frames) -> bytes:
@@ -184,6 +186,58 @@ def test_prepare_error():
     run_in_isolated_loop(main())
 
 
+def test_prepare_http_5xx_retryable():
+    # P0-2：prepare 5xx 临时服务故障 → ERROR_HTTP（可重试 + 熔断累计），不再误判 agent bug
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            err = AdapterHTTPError("prepare.login HTTP 500: boom", 500)
+            out = await execute_case(_SSEAdapter(prepare_error=err), c, _case())
+        assert not out.ok and out.error_type == ERROR_HTTP
+        assert "500" in out.error_detail
+    run_in_isolated_loop(main())
+
+
+def test_prepare_http_429_retryable():
+    # P0-2：429 限流 → ERROR_HTTP 可重试（退避后可能恢复），不归 contract
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            err = AdapterHTTPError("prepare.login HTTP 429: limited", 429)
+            out = await execute_case(_SSEAdapter(prepare_error=err), c, _case())
+        assert not out.ok and out.error_type == ERROR_HTTP
+    run_in_isolated_loop(main())
+
+
+def test_prepare_http_4xx_contract():
+    # P0-2：prepare 4xx（凭证/配置错）→ ERROR_CONTRACT 不重试
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            err = AdapterHTTPError("prepare.login HTTP 401: bad credentials", 401)
+            out = await execute_case(_SSEAdapter(prepare_error=err), c, _case())
+        assert not out.ok and out.error_type == ERROR_CONTRACT
+        assert "401" in out.error_detail
+    run_in_isolated_loop(main())
+
+
+def test_prepare_network_retryable():
+    # P0-2：prepare 建连失败（agent 临时不可达）→ ERROR_CONNECT 可重试
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            out = await execute_case(
+                _SSEAdapter(prepare_error=httpx.ConnectError("conn refused")), c, _case())
+        assert not out.ok and out.error_type == ERROR_CONNECT
+    run_in_isolated_loop(main())
+
+
+def test_prepare_timeout_retryable():
+    # P0-2：prepare 超时（上游慢）→ ERROR_TIMEOUT 可重试
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            out = await execute_case(
+                _SSEAdapter(prepare_error=httpx.ReadTimeout("timeout")), c, _case())
+        assert not out.ok and out.error_type == ERROR_TIMEOUT
+    run_in_isolated_loop(main())
+
+
 def test_build_request_error():
     async def main():
         async with _client(lambda req: httpx.Response(200, content=b"")) as c:
@@ -303,4 +357,119 @@ def test_sse_resume_exhausted_no_done():
             out = await execute_case(_ResumeAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_NO_DONE
         assert len(seen) == 2  # 首流 + 1 次续推
+    run_in_isolated_loop(main())
+
+
+# ---------------- P1-1 出站响应体上限 ----------------
+def test_sse_body_too_large():
+    # P1-1：SSE 流累计超 8MB → ERROR_BODY_TOO_LARGE（非重试技术失败，防超大 body 耗尽内存）
+    big = b"x" * (MAX_SSE_BODY + 1)
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=big)) as c:
+            out = await execute_case(_SSEAdapter(chunks=big), c, _case())
+        assert not out.ok and out.error_type == ERROR_BODY_TOO_LARGE
+        assert "MB" in out.error_detail
+    run_in_isolated_loop(main())
+
+
+def test_sse_under_body_limit_ok():
+    # P1-1 回归护栏：正常 SSE 流（远小于 8MB）不被误判超限
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=_NORMAL)) as c:
+            out = await execute_case(_SSEAdapter(chunks=_NORMAL), c, _case())
+        assert out.ok
+    run_in_isolated_loop(main())
+
+
+def test_error_body_capped_read():
+    # P1-1：非 200 错误体限长读取——只读前 limit 字节，超大错误体不触发全量缓冲
+    big = b"a" * (100 * 1024)
+
+    async def main():
+        async with _client(lambda req: httpx.Response(500, content=big)) as c:
+            async with c.stream("POST", "http://mock-agent.test/x") as resp:
+                body = await read_body_capped(resp, MAX_ERROR_BODY)
+        assert len(body) == MAX_ERROR_BODY  # 只保留 64KB，未全量缓冲
+    run_in_isolated_loop(main())
+
+
+def test_sync_error_body_capped_decode():
+    # P1-1：sync 非 200 错误体不再全量解码（resp.text），只解码前 200 字节进 error_detail
+    big = b"a" * (100 * 1024)
+    async def main():
+        async with _client(lambda req: httpx.Response(502, content=big)) as c:
+            out = await execute_case(_SyncAdapter(), c, _case())
+        assert not out.ok and out.error_type == ERROR_HTTP
+        assert len(out.error_detail) < 500  # detail 仅截断样本，未吞入整段错误体
+    run_in_isolated_loop(main())
+
+
+# ---------------- P1-2 连接池耗尽（PoolTimeout）分类 ----------------
+def test_pool_timeout_classified_separately():
+    # P1-2：PoolTimeout 是 TimeoutException 子类——except 顺序必须 PoolTimeout 先于
+    # TimeoutException，否则本地池耗尽被误标上游慢 timeout（非可重试，平台容量问题）
+    def handler(req):
+        raise httpx.PoolTimeout("connection pool exhausted")
+
+    async def main():
+        async with _client(handler) as c:
+            out = await execute_case(_SSEAdapter(), c, _case())
+        assert not out.ok and out.error_type == ERROR_POOL_TIMEOUT
+    run_in_isolated_loop(main())
+
+
+def test_prepare_pool_timeout():
+    # P1-2：prepare 阶段连接池耗尽同样归 pool_error（prepare 异常链也需先捕 PoolTimeout）
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            out = await execute_case(
+                _SSEAdapter(prepare_error=httpx.PoolTimeout("pool busy")), c, _case())
+        assert not out.ok and out.error_type == ERROR_POOL_TIMEOUT
+    run_in_isolated_loop(main())
+
+
+# ---------------- P1-4 wall-clock deadline + SSE 空闲超时 ----------------
+def _hung_stream(first_chunk: bytes, hang_s: float = 3600):
+    """先吐一段真实 SSE 字节、随后挂起的流（模拟 agent 连接假活 / 永不结束）。"""
+    async def gen():
+        yield first_chunk
+        await asyncio.sleep(hang_s)
+        yield b""  # 永不抵达
+    return gen()
+
+
+def test_sse_wallclock_deadline(monkeypatch):
+    # P1-4：发送+解析段 wall-clock 封顶 case_timeout + 宽限。SSE 流挂起（无空闲超时
+    # 触发点也耗尽）→ asyncio.timeout 到期 → ERROR_TIMEOUT。原实现无墙钟总超时，
+    # 只能靠 run 级 hard_deadline（7200s）兜底。monkeypatch 掉 60s 宽限加速触发。
+    monkeypatch.setattr(executor, "_WALLCLOCK_GRACE_S", 0)
+    body = _hung_stream(_sse_bytes(("answer", {"delta": "x"}, "a1")))
+
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=body)) as c:
+            out = await execute_case(_SSEAdapter(), c, _case(), timeout_s=0.1)
+        assert not out.ok and out.error_type == ERROR_TIMEOUT
+    run_in_isolated_loop(main())
+
+
+def test_sse_idle_timeout(monkeypatch):
+    # P1-4：SSE 相邻 chunk 空闲超 _SSE_IDLE_TIMEOUT → wait_for 抛超时 → ERROR_TIMEOUT。
+    # 覆盖「连接假活」：agent 只发了一个 chunk 就卡死，无 done、无续推断点——原 async for
+    # 靠逐 chunk 读超时在"持续有数据"时才触发，单点卡死会拖到墙钟 deadline。
+    monkeypatch.setattr(executor, "_SSE_IDLE_TIMEOUT", 0.05)
+    body = _hung_stream(b"event: answer\ndata: {}\n\n")
+
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=body)) as c:
+            out = await execute_case(_SSEAdapter(), c, _case())
+        assert not out.ok and out.error_type == ERROR_TIMEOUT
+    run_in_isolated_loop(main())
+
+
+def test_sse_normal_under_idle_limit():
+    # P1-4 回归护栏：正常有界 SSE 流不被 wait_for 误超时（首帧即取到，后续立即结束）
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=_NORMAL)) as c:
+            out = await execute_case(_SSEAdapter(chunks=_NORMAL), c, _case())
+        assert out.ok
     run_in_isolated_loop(main())
