@@ -1111,7 +1111,8 @@ const pct = (r) => (r == null ? 0 : Math.round(r * 100))
 async function refreshAll() {
   loading.value = true
   try {
-    await Promise.all([loadAgents(), loadGate(), loadRuns()])
+    // 评测记录跟随当前选中 agent（联动一致）；未选则全量
+    await Promise.all([loadAgents(), loadGate(), loadRuns(activeAgentId.value || undefined)])
     if (activeAgentId.value) {
       await Promise.all([loadTrend(activeAgentId.value), loadPanels(activeAgentId.value)])
     }
@@ -1129,15 +1130,17 @@ async function loadGate() {
   gateList.value = await getGate()
 }
 
-async function loadRuns() {
+async function loadRuns(agentId) {
   runsLoading.value = true
   try {
-    // 全量拉取（后端 limit 上限 200）→ 前端本地过滤 + 本地分页，避免 offset 分页与本地过滤冲突
-    runList.value = await listRuns({ limit: 200 })
+    // 全量拉取（后端 limit 上限 200）→ 前端本地过滤 + 本地分页，避免 offset 分页与本地过滤冲突。
+    // agentId 传参：门禁墙/下拉选 agent 后评测记录联动只显示该 agent 的 run（后端已支持 agent_id）
+    const params = agentId ? { limit: 200, agent_id: agentId } : { limit: 200 }
+    runList.value = await listRuns(params)
     runPage.value = 1
     // 截断探测：取第 201 条判断是否还有更早记录（复用现有 offset 参数，零后端改动）；失败静默不阻断
     try {
-      const extra = await listRuns({ limit: 1, offset: 200 })
+      const extra = await listRuns({ limit: 1, offset: 200, ...(agentId ? { agent_id: agentId } : {}) })
       hasMoreRuns.value = extra.length > 0
     } catch (e) {
       hasMoreRuns.value = false
@@ -1151,7 +1154,7 @@ async function loadRuns() {
 const runSearch = ref('')
 const runStatusFilter = ref('')
 const runPage = ref(1)
-const PAGE_SIZE = 20
+const PAGE_SIZE = 5
 const filteredRuns = computed(() =>
   filterRuns(runList.value, {
     statusFilter: runStatusFilter.value,
@@ -1207,6 +1210,7 @@ function selectAgent(g) {
   resetDrill()
   loadTrend(g.agent_id)
   loadPanels(g.agent_id)
+  loadRuns(g.agent_id)
 }
 
 function onAgentChange() {
@@ -1214,8 +1218,10 @@ function onAgentChange() {
   if (activeAgentId.value) {
     loadTrend(activeAgentId.value)
     loadPanels(activeAgentId.value)
+    loadRuns(activeAgentId.value)
   } else {
     loadPanels(null)
+    loadRuns()
   }
 }
 
