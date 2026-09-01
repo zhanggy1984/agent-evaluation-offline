@@ -312,7 +312,8 @@ async def probe_agent(agent_id: int, suite_id: int | None = None, interface_id: 
     # 逐个探测（顺序，真实 LLM 调用）
     secret = _decrypt_auth(agent)
     results = []
-    async with build_agent_client() as client:
+    # P0-3：探测与运行一致透传自定义 CIDR 白名单，否则自定义 CIDR 内 agent 被 _resolve 拒绝
+    async with build_agent_client(extra_cidrs=await _get_allowlist_cidrs(db)) as client:
         for iface in ifaces:
             adapter = ConfigEngine(agent, iface, agent.adapter_config or {}, secret)
             results.append(await probe_interface(adapter, client, case, timeout_s))

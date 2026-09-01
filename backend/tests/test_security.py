@@ -190,6 +190,16 @@ def test_agent_client_no_deny_no_regression():
     assert client._resolve("127.0.0.1", 80) == "127.0.0.1"
 
 
+def test_agent_client_extra_cidrs_widen_allowlist():
+    # P0-3：注册期自定义 CIDR（base_url_allowlist）必须在出站 client 生效——11.0.0.0/8
+    # 不在默认白名单（默认 _resolve 拒绝），透传 extra_cidrs 后放行。
+    # 否则自定义 CIDR 内 agent 运行时/探测被 _resolve 拒绝（SSRF: 不在出站白名单）。
+    with pytest.raises(ApiError):
+        build_agent_client()._resolve("11.0.1.5", 80)
+    widened = build_agent_client(extra_cidrs=["11.0.0.0/8"])
+    assert widened._resolve("11.0.1.5", 80) == "11.0.1.5"
+
+
 # ---------------- P2-C4 version 严格 semver（防 tooltip XSS） ----------------
 from app.api.runs import _SEMVER
 
