@@ -67,26 +67,33 @@ agent 提测上线前，质量缺乏系统化量化与呈现：
 
 ```mermaid
 graph TB
-    subgraph PLATFORM["线下评测平台"]
-        WEB["Vue3 + Element Plus + ECharts<br/>（frontend/dist，npm run build）"]
+    subgraph CLIENT["客户端入口"]
+        WEB["浏览器<br/>Vue3 + Element Plus + ECharts<br/>（frontend/dist）"]
         NGINX["nginx :8180<br/>静态服务 + /api 反代 → api-gateway"]
-        API["FastAPI App :8000（容器内）<br/>REST API + scanner + judge worker"]
-        MYSQL[(MySQL 8<br/>业务事实：agent/用例/run/评分)]
     end
-    subgraph 共享网关
-        GATEWAY["API 网关 api-gateway:8099（共享 infra）<br/>Host 虚拟域名路由 + X-Request-ID traceId<br/>按真实 IP 限流"]
+    subgraph GW["共享网关（共享 infra）"]
+        GATEWAY["api-gateway :8099<br/>Host 虚拟域名路由 + X-Request-ID traceId<br/>按真实 IP 限流"]
     end
-    subgraph MODULE["后端模块"]
-        RUN["runner<br/>orchestrator / scanner / scorer / executor"]
-        JUDGE["judge<br/>LLM-judge 六级 rubric 精评"]
-        MET["metrics<br/>accuracy / performance / cost"]
-        ASRT["assertions<br/>结构/文本/工具/检索断言算子"]
+    subgraph PLATFORM["线下评测平台（backend 容器 :8000）"]
+        subgraph L_API["API 层（api/，薄）"]
+            API["REST 路由<br/>auth · users · agents · cases · runs · dashboard · config"]
+        end
+        subgraph L_ORCH["编排层（runner/）"]
+            RUN["orchestrator 评测调度<br/>scanner 心跳回收 · scorer 汇总 · executor 执行"]
+        end
+        subgraph L_CAP["能力层"]
+            JUDGE["judge/<br/>LLM-judge 六级 rubric 精评"]
+            MET["metrics/<br/>accuracy · performance · cost"]
+            ASRT["assertions/<br/>结构/文本/工具/检索断言算子"]
+            ADPT["adapters/<br/>配置型驱动（base_url/接口/reset）"]
+        end
+    end
+    subgraph DEP["外部依赖"]
+        MYSQL[(MySQL 8（共享 infra）<br/>agent/用例/run/评分)]
+        DS["DeepSeek LLM（judge）"]
     end
     subgraph TARGET["被评测 Agent（宿主机，任意接入）"]
         AGENT["标准契约<br/>SSE / 同步二选一 + POST /admin/reset"]
-    end
-    subgraph EXT["外部"]
-        DS["DeepSeek LLM（judge）"]
     end
 
     WEB --> NGINX
@@ -96,10 +103,14 @@ graph TB
     RUN --> JUDGE
     RUN --> MET
     RUN --> ASRT
-    RUN -- host.docker.internal --> AGENT
+    RUN --> ADPT
+    ADPT -- host.docker.internal --> AGENT
     API --> MYSQL
+    RUN --> MYSQL
     JUDGE --> DS
 ```
+
+> **图读法（自顶向下）**：请求链路 浏览器 → nginx → 网关 → API → runner → 能力层；后端内「API 层（薄）→ 编排层 runner → 能力层」单向依赖，**runner 是唯一编排者**（调度 executor 逐 case、scanner 心跳回收、scorer 汇总），judge / metrics / assertions / adapters 只被 runner 调用；MySQL 与 judge LLM 属外部依赖，仅由后端访问。
 
 **对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api` 反代到共享网关 `api-gateway:8099`（`Host: eval.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。**P2-D12：backend 已收敛，不暴露宿主端口（无 `localhost:8100`），后端仅内网可达、对外唯一入口即前端 nginx → 网关**；宿主侧开发脚本经 `localhost:8180`（网关链路）或容器内 `8000`（`docker exec`）访问。
 
