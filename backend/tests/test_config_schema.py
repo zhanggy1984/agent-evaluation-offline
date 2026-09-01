@@ -62,6 +62,21 @@ def test_str_max_len():
     assert validate_sysconfig_value("judge_llm.base_url", 123, m)  # 非 str
 
 
+# ---------------- bool ----------------
+def test_bool_valid():
+    m = _meta("judge_cache_enabled")
+    assert validate_sysconfig_value("judge_cache_enabled", True, m) is None
+    assert validate_sysconfig_value("judge_cache_enabled", False, m) is None
+
+
+def test_bool_rejects_non_bool():
+    # bool 分支：1/0/字符串都不是布尔值（int 分支已单独拒 bool，这里反之）
+    m = _meta("judge_cache_enabled")
+    assert validate_sysconfig_value("judge_cache_enabled", 1, m)
+    assert validate_sysconfig_value("judge_cache_enabled", 0, m)
+    assert validate_sysconfig_value("judge_cache_enabled", "true", m)
+
+
 # ---------------- list ----------------
 def test_list_of_str():
     m = _meta("llm_allowlist")

@@ -14,6 +14,7 @@ from app.judge.client import (
 from app.judge.rubric import (
     RATINGS, anchors_of, fallback_rubric,
 )
+from app.judge.verdict_cache import VerdictCache, judge_cache_key
 from app.judge.worker import backoff_seconds, done_threshold_for
 from app.runner.scorer import _enabled_semantic_dims, _judge_results_by_case
 
@@ -575,6 +576,277 @@ class TestProcessOnePermanentAndRefusal(unittest.TestCase):
         t, _ = self._scenario(lambda **kw: verdicts.pop(0), max_retries=5, repeat=3)
         self.assertEqual(t.status, "done")
         self.assertEqual(t.attempts, 0)
+
+
+class TestVerdictCache(unittest.TestCase):
+    """judge 判分缓存本体：LRU 淘汰 / TTL 过期 / enabled 开关 / clear。"""
+
+    def _cached(self, max_entries=2):
+        vc = VerdictCache(max_entries=max_entries)
+        vc.configure(enabled=True, ttl=3600.0, max_entries=max_entries)
+        return vc
+
+    def test_roundtrip(self):
+        vc = self._cached()
+        vc.set("k", {"level": 4, "score": 80.0, "reason": "准确"})
+        self.assertEqual(vc.get("k"), {"level": 4, "score": 80.0, "reason": "准确"})
+
+    def test_disabled_noop(self):
+        # enabled 默认 False 是「测试基线零回归」前提：disabled 不写不读不计数
+        vc = VerdictCache()
+        vc.set("k", {"level": 4})
+        self.assertIsNone(vc.get("k"))
+        self.assertEqual(len(vc._d), 0)
+
+    def test_ttl_expiry(self):
+        vc = self._cached()
+        # ttl=-1（负 TTL 立即过期，确定性无 sleep；生产 ttl 恒 >=60 不会走到负数）
+        vc.set("k", {"level": 4}, ttl=-1)
+        self.assertIsNone(vc.get("k"))
+
+    def test_lru_eviction_oldest_first(self):
+        vc = self._cached(max_entries=2)
+        vc.set("a", {"level": 1}); vc.set("b", {"level": 1})
+        vc.set("a", {"level": 2})   # a 刷新为最新
+        vc.set("c", {"level": 1})   # 挤掉最旧的 b
+        self.assertIsNone(vc.get("b"))
+        self.assertIsNotNone(vc.get("a"))
+        self.assertIsNotNone(vc.get("c"))
+
+    def test_clear(self):
+        vc = self._cached()
+        vc.set("k", {"level": 4})
+        vc.clear()
+        self.assertIsNone(vc.get("k"))
+
+    def test_configure_hot_disable_clears(self):
+        # 热关（True→False）：旧判分视为漂移脏数据 → 顺带清空，重新开启不会命中旧值
+        vc = self._cached()
+        vc.set("k", {"level": 4})
+        self.assertIsNotNone(vc.get("k"))  # 开启时命中
+        vc.configure(enabled=False, ttl=3600.0, max_entries=2)  # 热关
+        self.assertIsNone(vc.get("k"))  # disabled 恒 None
+        self.assertEqual(len(vc._d), 0)  # 且已清空
+        # 幂等：关着重复 configure(False) 无副作用（_d 仍空）
+        vc.configure(enabled=False, ttl=3600.0, max_entries=2)
+        self.assertEqual(len(vc._d), 0)
+
+    def test_configure_reenable_keeps_empty(self):
+        # 关→开→关：只有下降沿清空；重新开启时缓存本就空，不误清正常条目
+        vc = VerdictCache()
+        vc.configure(enabled=False, ttl=3600.0, max_entries=2)
+        vc.configure(enabled=True, ttl=3600.0, max_entries=2)
+        vc.set("k", {"level": 4})
+        vc.configure(enabled=False, ttl=3600.0, max_entries=2)  # True→False 下降沿 → 清空
+        self.assertEqual(len(vc._d), 0)
+
+
+class TestJudgeCacheKey(unittest.TestCase):
+    """key 绑定全部实际输入：同输入同 key，任一维度变 key 变（含 base_url/截断值）。"""
+
+    def _kw(self, **over):
+        base = dict(dimension="factuality", template={"instruction": "x"},
+                    case_input={"content": "q"}, golden_answer="g",
+                    reference_docs="doc", agent_output="a",
+                    agent_reasoning="r", agent_tool_calls="[]",
+                    rubric_version="1.0", model="m", base_url="http://j")
+        base.update(over)
+        return base
+
+    def test_same_input_same_key(self):
+        self.assertEqual(judge_cache_key(**self._kw()), judge_cache_key(**self._kw()))
+
+    def test_any_dimension_change_changes_key(self):
+        # 逐一变动各输入维度 → key 必须变化（漏绑定会导致换 rubric/模型/endpoint/answer 串判）
+        for field, newval in [
+            ("dimension", "reasoning"),
+            ("template", {"instruction": "y"}),
+            ("case_input", {"content": "q2"}),
+            ("golden_answer", "g2"),
+            ("reference_docs", "doc2"),
+            ("agent_output", "a2"),
+            ("agent_reasoning", "r2"),
+            ("agent_tool_calls", "[1]"),
+            ("rubric_version", "2.0"),
+            ("model", "m2"),
+            ("base_url", "http://j2"),
+        ]:
+            with self.subTest(field=field):
+                self.assertNotEqual(judge_cache_key(**self._kw()),
+                                    judge_cache_key(**self._kw(**{field: newval})))
+
+
+class TestProcessOneCache(unittest.TestCase):
+    """judge 判分缓存接入 _process_one：多数决值写入 / 跨 task 命中 / 三路不写 / 降级 / 截断 key。"""
+
+    def _v(self, level, reason="事实准确"):
+        return SimpleNamespace(level=level, reason=reason, dimension="factuality",
+                               rubric_version="1.0")
+
+    def _scenario(self, judge_fn, *, repeat=3, max_retries=5, cache=None,
+                  pass_fail="pass"):
+        """复刻 TestProcessOnePermanentAndRefusal 的 mock 基建 + 可注入 cache。
+
+        cache 非 None 时 patch worker.verdict_cache 为该实例（测试独立缓存，不污染
+        模块单例）；fake client 必须补 .model/.base_url（judge_cache_key 真跑时用）。
+        """
+        from contextlib import ExitStack
+
+        from app.judge import worker
+
+        async def _run():
+            db = AsyncMock()
+            db.add = Mock()
+            result = SimpleNamespace(answer="a", reasoning="", tool_calls=None,
+                                     case_id=1, case_version_id=2, pass_fail=pass_fail)
+            db.execute.return_value = SimpleNamespace(
+                scalars=lambda: SimpleNamespace(first=lambda: result))
+            db.get.return_value = SimpleNamespace(snapshot={"input": "x",
+                                                            "expected": {"golden_answer": "g"}})
+
+            class _SL:
+                async def __aenter__(self):
+                    return db
+
+                async def __aexit__(self, *a):
+                    return False
+
+            client = Mock()
+            client.model = "m"
+            client.base_url = "http://fake-judge"
+            client.judge = AsyncMock(side_effect=judge_fn)
+            t = SimpleNamespace(run_id=1, case_id=1, dimension_code="factuality",
+                                attempts=0, status="processing",
+                                claim_id="c", lease_until=None, result=None)
+            patchers = [patch("app.core.db.SessionLocal", _SL),
+                        patch.object(worker, "load_rubric",
+                                     new=AsyncMock(return_value={"instruction": "x"})),
+                        patch.object(worker, "_rubric_version", new=AsyncMock(return_value="1.0"))]
+            if cache is not None:
+                patchers.append(patch.object(worker, "verdict_cache", cache))
+            with ExitStack() as st:
+                for p in patchers:
+                    st.enter_context(p)
+                await worker._process_one(
+                    t, {"judge_repeat": repeat, "judge_max_retries": max_retries},
+                    interface_id=0, client=client)
+            return t, client
+
+        return run_in_isolated_loop(_run())
+
+    def _enabled_cache(self):
+        vc = VerdictCache(max_entries=100)
+        vc.configure(enabled=True, ttl=3600.0, max_entries=100)
+        return vc
+
+    def test_majority_value_written_not_last_sample(self):
+        # 拦「末位覆盖」bug 的唯一测试：repeat=3 采样 [4,4,3] → 缓存存多数决 4 档（非末位 3）
+        cache = self._enabled_cache()
+        it = iter([self._v(4), self._v(4), self._v(3)])
+        t, _ = self._scenario(lambda **kw: next(it), repeat=3, cache=cache)
+        self.assertEqual(t.status, "done")
+        self.assertEqual(len(cache._d), 1)
+        stored = list(cache._d.values())[0][1]
+        self.assertEqual(stored["level"], 4)  # 多数决，不是末位样本 level=3
+
+    def test_miss_writes_single_majority_value(self):
+        cache = self._enabled_cache()
+        t, c = self._scenario(lambda **kw: self._v(4), cache=cache)
+        self.assertEqual(t.status, "done")
+        self.assertEqual(c.judge.await_count, 3)  # task 内 repeat 保持独立采样（不读自写）
+        self.assertEqual(len(cache._d), 1)        # 只写一条多数决值
+
+    def test_cross_task_reuse_hits_cache(self):
+        # 读写分离：同一 (case, answer) 的第二个 task 全部命中历史缓存，0 次 LLM 调用
+        cache = self._enabled_cache()
+        t1, c1 = self._scenario(lambda **kw: self._v(4), cache=cache)
+        self.assertEqual(t1.status, "done")
+        self.assertEqual(c1.judge.await_count, 3)  # 首次 miss ×3 → 写
+        t2, c2 = self._scenario(lambda **kw: self._v(4), cache=cache)
+        self.assertEqual(t2.status, "done")
+        self.assertEqual(c2.judge.await_count, 0)  # 全命中 → 0 次 LLM 调用
+        self.assertEqual(cache.stats(), (3, 3))    # 3 hit + 3 miss
+
+    def test_under_threshold_no_write(self):
+        # 1 成功 + 2 失败 → 够不到 done 阈值 → 回 pending 重采样，不写缓存
+        cache = self._enabled_cache()
+        it = iter([self._v(4), JudgeError("判分失败"), JudgeError("判分失败")])
+        t, _ = self._scenario(lambda **kw: next(it), repeat=3, cache=cache)
+        self.assertEqual(t.status, "pending")
+        self.assertEqual(len(cache._d), 0)
+
+    def test_unjudgeable_no_cache(self):
+        # result.pass_fail=error → 判分无意义直接 failed，不碰缓存（不构造 key 不 get/set）
+        cache = self._enabled_cache()
+        t, c = self._scenario(lambda **kw: self._v(4), pass_fail="error", cache=cache)
+        self.assertEqual(t.status, "failed")
+        self.assertEqual(c.judge.await_count, 0)
+        self.assertEqual(len(cache._d), 0)
+
+    def test_all_refusal_no_write(self):
+        cache = self._enabled_cache()
+        it = iter([self._v(3, "无法评估该回答")] * 3)
+        t, _ = self._scenario(lambda **kw: next(it), repeat=3, cache=cache)
+        self.assertEqual(t.status, "failed")  # 全拒答 → failed（P0-6）
+        self.assertEqual(len(cache._d), 0)
+
+    def test_key_uses_truncated_reasoning(self):
+        # key 必须用截断后 reasoning（与 client.judge 同源），否则长 reasoning 漂移永久 miss
+        from app.judge import worker
+
+        cache = self._enabled_cache()
+        captured: dict = {}
+        real_key = worker.judge_cache_key
+
+        def spy(**kw):
+            captured.update(kw)
+            return real_key(**kw)
+
+        async def _run():
+            db = AsyncMock()
+            db.add = Mock()
+            result = SimpleNamespace(answer="a", reasoning="x" * 5000, tool_calls=None,
+                                     case_id=1, case_version_id=2, pass_fail="pass")
+            db.execute.return_value = SimpleNamespace(
+                scalars=lambda: SimpleNamespace(first=lambda: result))
+            db.get.return_value = SimpleNamespace(snapshot={"input": "x"})
+
+            class _SL:
+                async def __aenter__(self):
+                    return db
+
+                async def __aexit__(self, *a):
+                    return False
+
+            client = Mock()
+            client.model = "m"
+            client.base_url = "http://fake-judge"
+            client.judge = AsyncMock(return_value=self._v(4))
+            t = SimpleNamespace(run_id=1, case_id=1, dimension_code="factuality",
+                                attempts=0, status="processing",
+                                claim_id="c", lease_until=None, result=None)
+            with patch("app.core.db.SessionLocal", _SL), \
+                 patch.object(worker, "load_rubric",
+                              new=AsyncMock(return_value={"instruction": "x"})), \
+                 patch.object(worker, "_rubric_version", new=AsyncMock(return_value="1.0")), \
+                 patch.object(worker, "verdict_cache", cache), \
+                 patch.object(worker, "judge_cache_key", new=spy):
+                await worker._process_one(
+                    t, {"judge_repeat": 1, "judge_max_retries": 5}, interface_id=0, client=client)
+
+        run_in_isolated_loop(_run())
+        self.assertEqual(captured.get("agent_reasoning"), "x" * 4000)
+
+    def test_cache_get_error_degrades_gracefully(self):
+        # 静默降级：缓存 get 抛异常被吞，判分正常完成，降级后不写
+        vc = Mock()
+        vc.enabled = True
+        vc.get.side_effect = RuntimeError("cache boom")
+        vc.set = Mock()
+        t, c = self._scenario(lambda **kw: self._v(4), repeat=3, cache=vc)
+        self.assertEqual(t.status, "done")  # 缓存异常不影响判分主链路
+        self.assertEqual(c.judge.await_count, 3)
+        vc.set.assert_not_called()  # 降级后 cache_on=False，不写
 
 
 if __name__ == "__main__":

@@ -23,6 +23,8 @@ export const CONFIG_META = {
   max_active_runs_per_agent: { label: '同 agent 并发 run 上限', unit: '个', precision: 0, desc: '同一 agent 同时执行的 run 数上限；默认 1，调大后并发=该值×单 agent 并发（慎改）' },
   'judge_llm.base_url': { label: 'judge LLM 地址', unit: 'URL', precision: 0, desc: '判分 LLM 的服务地址（密钥走 env）' },
   'judge_llm.model_name': { label: 'judge LLM 模型', unit: '', precision: 0, desc: '判分 LLM 的模型名' },
+  judge_cache_enabled: { label: 'judge 判分缓存', unit: '', precision: 0, desc: '跨 run 复用历史判分（进程内 LRU）；模型漂移时热关强制重新判分' },
+  judge_cache_ttl_seconds: { label: '判分缓存 TTL', unit: '秒', precision: 0, desc: '判分缓存有效期；key 绑定版本天然失效，TTL 仅兜底模型行为漂移' },
   // ---- 注册期（registration）----
   file_max_size: { label: '附件大小上限', unit: 'MB', precision: 0, desc: '用例附件上传的最大体积' },
   base_url_allowlist: { label: 'Agent 地址白名单', unit: '', precision: 0, desc: '注册 agent 时允许的 base_url 网段（SSRF 防护）' },

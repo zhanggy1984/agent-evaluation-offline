@@ -28,6 +28,7 @@ from app.judge.client import (
     JudgeClient, JudgeError, JudgeVerdict, _validate_allowlist, detect_refusal, is_configured,
 )
 from app.judge.rubric import BUILTIN_RUBRIC_VERSION, load_rubric
+from app.judge.verdict_cache import judge_cache_key, verdict_cache
 from app.runner.scorer import score_run
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ _DEFAULT_LEASE = 600      # 认领默认租约（秒）；P0-1 单 task 最坏 r
                           # 默认值只兜崩溃回收，_process_one 内再按该 run 配置精确放大 lease_until
 _MAX_BACKOFF = 30         # 重试退避上限（秒）：min(30, 2^attempts)
 _RECLAIM_BATCH = 50       # 一轮回收 processing 超时任务上限
+_CACHE_MAX_ENTRIES = 10000  # judge 判分缓存容量上限（value 仅 KB 级，answer 只进 key）
 
 
 def _now() -> datetime:
@@ -62,7 +64,8 @@ def done_threshold_for(repeat: int) -> int:
 async def _load_global_cfg(db) -> dict:
     """judge 全局配置（system_config，is_hot 热生效）。"""
     from app.models import SystemConfig
-    keys = {"judge_llm.base_url", "judge_llm.model_name", "llm_allowlist", "judge_concurrency"}
+    keys = {"judge_llm.base_url", "judge_llm.model_name", "llm_allowlist", "judge_concurrency",
+            "judge_cache_enabled", "judge_cache_ttl_seconds"}
     rows = (await db.execute(select(SystemConfig).where(SystemConfig.key.in_(keys)))).scalars().all()
     cfg = {r.key: r.value for r in rows}
     return {
@@ -70,6 +73,10 @@ async def _load_global_cfg(db) -> dict:
         "model": (cfg.get("judge_llm.model_name") or "").strip(),
         "allowlist": cfg.get("llm_allowlist") or [],
         "concurrency": max(int(cfg.get("judge_concurrency") or 4), 1),
+        # 缓存默认（存量库未 seed 两键时兜底）：产品行为=开、TTL 24h
+        "judge_cache_enabled": True if cfg.get("judge_cache_enabled") is None
+                               else bool(cfg.get("judge_cache_enabled")),
+        "judge_cache_ttl_seconds": float(cfg.get("judge_cache_ttl_seconds") or 86400),
     }
 
 
@@ -172,21 +179,58 @@ async def _process_one(t: JudgeTask, run_cfg: dict, interface_id: int, client: J
             snapshot = cv.snapshot if cv else {}
             template = await load_rubric(db, t.dimension_code, interface_id)
             version = await _rubric_version(db, t.dimension_code, interface_id)
+            # 判分缓存：截断值提升为循环外共享局部变量——key 与 client.judge 调用同源，
+            # 防表达式各自内联导致漂移（如 tool_calls 空 [] 一处传 None 一处传 "[]"）变永久 miss
+            reasoning_trunc = (result.reasoning or "")[:4000]
+            tool_calls_trunc = (json.dumps(result.tool_calls, ensure_ascii=False)[:4000]
+                                if result.tool_calls else None)
+            answer_eff = result.answer or ""
+            cache_on = verdict_cache.enabled
+            ckey: str | None = None
+            if cache_on:
+                try:
+                    ckey = judge_cache_key(
+                        dimension=t.dimension_code, template=template,
+                        case_input=snapshot.get("input"),
+                        golden_answer=(snapshot.get("expected") or {}).get("golden_answer"),
+                        reference_docs=(snapshot.get("expected") or {}).get("reference_docs"),
+                        agent_output=answer_eff, agent_reasoning=reasoning_trunc,
+                        agent_tool_calls=tool_calls_trunc, rubric_version=version,
+                        model=client.model, base_url=client.base_url)
+                except Exception:
+                    # 静默降级：key 构造失败只关本轮缓存，绝不影响判分主链路
+                    logger.warning("judge_cache key 构造失败，本轮降级无缓存", exc_info=True)
+                    cache_on = False
             for i in range(repeat):
                 try:
+                    # 缓存命中短路：读「历史写入」的多数决值（跨 task/run 复用）。
+                    # 本 task 的写入在循环后才发生 → task 内 repeat 保持独立采样。
+                    if cache_on:
+                        try:
+                            cached = verdict_cache.get(ckey)
+                        except Exception:
+                            logger.warning("judge_cache 读取异常，本轮降级", exc_info=True)
+                            cache_on = False
+                            cached = None
+                        if cached is not None:
+                            verdicts.append(JudgeVerdict(
+                                dimension=t.dimension_code, level=cached["level"],
+                                score=cached["score"], reason=cached["reason"],
+                                rubric_version=version))
+                            continue
                     verdict = await client.judge(
                         dimension=t.dimension_code,
                         template=template,
                         case_input=snapshot.get("input"),
                         golden_answer=(snapshot.get("expected") or {}).get("golden_answer"),
                         reference_docs=(snapshot.get("expected") or {}).get("reference_docs"),
-                        agent_output=result.answer,
+                        agent_output=answer_eff,
                         # P2-A3：reasoning 维度判分证据透传。MEDIUMTEXT(16MB) + repeat 翻倍
                         # （最多 repeat×2 维次全量发送）会撑爆输入上下文 → 统一 [:4000] 截断；
-                        # answer 未截断是既有状态，本次不动（超待办范围）
-                        agent_reasoning=(result.reasoning or "")[:4000],
-                        agent_tool_calls=(json.dumps(result.tool_calls, ensure_ascii=False)[:4000]
-                                          if result.tool_calls else None),
+                        # answer 未截断是既有状态，本次不动（超待办范围）。截断值由循环外
+                        # 共享变量提供（与缓存 key 同源，防表达式漂移）
+                        agent_reasoning=reasoning_trunc,
+                        agent_tool_calls=tool_calls_trunc,
                         rubric_version=version,
                     )
                     # P0-6：答非所问轻量检测——judge 显式拒答（无法评估等）不信任其 level，
@@ -209,6 +253,15 @@ async def _process_one(t: JudgeTask, run_cfg: dict, interface_id: int, client: J
                                    t.run_id, t.case_id, t.dimension_code, i + 1, repeat, e)
             if len(verdicts) >= done_threshold:
                 agg = aggregate_verdicts(verdicts)
+                # 写缓存：仅多数决聚合值（非逐样本——末位覆盖会翻转跨 run 分数）。
+                # 放 commit 前 + 独立 try/except：缓存异常不得把已落库 done 的 task
+                # 翻转成 failed（外层 except 会把 done 变 attempts++）
+                if cache_on:
+                    try:
+                        verdict_cache.set(ckey, {"level": agg["level"], "score": agg["score"],
+                                                 "reason": agg["reason"]})
+                    except Exception:
+                        logger.warning("judge_cache 写入异常，忽略（纯优化）", exc_info=True)
                 t.status = "done"
                 t.result = agg
                 t.claim_id = None
@@ -259,6 +312,14 @@ async def _drain_once() -> None:
     from app.core.db import SessionLocal
     async with SessionLocal() as db:
         cfg = await _load_global_cfg(db)
+        # 判分缓存按全局配置刷新（is_hot：运营热关即时生效）；缓存纯优化——配置缺失
+        # （存量库/被 mock）或异常都只影响命中率，绝不打断一轮回收判分
+        try:
+            verdict_cache.configure(enabled=cfg.get("judge_cache_enabled", True),
+                                    ttl=cfg.get("judge_cache_ttl_seconds", 86400),
+                                    max_entries=_CACHE_MAX_ENTRIES)
+        except Exception:
+            logger.warning("judge_cache configure 失败，本轮无缓存（纯优化）", exc_info=True)
         if not is_configured(settings.judge_api_key, cfg["base_url"], cfg["model"]):
             return
         now = _now()
@@ -327,4 +388,9 @@ async def judge_worker_loop() -> None:
             await _drain_once()
         except Exception:
             logger.exception("judge worker 一轮异常")
+        # 判分缓存命中率埋点：每轮汇总打一条（有统计才打），便于观察命中率决定开关
+        hits, misses = verdict_cache.stats()
+        if hits or misses:
+            logger.info("judge cache 命中=%d 未命中=%d", hits, misses)
+        verdict_cache.reset_stats()
         await asyncio.sleep(_POLL_INTERVAL)
