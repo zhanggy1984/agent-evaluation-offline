@@ -18,8 +18,8 @@ from app.adapters.base import (MAX_ERROR_BODY, MAX_SSE_BODY, AdapterHTTPError,
 from app.core.sse_parser import SSEParseError, SSEParser
 from app.runner import executor
 from app.runner.executor import ERROR_BODY_TOO_LARGE, ERROR_CONNECT, ERROR_CONTRACT, \
-    ERROR_HTTP, ERROR_HTTP_CLIENT, ERROR_NO_DONE, ERROR_NO_USAGE, ERROR_SSE_PARSE, \
-    ERROR_TIMEOUT, execute_case
+    ERROR_HTTP, ERROR_HTTP_CLIENT, ERROR_NO_DONE, ERROR_NO_USAGE, ERROR_POOL_TIMEOUT, \
+    ERROR_SSE_PARSE, ERROR_TIMEOUT, execute_case
 
 
 def _sse_bytes(*frames) -> bytes:
@@ -400,4 +400,28 @@ def test_sync_error_body_capped_decode():
             out = await execute_case(_SyncAdapter(), c, _case())
         assert not out.ok and out.error_type == ERROR_HTTP
         assert len(out.error_detail) < 500  # detail 仅截断样本，未吞入整段错误体
+    run_in_isolated_loop(main())
+
+
+# ---------------- P1-2 连接池耗尽（PoolTimeout）分类 ----------------
+def test_pool_timeout_classified_separately():
+    # P1-2：PoolTimeout 是 TimeoutException 子类——except 顺序必须 PoolTimeout 先于
+    # TimeoutException，否则本地池耗尽被误标上游慢 timeout（非可重试，平台容量问题）
+    def handler(req):
+        raise httpx.PoolTimeout("connection pool exhausted")
+
+    async def main():
+        async with _client(handler) as c:
+            out = await execute_case(_SSEAdapter(), c, _case())
+        assert not out.ok and out.error_type == ERROR_POOL_TIMEOUT
+    run_in_isolated_loop(main())
+
+
+def test_prepare_pool_timeout():
+    # P1-2：prepare 阶段连接池耗尽同样归 pool_error（prepare 异常链也需先捕 PoolTimeout）
+    async def main():
+        async with _client(lambda req: httpx.Response(200, content=b"")) as c:
+            out = await execute_case(
+                _SSEAdapter(prepare_error=httpx.PoolTimeout("pool busy")), c, _case())
+        assert not out.ok and out.error_type == ERROR_POOL_TIMEOUT
     run_in_isolated_loop(main())

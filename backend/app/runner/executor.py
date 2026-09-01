@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 ERROR_NO_DONE = "no_done"          # SSE 流未收到 done
 ERROR_NO_USAGE = "no_usage"        # 未收到 usage（契约违反）
 ERROR_TIMEOUT = "timeout"          # 单用例超时
+ERROR_POOL_TIMEOUT = "pool_error"  # 本地连接池耗尽（P1-2：PoolTimeout，与上游慢区分）
 ERROR_HTTP = "http_error"          # 非 2xx（3xx/5xx，可重试技术失败）
 ERROR_HTTP_CLIENT = "http_client_error"  # HTTP 4xx 业务错（重试无益，不重试不熔断）
 ERROR_CONNECT = "connect_error"    # 建连/网络错误
@@ -76,6 +77,11 @@ async def execute_case(
         logger.warning("prepare 临时失败 HTTP %s case=%s: %s", exc.status_code,
                        getattr(case, "id", None), exc)
         return _fail(ERROR_HTTP, f"prepare: {exc}")
+    except httpx.PoolTimeout as exc:
+        # P1-2：本地连接池耗尽（并发超 limits 上限）与上游慢区分——平台自身容量问题，
+        # 重试无益（池仍饱和）且会放大负载 → pool_error 非可重试、不累计熔断
+        logger.warning("prepare 连接池耗尽 case=%s: %s", getattr(case, "id", None), exc)
+        return _fail(ERROR_POOL_TIMEOUT, f"prepare: {exc}")
     except httpx.TimeoutException as exc:
         # P0-2：prepare 超时 → 可重试（ERROR_TIMEOUT），不再误判 agent contract bug
         logger.warning("prepare 超时 case=%s: %s", getattr(case, "id", None), exc)
@@ -147,6 +153,10 @@ async def execute_case(
             except Exception as exc:
                 return _fail(ERROR_CONTRACT, f"parse_sync: {exc}")
             assembler.ingest_sync(unified, time.perf_counter() - start)
+    except httpx.PoolTimeout as exc:
+        # P1-2：必须先于 httpx.TimeoutException（PoolTimeout 是其子类）——本地池耗尽
+        # 归 pool_error 而非误标上游慢 timeout；非可重试（平台容量问题，重试放大负载）
+        return _fail(ERROR_POOL_TIMEOUT, f"连接池耗尽: {exc}")
     except asyncio.TimeoutError:
         return _fail(ERROR_TIMEOUT, f"单用例超时（{timeout_s}s）")
     except httpx.TimeoutException:

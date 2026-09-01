@@ -190,6 +190,15 @@ def test_agent_client_no_deny_no_regression():
     assert client._resolve("127.0.0.1", 80) == "127.0.0.1"
 
 
+def test_agent_client_explicit_pool_limits():
+    # P1-2：出站 client 显式配置连接池 limits（不再依赖 httpx 隐式默认）——
+    # 池耗尽才可被分类为 pool_error；64 连接对 run 内 inflight（默认 16）留 4x 余量。
+    client = build_agent_client()
+    pool = client._transport._pool
+    assert pool._max_connections == 64
+    assert pool._max_keepalive_connections == 16
+
+
 def test_agent_client_extra_cidrs_widen_allowlist():
     # P0-3：注册期自定义 CIDR（base_url_allowlist）必须在出站 client 生效——11.0.0.0/8
     # 不在默认白名单（默认 _resolve 拒绝），透传 extra_cidrs 后放行。
