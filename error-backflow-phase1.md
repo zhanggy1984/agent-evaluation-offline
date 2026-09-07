@@ -2,7 +2,7 @@
 
 > 仓库：`agent-evaluation-offline`（线下评测平台；本平台对线上观测平台 `agent-evaluation-online` 的角色 = **判定器 / 复现方**）
 > 依据：online 仓 `solution_detail.md` v1.1 §7（平台间契约与复验闭环 D19/D20）+ §8.7/§8.8（平台间端点与鉴权）+ §13.5（平台间审计）。
-> 状态：批 1 方案 **v0.2（四方向独立评审修入后定稿）**。批 2（判定器 executor 复现 + verifier no_fallback）另出方案，本文件只划边界、不实现。
+> 状态：批 1 方案 **v0.2（四方向独立评审修入后定稿；v0.2.1 契约修订 R1~R3 落改确认、v0.2.2 code_detail 实施转译注记，均不改方案语义，修订记录见文末）**。批 2（判定器 executor 复现 + verifier no_fallback）另出方案，本文件只划边界、不实现。
 > 评审（2026-09-03）：A 逻辑与模型贴合 / B 契约贴合 / C 安全与容错 / D 范围与测试 四路独立评审结论已全量修入；**契约修订包 R1~R3 已拍板接受、入环 0 对表**（online solution_detail 修订，offline 本方案按其语义实现并在相关节显式标注依赖）。**R1~R3 已于 2026-09-03 落 online `solution_detail.md` v1.2**（§7.2/§7.3/§8.7/§8.9 + 修订记录），本方案相关实现依赖已解除。
 > 关联：online 仓 `task.md`「联调闭环编排（环 0~3）」——批 1 覆盖环 0/环 1 offline 侧；环 2 双端集成、环 3 真实灰度在批 2 及后续。
 
@@ -239,7 +239,7 @@ CREATE TABLE error_backflow_inbox (
 - **闭环 = 远端已回写**：`case_created + ack_status=acked`（active 闭环）与 `rejected + ack_status=acked`（invalidated 闭环）都是终态。
 
 **迁移与不变量**：
-1. **复位规则（评审 A-B1 修复核心）**：任何「重新决策」入口——requeue 重处理（§6.5）、cap_gap 自愈重跑（§6.5）、blocked 人工复位——**必须先复位 `ack_status='none'`**（requeue 场景并覆盖 envelope_json；cap_gap 自愈建 case 场景清 reject_code），使该行重新进入对账/重扫可见范围。否则 `ack_status='acked'` 残留会让对账条件永不命中、补发 ack 永不发生。
+1. **复位规则（评审 A-B1 修复核心）**：任何「重新决策」入口——requeue 重处理（§6.5）、cap_gap 自愈重跑（§6.5）、blocked 人工复位——**必须先复位 `ack_status='none'`**（requeue 场景并覆盖 envelope_json；cap_gap 自愈建 case 场景清 reject_code），使该行重新进入对账/重扫可见范围。否则 `ack_status='acked'` 残留会让对账条件永不命中、补发 ack 永不发生。**【R-8 例外修订 2026-09-07（phase2 v0.7 §2.3 注④，H7-7）**：cap_gap 自愈重跑对**已 acked 的 invalidated 闭环行不再复位**——进「等待接入」探测态（每小时本地重跑自检+映射，补齐→建 case+发 active 复用 payload_id，仍缺→静默等轮）；复位规则仅适用首次/对账未闭环（`ack_status∈{none,pending}`）与 requeue/内容刷新场景。勿按本条旧语义对 invalidated 行补发 ack，code 随单独立项落。】**
 2. **`new` 卡住恢复（评审 A-B2）**：登记后处理崩溃/异常的行（`status='new'` 且 `updated_at` 超时或有 `last_error`）由 **inbox 驱动重扫**重跑 pipeline（复用留档 `envelope_json`，天然幂等）——**不依赖重拉窗口**（游标已过不回头）。pull_loop 循环第 ② 步（§6.1）。
 3. **ack 对账**：只扫 `status ∈ {case_created, rejected} AND ack_status ∈ {none, pending}`（§6.4）；`acked`/`blocked` 不重放。
 4. **ack 4xx 有界重试后落 `blocked`**（§6.6）；`blocked` 是停发态，运维看板/审计可查，人工复位后走规则 1。
@@ -299,6 +299,7 @@ pull_loop（main startup 起 asyncio task，周期默认 60s，env 可配）
 **增量锚必须在 online 时钟域——不再用 offline 本地墙钟当 since_ts**（评审四家独立命中：本地时钟 skew 漏拉/漏 requeue、轮末前向推进留永久漏拉窗口）。依赖契约修订 **R1**（pull 响应每条 payload 附 `assembled_ts`；已于 2026-09-03 落 online `solution_detail.md` v1.2，§2 契约修订包）：
 
 - **游标持久化**：`next_token` 分页游标存 `system_config`（`backflow_pull_token`）；增量水位 `backflow_since_ts` = **本批已成功登记（入 inbox）的 payload 的 `max(assembled_ts)`（online 时钟）**，而非轮末墙钟。**空轮（无返回/全为已处理）不前移水位**——防「拉取快照 → 写游标」间隙新 assembled 的 payload 被永久跳过。
+  - **实施转译注（2026-09-07，code_detail v0.2 §5.2）**：本行「单全局 `backflow_since_ts` = 本批成功登记 max」为**权威语义**；编码级实现采用**逐 agent 独立水位**——`backflow_since_ts = {agent_name: iso8601}`（存 system_config 单键），各 agent 只按**该 agent 成功登记** payload 的 `max(assembled_ts)` 推进、空轮**各自不前移**。理由：本 §6.2 下方「逐已注册 agent 拉取」下，单全局水位存在「快 agent 登记推高水位 → 慢 agent 已装配未拉 payload（assembled_ts < 新水位）被永久跳过」的固有漏拉窗口（评审 D-3 边界）；per-agent 记账 = 同一契约语义的**实现超集细化**（请求体本就按 `agent` 单值 + 各自 `since_ts` 请求，契约零改动）。**不改本行权威口径、不改契约**；下文凡引用「水位」处均以本注为实施口径。
 - **requeue 可见性靠契约**：requeue 刷新 `assembled_ts=now()` → 大于等于已存水位 → 重新进入增量范围（契约 §7.2 语义，offline 不需对 requeue 行做游标特殊处理；§6.5 重处理判据 + envelope 覆盖兜底内容刷新）。
 - **失败/卡住行不依赖重拉窗口**：由 §5.2 规则 2 inbox 驱动重扫（复用留档 `envelope_json`）兜底，与游标解耦。
 - **拉取范围 = 逐已注册 agent（评审 D-13/B-S5 裁定 Q4）**：pull_loop 按 offline `Agent` 表已注册名单**逐名带 `agent=<name>`** 拉取（契约 §8.7 pull 支持 agent 单值过滤）。收益：① 完全未知 agent **根本进不了响应**——不建 inbox、不驳回、不留 invalidated 占 online 重推位、无自愈全量重扫噪音；② 已知 agent 未接入才走 `offline_cap_gap`；③ 未来新增被测 agent 只需 offline 注册即自动纳入拉取名单（名单与 resolve 同源于 `Agent.name`）。agent 数少（现 4 家），请求量可忽略。每 agent 拉取仍带 `limit≤100` + `next_token` 翻页直至空。
@@ -356,7 +357,7 @@ pull_loop（main startup 起 asyncio task，周期默认 60s，env 可配）
 | online 现场内容缺/畸形 | `online_content_gap` | 等待 online admin requeue：requeue 刷新 `assembled_ts=now` → 下一轮增量拉取**再次返回该 payload_id** → inbox 见 `status='rejected' + reject_code='online_content_gap'` → **复位 `ack_status='none'` + `status→new` 重处理**（不是幂等跳过）→ 重拉信封**覆盖 inbox `envelope_json` 留档**（同 payload_id 内容已刷新，保审计链）→ 自检通过 → 建 case → ack active。本平台不自愈，避免用缺字段现场造次品 |
 
 **判据"重处理 vs 幂等跳过"（含复位规则，评审 A-B1 修复核心）**：拉到已在案的 payload_id：
-- `status='rejected'`（ack_status 任意，含已 acked 的 invalidated 闭环）→ **重处理**：`ack_status='none'`（requeue 场景并覆盖 envelope_json）→ 走 §6.3 步骤 2~5；
+- `status='rejected'`（ack_status 任意，含已 acked 的 invalidated 闭环）→ **重处理**：`ack_status='none'`（requeue 场景并覆盖 envelope_json）→ 走 §6.3 步骤 2~5；**【R-8 修订 2026-09-07（phase2 v0.7 §2.3 注④，H7-7）**：cap_gap 自愈场景判据收窄——仅 `ack_status∈{none,pending}`（首次 reject/对账未闭环）或收到 requeue/内容刷新（`online_content_gap` 重拉覆盖）时复位重处理；**已 acked 的 invalidated 闭环行不再复位、不重发 invalidated**，进「等待接入」探测态。本条「含已 acked 的 invalidated 闭环」为 v0.2.1 旧语义，勿按旧语义实现，code 随单独立项落。】**
 - `status='case_created'`（处理中 / 已 active 闭环）→ 幂等跳过（不重建、不重复 ack）；
 - `status='new'` 卡住行 → 幂等跳过本次重拉 + 由 §5.2 规则 2 inbox 重扫恢复。
 
@@ -649,3 +650,4 @@ README 测试计数（后端/集成/前端）更新；环 1 验收报告仿 `acc
 | v0.1 | 2026-09-03 | 草稿：批 1 范围、契约锚点、决策 D1~D5、数据模型、pull_loop、平台只读面、服务凭证、测试与联调计划。待独立评审。 |
 | v0.2 | 2026-09-03 | **四方向独立评审修入定稿**。裁决：契约修订包 R1~R3 接受（入环 0 对表）；砍别名；CaseVersion 延批 2；逐已注册 agent 拉取。修入：inbox 拆两维状态机 + 复位规则 + blocked 终态 + new 恢复（A-B1/B2/B3、B-B2、C-I6、D-9）；error case 单体写守卫 403 + create_run 拒 error suite（api/runs/cases/annotations/scaffold 纳入改动清单，§11 措辞修正）；增量锚改 assembled_ts 高水位、空轮不前移、逐 agent 拉取（§6.2）；只读面限定 error_regression + 字面量对表（§8）；interface 归一 + 版本不识别分支（§6.3/6.7）；过滤面扩全 + cleanup 归属修正（§5.4）；orchestrator 早退闸 + 批 2 前置登记（§7）；门控完整化 + async 出站 + SSRF 名单（§6.1/§10/§13）；测试全面补齐（§12）。 |
 | v0.2.1 | 2026-09-03 | **契约修订 R1~R3 落改确认**：online `solution_detail.md` v1.2 已落（R1 pull 响应逐 payload 附 `assembled_ts` / R2 ack 矩阵补 `invalidated(offline_cap_gap)→active` 例外 / R3 ack 400 带 `offline_status`+`invalidate_reason`；detail §7.2/§7.3/§8.7/§8.9 + task.md 环 0 登记），本方案对应实现依赖解除（§2 契约修订包 / risk 8 状态更新）。方案语义未再变更。 |
+| v0.2.2 | 2026-09-07 | **code_detail v0.2 实施转译注记**：§6.2 单全局水位补「逐 agent 独立水位」注——编码实现按 per-agent `backflow_since_ts = {agent_name: iso8601}`（各自 max 推进、空轮各自不前移），消解逐 agent 拉取下「快 agent 推高单水位 → 慢 agent 已装配未拉 payload 永久漏拉」固有窗口；同一契约语义超集细化，不改权威口径与契约（code_detail v0.2 §5.2）。方案语义未变更。 |
