@@ -393,7 +393,7 @@ ai-evaluation/
 
 ## 十、测试与验收
 
-**四家 agent V2 门禁全部通过（2026-08-31）**：发布前门禁评测（门禁判定规程 V2：规则维度全过 + judge 2/3 多数决 + run 级 agent_score 均值 ≥85，详见 [上线待办.md](上线待办.md)「门禁判定规程 V2」），4 家现有 agent 全 PASS——
+**四家 agent V2 门禁全部通过（2026-08-31）**：发布前门禁评测（门禁判定规程 V2：规则维度全过 + judge 2/3 多数决 + run 级 agent_score 均值 ≥85），4 家现有 agent 全 PASS——
 
 | agent | 复测 run | 结果 | 均分 |
 |---|---|---|---|
@@ -514,7 +514,6 @@ docker compose exec backend python -m app.seed   # 初始化数据
 - **用户使用指南**：[docs/用户使用指南.md](docs/用户使用指南.md)（面向使用者：登录与三角色 / 15 分钟跑通 / 五大页面 / 结果解读）
 - **Agent 接入评测指南**：[docs/Agent接入评测指南.md](docs/Agent接入评测指南.md)（面向接入工程师：契约 / manifest / 平台注册 6 步 / 离线自测）
 - **接入指南**：[docs/接入指南.md](docs/接入指南.md)（manifest v2 + 标准契约完整技术规范，含 4 家已接入样例）
-- **上线待办**：[上线待办.md](上线待办.md)（发布前检查清单 + 门禁判定规程 V2）
 - **产品需求**：[prd.txt](prd.txt)
 - **技术方案**：[solution.md](solution.md)（v0.3，88 项决策）
 - **方案明细**：[solution_detail.md](solution_detail.md)（v1.2，含遗留问题清单）
