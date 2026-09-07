@@ -1,14 +1,14 @@
 # 线上观测平台 error 回流 —— offline 侧权威编码详设（error-backflow solution_detail）
 
-> **定位**：Task #4 批 1 + 批 2 的**编码级详设**（= `backend/` 平台仓改造的实施规格）。**叠加基线**：批 1 = `error-backflow-phase1.md` **v0.2.2**；批 2 = `error-backflow-phase2.md` **v0.7.2**；消费契约 = online `solution_detail.md` **v1.9** / `solution.md` **v3.5.9** / `task.md` 环 0（R-13~R-24 实现清单登记，L49）。
+> **定位**：Task #4 批 1 + 批 2 的**编码级详设**（= `backend/` 平台仓改造的实施规格）。**叠加基线**：批 1 = `error-backflow-phase1.md` **v0.2.2**；批 2 = `error-backflow-phase2.md` **v0.7.2**；消费契约 = online `solution_detail.md` **v1.10** / `solution.md` **v3.5.9** / `task.md` 环 0（R-13~R-24 实现清单登记，L49）。
 >
 > **本稿承载范围**（一次性对齐终态语义，不再区隔批 1/批 2 时序——见 §1.3 实施顺序门）：error 回流整链在 offline 仓的代码落点 = ① DDL/迁移 ② 收单链路 pull_loop + inbox ③ error suite / error case 装载 / 断言固化（含 backfill） ④ error_regression run 自动触发（§5.2 consumed 锚 + R-3 差集对账） ⑤ error run 执行语义（orchestrator error 分支 / error 并发槽池 §8.3（limiter 共享 per-agent 层，M5 前置）/ 独立收尾 / scanner 短路，含 R-22 收尾 error_type 钉死） ⑥ 判定器 executor 复现 + verifier no_fallback（run_assertions 新调用点 + **R-12 text.py 空答 fail 修补——R-20 pre-scan 报告门禁先行**） ⑦ 平台只读面（R-4 cap 溢出列表 / R-5 agent 已见版本 / na_case+per-case error_type） ⑧ 统计/清理/读面隔离收口。**实施护栏**：R-19 code 一致性单测（executor error_type 常量 ⊆ phase2 §6.4 标注清单）+ R-22 收尾回填 error_type 单测（task 环 0 L49 登记）。
 >
 > **实施前置（关键）**：截至本稿（2026-09-07）`backend/` 全仓**零 error-backflow 落地**——`case_type / is_error_suite / error_backflow_inbox / error_regression / trigger_signal_id / excluded_case_ids / no_fallback` 均无标识符；`EvalRun.trigger_type` = `("manual","held_out")`；`TestCase.expected/assertions/metrics` 仍 `nullable=False`；无平台只读面。**本文 §2 的"现码事实"全部来自原文逐行核读（行号锚点），实施时以当时 HEAD 为准再对一遍**。
 >
-> **状态**：**v1.0 权威定稿**（2026-09-07：由 code_detail v0.3 升格权威化——交付核对单移除 / commit 收口 / 草稿措辞清理；演进史 v0.1 首稿 → v0.2 终审拍板 → v0.3 并发槽池裁决 A：§8.3 由 v0.2「接受叠加 ≤4 路」改为 **M5 前置 = limiter 进程级共享 per-agent 层**，向 phase2 §6.2 step4 R2 权威对齐；连带 M5 落点 / §2.5 结论 3 / §8.2 / §12 #23 / §13 行 3）。基线文档引用：文中「批 1 §x.y / 批 2 §x.y」= phase1 v0.2.2 / phase2 v0.7.2 章节号（phase1 引用其 v0.2.2 现行语义、phase2 引用其 v0.7.2 现行语义，含各自 v0.x 修订注记覆盖后的终态）；「detail §x.y」= solution_detail v1.9。双端已完成提交（2026-09-07：online main 0b4662f + e016c45 / offline dev dcf4680 + e85fa2e）。
+> **状态**：**v1.1 权威详设**（演进史：v0.1 首稿 → v0.2 终审拍板 → v0.3 并发槽池裁决 A → v1.0 权威定稿（2026-09-07 由 code_detail v0.3 升格权威化：交付核对单移除 / commit 收口 / 草稿措辞清理）→ v1.1 登记层增补（2026-09-07：§12 新增 §12.6 集成异常与边界用例 X-1~X-11，纯登记层无语义变更）；v0.3 并发槽池裁决 A：§8.3 由 v0.2「接受叠加 ≤4 路」改为 **M5 前置 = limiter 进程级共享 per-agent 层**，向 phase2 §6.2 step4 R2 权威对齐；连带 M5 落点 / §2.5 结论 3 / §8.2 / §12 #23 / §13 行 3）。基线文档引用：文中「批 1 §x.y / 批 2 §x.y」= phase1 v0.2.2 / phase2 v0.7.2 章节号（phase1 引用其 v0.2.2 现行语义、phase2 引用其 v0.7.2 现行语义，含各自 v0.x 修订注记覆盖后的终态）；「detail §x.y」= solution_detail **v1.10**（现行；= v1.9 语义 + §14.5 X 系列集成异常/边界用例登记层，无语义变更；本详设 §12.6 X-1~X-11 独立编号、跨仓不互引）。双端已完成提交（2026-09-07：online main 0b4662f + e016c45 / offline dev dcf4680 + e85fa2e）。
 >
-> **本文档 = error 回流 offline 侧权威编码详设**：语义基线 = phase1 v0.2.2 / phase2 v0.7.2 / detail v1.9 / solution v3.5.9；本 v1.0 承接该链的**代码级落点权威**，正文若与上述基线最新版冲突，以基线为准并回改本文（冲突历史见 §14 修订记录）。与 platform 本体 `solution_detail.md` v1.2 并存，error-backflow 词项零重叠，互不引用。
+> **本文档 = error 回流 offline 侧权威编码详设**：语义基线 = phase1 v0.2.2 / phase2 v0.7.2 / detail v1.10 / solution v3.5.9；本 v1.1 承接该链的**代码级落点权威**，正文若与上述基线最新版冲突，以基线为准并回改本文（冲突历史见 §14 修订记录）。与 platform 本体 `solution_detail.md` v1.2 并存，error-backflow 词项零重叠，互不引用。
 
 ---
 
@@ -790,6 +790,24 @@ shutdown: 取消 task（幂等，游标已落 config，不丢进度）
 - 集成：case_loader/orchestrator error 分支/scanner 回收（依赖真 MySQL 的走容器联调环，见 §13 风险）。
 - 端到端双端闭环 = 阶段 5 联调（task.md 联调环 0-3），本详设供码。
 
+### 12.6 集成异常与边界用例（环 1/环 2 验收，X 系列；error-backflow-task.md 阶段 D/F 引用）
+
+> 与 §12.1 单测矩阵（纯逻辑、不触库）区分：本小节登记**依赖真 MySQL / 对端 stub 的集成异常/边界面**验收用例，任务落点锚 O-*（`error-backflow-task.md`），环列 = 归属联调环（环 1 = 阶段 D/G3 单端 stub 收单；环 2 = 阶段 F/G5 双端走查）。X 系列为 `error-backflow-task.md` 阶段 D/F 集成测试的**编号化验收锚**，断言语义转正自各 O-D/O-F 任务验证目标（不新增语义）。场景编号与 online `solution_detail.md` §14.5 X-1~X-13 各自独立（跨仓不互引），但环 2 条目在 O-F.6 与 online T-4.6 / T-4.14⑤ 对端场景对齐。
+
+| # | 环 | 测点 | 断言 | 落点 |
+|---|---|---|---|---|
+| X-1 | 1 | 畸形信封 / 未知 case_type / 不支持 schema_version | `validate_envelope` fail → rejected + ack invalidated 计数，不建 error case/suite | O-D.3（§5.3） |
+| X-2 | 1 | agent/interface 未映射 + cap_gap 探测补齐 | 不命中 → rejected + offline_cap_gap + ack invalidated；探测补齐后 → 建 case + 单次 ack active（R-8） | O-D.3/O-D.4（§5.8） |
+| X-3 | 1 | ack 404（ERR_PULL_0003）/ 网络异常 | → blocked + 人工核查通道（与 400 分开）；有界重试落 blocked | O-D.4（§5.7） |
+| X-4 | 1 | ack 400 ERR_CLUSTER_0003（manual_invalidate 竞态） | 解析 offline_status/invalidate_reason → §5.9 竞态对账本地作废已建 case；inbox 落 rejected + manual_invalidate + acked | O-D.4（§5.9） |
+| X-5 | 1 | 崩溃两洞顺序 + ack 幂等 | 本地落库 commit 先于 ack；commit 前进程死 → 重启对账重放不丢不重；重复 ack 200→acked 不重发 | O-D.1/O-D.3（§5.5 顺序铁律）/O-D.4 |
+| X-6 | 1 | requeue 复位重扫 + 防抖 + 慢 agent 水位 | requeue 后重扫自愈；防抖 ≥5min 不风暴；慢 agent 独立 since_ts 水位不回退 | O-D.2/O-D.4（§5.2） |
+| X-7 | 1 | GET_LOCK 单飞 + 单步异常 | 双实例同轮仅一实例执行；单步炸不退出循环、退避自愈 | O-D.1 |
+| X-8 | 2 | 双端停摆/恢复 | offline pull 停 N 天 → online 提示性标记（不设 offline 时钟）；offline 恢复续拉不丢、积压限速无峰值 | O-F.6（对齐 online T-4.6/E-11） |
+| X-9 | 2 | 共享 infra 断连 / 网络异常 | 单步独立 try/except 退避；恢复自愈无静默吞错；cap_gap 探测态无重复 invalidated 出站（R-8） | O-D.4/O-F.6（对 online X-11 对端面） |
+| X-10 | 2 | 并发交错（requeue/manual_invalidate × 并发拉取 × ack 重放） | 无覆盖竞态、审计链完整、幂等不重发 | O-D.4/O-F.6（对齐 online T-4.14⑤） |
+| X-11 | 2 | 只读面对拍异常 + service token | R-4 excluded（非空/空）/ R-5 versions / R-16 缺行比对输入形状与 online fake 读回逐项一致；service token 缺失/伪造 → 401/403、人工 token 拒绝 | O-F.2/O-F.3（§10.2/§10.3） |
+
 ---
 
 ## 13. 风险与开放项
@@ -819,3 +837,4 @@ shutdown: 取消 task（幂等，游标已落 config，不丢进度）
 | v0.2 草稿 | 2026-09-07 | 终审逐条拍板落字：§5.2 增量水位改逐 agent 独立 since_ts（消解单全局水位慢-agent 漏拉）；§7.3 补坏终态双路径互补注（撤销「伪矛盾」误判，权威 L237/L260 同存）；§8.3 重写——现码 KeyedLimiter 桶间不共享 per-agent sem（limiter.py 核读事实），error 桶 per_agent=1 串行、叠加上限 manual(≤3)+error(1) 如实接受、limiter 核心不改、进程级 agent 共享闸列后续增强；§9.3 补 G0 与 backflow_enabled 生产联动；§9.4 白名单豁免载体改 pre-scan 逐 suite 评估（对象 = 存量 manual/held_out 用例，非 error case）；§3.4/§12.4 R-22 护栏补「已终值行不改写 + 回填只落实跑集无结果 case」断言；§1.1/§2.1/§4.4/header 清 case_truncated 幽灵（R-10 为 online needs_review 侧 reason 4，offline 无列）；§2.2/§10.1 `_run_out` 行号 193→200（核读值）；§8.6 补 run 终态行锁注（不另造 CAS）；§13 行 3 重写 + 行 14 新增。双端未 commit（CLAUDE.md 禁忌），待用户终审。 |
 | v0.3 草稿 | 2026-09-07 | 并发槽池裁决（用户拍板 A）：§8.3 由 v0.2「不改 limiter、接受叠加上限 manual(≤3)+error(1)=4」改为 **M5 前置 = KeyedLimiter 增进程级共享 per-agent 信号量层**（`_agent_sem: dict[str, asyncio.Semaphore]`，容量 = per_agent_concurrency；acquire 序 shared-agent → 桶内；manual/held_out 业务零改动 + 行为等价回归；error ≤1 路 FIFO 排队、同 agent 总并发 ≤ 上限、不叠加超限）——向 phase2 §6.2 step4（R2 共享槽池）权威对齐，撤销 v0.2 叠加接受取向；连带 §1.1 M5 落点加 core/limiter.py / §2.5 结论 3 重写 / §8.2 槽 acquire 措辞 / §12.1 矩阵 + #23 / §13 行 3 重写。双端未 commit（CLAUDE.md 禁忌），待用户终审。 |
 | v1.0 权威定稿 | 2026-09-07 | 由 code_detail v0.3 升格（更名 `error-backflow-solution_detail.md`；原 code_detail 加归档注保留不删）：header 状态升 **v1.0 权威定稿** + 自我降格声明改写为权威声明（B1）；修订记录增本行（B2）；文末交付核对单（Task #53 回执块）移除不并入（B3，用户拍板）；§4.4 L242 草稿过程指涉改写为规则陈述（B4）；双端 commit 收口 = online main 0b4662f + e016c45 / offline dev dcf4680 + e85fa2e。基线确认 = phase1 v0.2.2 / phase2 v0.7.2 / detail v1.9 / solution v3.5.9。 |
+| v1.1 权威详设 | 2026-09-07 | §12 新增 §12.6「集成异常与边界用例（环 1/环 2 验收，X 系列；error-backflow-task.md 阶段 D/F 引用）」X-1~X-11：把 `error-backflow-task.md` 阶段 D（G3 环 1 收单/ack/崩溃）与阶段 F（G5 环 2 双端）集成测试的异常/边界验收锚编号化（断言语义转正自 O-D.1~O-D.5 / O-F.1~O-F.6 验证目标 + 批 1 §12.2 环 1 / 批 2 §11.2 环 2 对端面），不新增语义；header 状态同步 v1.1。语义基线 phase1 v0.2.2 / phase2 v0.7.2 / solution v3.5.9 / 消费契约 detail 对应版不动。 |

@@ -1,8 +1,8 @@
 # agent-evaluation-offline error 回流改造任务拆解（error-backflow task / WBS）
 
-> 目的：把 `error-backflow-solution_detail.md`（**v1.0 权威编码详设**，2026-09-07 由 code_detail v0.3 升格）中"要落代码的事"，按实施顺序门 G0~G6 拆成**可执行任务项**，每项给三要素——内容（代码落点文件 + 权威详设章节）→ **验证目标**（单测断言 / §12.1 矩阵 # / 环场景 / R 护栏），指导排期、认领与验收。本文**不重述方案推导**，只做执行层拆解并锚定权威详设章节。
+> 目的：把 `error-backflow-solution_detail.md`（**v1.1 权威详设**，2026-09-07 由 code_detail v0.3 升格 v1.0 权威化 + §12.6 X 系列登记层增补至 v1.1）中"要落代码的事"，按实施顺序门 G0~G6 拆成**可执行任务项**，每项给三要素——内容（代码落点文件 + 权威详设章节）→ **验证目标**（单测断言 / §12.1 矩阵 # / 环场景 / R 护栏），指导排期、认领与验收。本文**不重述方案推导**，只做执行层拆解并锚定权威详设章节。
 >
-> 权威口径：实施规格 = error-backflow-solution_detail.md **v1.0**（本文唯一直接实施源，正文「详设 §x.y」即其章节）；语义基线链 = 批 1 `error-backflow-phase1.md` **v0.2.2** + 批 2 `error-backflow-phase2.md` **v0.7.2** + 消费契约 online `solution_detail.md` **v1.9** / `solution.md` **v3.5.9** / online `task.md` 环 0~3（正文「批 1/批 2 §x.y」= 对应权威文档章节，仅当详设正文已引用时才附锚，不臆造次级锚）。原 `error-backflow-code_detail.md` v0.3 已退役归档（只读不维护），不作为实施源。
+> 权威口径：实施规格 = error-backflow-solution_detail.md **v1.1**（本文唯一直接实施源，正文「详设 §x.y」即其章节）；语义基线链 = 批 1 `error-backflow-phase1.md` **v0.2.2** + 批 2 `error-backflow-phase2.md` **v0.7.2** + 消费契约 online `solution_detail.md` **v1.10**（= v1.9 语义 + §14.5 X 系列登记层，无语义变更）/ `solution.md` **v3.5.9** / online `task.md` 环 0~3（正文「批 1/批 2 §x.y」= 对应权威文档章节，仅当详设正文已引用时才附锚，不臆造次级锚）。原 `error-backflow-code_detail.md` v0.3 已退役归档（只读不维护），不作为实施源。
 >
 > 事实前提：**代码零落地**（截至 2026-09-07 详设核读，offline `backend/` 无 error-backflow 实现；本文为研发启动首拆）。**文件路径一律相对 `backend/app/`**（真实仓库布局，如 `assertions/ops/text.py`，勿照抄详设个别节标题的 `core/assertions/...` 笔误路径）；详设 §2 行号为核读时点值，**实施时以当时 HEAD 重对一遍再改**。
 
@@ -62,7 +62,7 @@
 - **O-D.4 ack 发送/对账 + R-8 节流 + requeue/manual_invalidate 竞态**：`send_ack`（active/invalidated，前置矩阵）；404 ERR_PULL_0003 → blocked + 人工核查（与 400 分开）；400 ERR_CLUSTER_0003 解析 offline_status/invalidate_reason → manual_invalidate 走 §5.9 竞态对账 / 否则有界重试落 blocked；对账扫描重放 NEEDS_ACK（幂等 200 即 acked）；**R-8 cap_gap 探测态节流**：rejected+offline_cap_gap 已 acked 行每小时本地重跑映射——补齐 → 建 case + 单次 ack active（契约 R2 `invalidated(offline_cap_gap)→active`）/仍缺 → 静默等轮，**不复位 ack_status、不重发 invalidated**（复位重处理仅限 ack_status ∈ {none,pending} 或收到 requeue/内容刷新）；online_content_gap 等 requeue 重拉覆盖；manual_invalidate 本地作废已建 case + inbox 落 rejected+manual_invalidate+acked（详设 §5.7/§5.8/§5.9）。**验证目标**：对账幂等不重发；R-8 探测态不风暴（节流计数断言，低频每小时）；requeue 后重扫自愈；manual_invalidate 本地作废。
 - **O-D.5 fake-online stub 基建（环 1，`backend/tests/`）**：fixture 回放 online pull/ack 响应 + 双向认证形状（R1~R3 + R-4~R-24 修订契约 shape），供 O-D.2~O-D.4 驱动（详设 §12.5 验证层级 + 批 1 §12.2 环 1：fixture + fake-online，无真实 online，C3 只入测试基建）。**验证目标**：stub 驱动收单/建 case/ack 全链路仓内全绿。
 
-**阶段出口（G3）**：pull_loop 打通 → error suite/case + ack 闭环（详设 §1.3 G3）。
+**阶段出口（G3）**：pull_loop 打通 → error suite/case + ack 闭环 + 详设 §12.6 X-1~X-7（环 1 集成异常/边界用例）全绿（详设 §1.3 G3）。
 
 ## 阶段 E｜G4：M4/M5/M6 逻辑层
 
@@ -89,7 +89,7 @@
 - **O-F.5 config keys + 启动挂接（M8，`seed.py` DEFAULT_SYSTEM_CONFIG L345-422 段 + `main.py` startup）**：system_config seed 加 `backflow_enabled`（false 总开关，false 停 worker/调度/差集对账保留已建数据）/ `backflow_pull_token` / `backflow_since_ts`（json 逐 agent）/ `backflow_poll_interval`（60）/ `backflow_hard_lease_sec` / `backflow_heartbeat_sec`（15）+ error-run 预算/breaker/并发组（按 adapter）；seed 缺省关闭态、代码路径不做隐式 on；`main.py` startup 门控 `backflow_enabled`：迁移检查（表/列/索引在，缺失 → fail fast）+ 注册 pull_loop worker + 差集对账低频 task + cap_gap probe task；shutdown 取消 task 幂等游标不丢（详设 §11.2/§11.3）。**验证目标**：关闭态零副作用（未配 backflow 前 DB 空表可跑）；开启后 worker 注册/停 worker 幂等。
 - **O-F.6 环 2 双端走查（offline 侧真跑 + online fake）**：本地共享 infra（MySQL 分库）下走 phase2 §11.2 场景 1-22 offline 侧 + online fake 消费（R-3 差集补建 / R-4 excluded / R-5 versions 透出核对 / R-16 缺行比对输入侧），对应 online task.md 环 2 出口（E-1~E-29 中 offline 侧用例，E-23~E-29 修订包端到端）（详设 §12.5 验证层级 + 批 2 §11.2）。**验证目标**：场景 1-22 offline 侧全走通；online fake 读到 R-4/R-5/R-16 字段位。
 
-**阶段出口（G5）**：环 2 走查全绿（详设 §1.3 G5）。
+**阶段出口（G5）**：环 2 走查全绿 + 详设 §12.6 X-8~X-11（环 2 双端异常/只读面对拍用例）全绿（详设 §1.3 G5）。
 
 ## 阶段 G｜G6：M9 护栏并入 CI
 
@@ -127,8 +127,8 @@
 ## 测试与联调环归属
 
 - **环 0（契约）**：已由批 1 契约定稿（pull/ack/回写 + schema_version + case_type 白名单 + 双向认证 + 游标/ack 语义 + R1~R3/R-4~R-24 修订）——本 task 的前置输入，实施以环 0 契约形状造 fixture/stub 样例（O-D.5）。
-- **环 1（单端 stub）**：offline 侧 = 阶段 C/D（O-C.* 纯函数 + O-D.5 fake-online stub + O-D.2~O-D.4 收单/建 case/ack 闭环），仓内全绿无需真对端（详设 §12.5 + 批 1 §12.2）。
-- **环 2（双端集成）**：阶段 F（O-F.1~O-F.6），同机双端 + 本地共享 infra（MySQL 分库），走 phase2 §11.2 场景 1-22 + online E-1~E-29 中 offline 侧依赖用例；与 online task.md 环 2 出口一致。
+- **环 1（单端 stub）**：offline 侧 = 阶段 C/D（O-C.* 纯函数 + O-D.5 fake-online stub + O-D.2~O-D.4 收单/建 case/ack 闭环），仓内全绿无需真对端（详设 §12.5 + 批 1 §12.2）；集成异常/边界验收用例 = 详设 §12.6 X-1~X-7。
+- **环 2（双端集成）**：阶段 F（O-F.1~O-F.6），同机双端 + 本地共享 infra（MySQL 分库），走 phase2 §11.2 场景 1-22 + online E-1~E-29 中 offline 侧依赖用例；集成异常/边界验收用例 = 详设 §12.6 X-8~X-11（X-9/X-10 对 online X-11 对端面）。与 online task.md 环 2 出口一致。
 - **环 3（真实流量灰度）**：不在本 task（属放量阶段，online task.md 阶段 5；backflow_enabled 上线隐含 G0 已过/R-12 已合入，详设 §9.3）。
 
 ## 风险与关注（本 task 层面）
