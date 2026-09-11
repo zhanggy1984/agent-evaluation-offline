@@ -1,8 +1,8 @@
 # 线上观测平台 error 回流 —— offline 侧配套改造方案（批 1：契约先行 + 收单就位）
 
 > 仓库：`agent-evaluation-offline`（线下评测平台；本平台对线上观测平台 `agent-evaluation-online` 的角色 = **判定器 / 复现方**）
-> 依据：online 仓 `solution_detail.md` v1.1 §7（平台间契约与复验闭环 D19/D20）+ §8.7/§8.8（平台间端点与鉴权）+ §13.5（平台间审计）。
-> 状态：批 1 方案 **v0.2.3（v0.2 四方向独立评审修入后定稿；v0.2.1 契约修订 R1~R3 落改确认、v0.2.2 code_detail 实施转译注记**（均不改方案语义）**；v0.2.3 = 平台间契约方向反转同步**（online `solution_detail.md` v1.23），**改方案语义，见文末修订记录**）。批 2（判定器 executor 复现 + verifier no_fallback）另出方案，本文件只划边界、不实现。
+> 依据：online 仓 `solution_detail.md` v1.23 §7（平台间契约与复验闭环 D19/D20）+ §8.7/§8.8（平台间端点与鉴权）+ §13.5（平台间审计）。
+> 状态：批 1 方案 **v0.3.0（v0.2 四方向独立评审修入后定稿；v0.2.1 契约修订 R1~R3 落改确认、v0.2.2 code_detail 实施转译注记**（均不改方案语义）**；v0.2.3 = 平台间契约方向反转同步**（online `solution_detail.md` v1.23），**v0.2.3 改方案语义；v0.3.0 = 第 2 刀 + 第 3 刀回填 + 术语/锚点收口**，均见文末修订记录）。批 2（判定器 executor 复现 + verifier no_fallback）另出方案，本文件只划边界、不实现。
 > 评审（2026-09-03）：A 逻辑与模型贴合 / B 契约贴合 / C 安全与容错 / D 范围与测试 四路独立评审结论已全量修入；**契约修订包 R1~R3 已拍板接受、入环 0 对表**（online solution_detail 修订，offline 本方案按其语义实现并在相关节显式标注依赖）。**R1~R3 已于 2026-09-03 落 online `solution_detail.md` v1.2**（§7.2/§7.3/§8.7/§8.9 + 修订记录），本方案相关实现依赖已解除。
 > 关联：online 仓 `task.md`「联调闭环编排（环 0~3）」——批 1 覆盖环 0/环 1 offline 侧；环 2 双端集成、环 3 真实灰度在批 2 及后续。
 
@@ -46,7 +46,7 @@ error 回流闭环一句概括（online 视角）：**线上发现可判定的�
 
 - executor 复现被测 agent、verifier no_fallback 判分（批 2）。
 - `error_regression` run 的**执行语义**：免互斥槽 / 不经 SCORING / 不产 agent_score / 独立保留档（批 2，契约 §7.3 #3/#4）。批 1 只做模型与加载隔离预留。
-- `claim → 回查 → fixed` 的 online 侧流转验证（环 2/批 2）。
+- `claim → 接收结果推送 → fixed` 的 online 侧流转验证（环 2/批 2）。
 - error case 的长期驻留/过期运营策略（批 2 及后续，风险节登记）。
 - 前端完整改版（error suite 前端只读标注与隐藏为批 1 收尾小改，见 §5.4）。
 
@@ -121,7 +121,7 @@ error 回流闭环一句概括（online 视角）：**线上发现可判定的�
 |---|---|
 | `POST /pull/payloads` | 拉取请求 `{schema_version:"1.0", case_type:"regression_error", agent?, limit≤100, since_ts?}` → 响应 `{payloads:[信封], next_token?}`；case_type 白名单外**返回空集**（不传非法值） |
 | `POST /pull/ack` | 状态回写（§2.3） |
-| **`POST /backflow/regression-results`** | **结果推送（v0.2.3 新增，批 2 落点）**：`error_regression` run **终态 commit 后**异步推「run 终态 + 逐 case 原始行」；鉴权 `scope=backflow:report`（§9）；幂等键 = `uk_verify_run(link_id, run_id)`（重复推 = 200 `duplicated:true`）；超时 5s、重试 3 次（1s/2s/4s），全败记 error 后放弃、**不阻塞 run 收尾**。载荷字段表见 online `solution_detail.md` §8.7。**必带两个水位字段**：**`bound_version_first_seen`**（该 (agent, version) 在**本平台**是否首次出现终态 run → online 的 `fix_version` 守卫）与 **`agent_latest_version`**（本平台该 agent **已有终态 run 的最大版本**，按门控序 → online 的**防假连续**守卫：`V ≤ 水位` 缺记录 = 真缺行→中断；`V > 水位` = 还没跑到→保持 pending）——**两者同一次查询产出，漏带任一则该条守卫失效**（契约必填，非可选）。**鉴权口径（v0.2.3 实证）**：online 侧服务凭证实现为**静态预共享 secret**（`require_evaluator`），**非 §9 设计的 JWT**——**三端点共用同一 secret，无 scope 分置** |
+| **`POST /backflow/regression-results`** | **结果推送（v0.2.3 新增，批 2 落点）**：`error_regression` run **终态 commit 后**异步推「run 终态 + 逐 case 原始行」；鉴权 = **静态预共享 secret**（`Authorization: Bearer <secret>`，三出站端点共用同一 secret、**无 scope 分置**，§9）；幂等键 = `uk_verify_run(link_id, run_id)`（重复推 = 200 `duplicated:true`）；超时 5s、重试 3 次（1s/2s/4s），全败记 error 后放弃、**不阻塞 run 收尾**。载荷字段表见 online `solution_detail.md` §8.7。**必带两个水位字段（同一次查询产出，漏带任一则对应 online 守卫失效；契约必填、非可选）**：① **`agent_latest_version`**（本平台该 agent **已有终态 run 的最大版本**，按门控序）→ online 的 **fix_version 未发版（`no_progress`）**判定（`fix_version > agent_latest_version`）；② **`prev_terminal_version: str \| None`**（**本次 run 之前**、该 agent 最近一个**已到终态** run 的版本）→ online 的**「缺行中断」**守卫；**必填但值可为 `null`**（= 该 agent 此前无任何终态 run，即首次）。**⚠️ 口径硬约束（v0.3.0 依 online `verify.py` 实证）**：两个水位字段均为 **agent 级事实**——统计范围 = 该 agent **全部终态 run**，**不得**按 `trigger_type='error_regression'` 收窄（online `_agent_versions(session, agent)` 签名内无 trigger_type 过滤）。manual/held_out run 虽**不触发推送**，但其版本**计入**水位。offline 侧若误按 trigger_type 收窄 → 与 online「缺行中断」判据系统性错位 → 假中断。**载荷契约约束（v-next 补充）**：**(a)** `cases[]` 内 `case_id` **必须唯一**（同一 payload 内重复 → online **整单拒** `ERR_PULL_0002`）；**(b)** `finished_ts` 必须为**合法 ISO8601**（否则拒单）；**(c)** `cases_dropped` 在幂等重放时**不归零**——offline 重试时**不得**据此判断「没丢数据」；**(d)** `links_advanced` 口径 = online 侧**真正发生终态迁移的 link**（passed/failed/superseded），**非**「本次新落 run 行的 link」；**(e)** **v1 硬约束**：一次回归 run **只对应一个 cluster**（`trigger_signal_id` 单值），跨 cluster 批量回归**不在 v1**。**鉴权口径（v0.2.3 实证）**：online 侧服务凭证实现为**静态预共享 secret**（`require_evaluator`），**非 §9 设计的 JWT**——**三端点共用同一 secret，无 scope 分置** |
 
 **~~online → offline（本平台实现，只读）~~——v0.2.3 整组作废**：
 
@@ -135,6 +135,8 @@ online **不再调用本平台任何接口**（方向反转：回归结果改由
 | 2 | ~~list_runs 支持 agent+version+status+**case_id** 过滤；run_results 返回 `case_id+case_type+pass_fail`~~ **v0.2.3 取消**（只读面整组作废）；替代 = **推送载荷字段级对齐**：`case_id + case_type + pass_fail + error_type` 随 `cases[]` 全量推，online 侧全量对账（不存在「缺行」，故原 R-4/R-16 的 `excluded_case_ids` 字段位一并取消） | §2.4 推送端点（批 2 落点） |
 | 3 | 回归 run 不占互斥槽 / 不参与 max_active_runs / 独立保留档 | 批 2 落点（批 1 只做模型与隔离预留，§7.3） |
 | 4 | error-only run 的 pass_fail = executor 技术判定 ∧ verifier no_fallback，verifier 阶段落终值，不经 SCORING、不产 agent_score | 批 2 落点（§7.3） |
+
+> **「结果未达」判据（v-next 补充，online 侧口径）**：online 判「结果未达」= **事件派生**（由 link / claim 的状态事件推导），**非在线时窗轮询**；阈值 N = `dict_config.claim_ttl_days`（默认 14）——超 N 天无推进即标记；**抑制条件** = 未到期 claim 期内**不**标记。**本平台无需配合**（无对应字段/接口义务），此处仅同步口径，防把 online 侧描述误写成「online 超时轮询」。
 
 ---
 
@@ -158,11 +160,11 @@ online                               offline
   │── 200（幂等）───────────────────►│  ⑦ inbox ack 落位；未确认的留待对账重放（§6.4）
   │                                  │
   │  （批 2）agent 发声称修复版本 → error_regression run 覆盖哨兵 → executor+verifier 判
-  │  GET /api/v1/runs?agent&version&case_id ──►│  ⑧（本文件 §8 只读面，供 online 回查；批1 返回真实 run 为空，
-  │  GET /api/v1/runs/{id}/results    │        以 fixture run 验证序列化）
+  │◄── /backflow/regression-results ─┤  ⑧ run 终态 commit 后异步推送结果（§2.4：fire-and-forget + 有限重试，
+  │                                  │    不阻塞收尾；批 1 返回真实 run 为空，以 fixture run 验证序列化）
 ```
 
-收单侧职责窄化说明（C1 结论）：**本链路不创建任何 error_regression run**。判定 run 的触发方 = 被测 agent 发版回归流程（既有评测模式），时机 = online claim 填 fix_version 之后。批 1 里"该 case 无任何 run 覆盖"是**正常态**，反查对未判定 case 返回空集（online 侧 continue pending 轮询，§8.2）。
+收单侧职责窄化说明（C1 结论）：**本链路不创建任何 error_regression run**。判定 run 的触发方 = 被测 agent 发版回归流程（既有评测模式），时机 = online claim 填 fix_version 之后。批 1 里"该 case 无任何 run 覆盖"是**正常态**，无 run 覆盖即**无推送**；online 侧改由「**超时未收到推送**」被动探测（§2.4/§2.5），**不再有「反查空集 → continue pending 轮询」形态**（§8.2 已作废）。
 
 ---
 
@@ -418,7 +420,7 @@ error_regression run 的执行语义（免互斥槽 / 不经 SCORING / 不产 ag
 **批 2 前置登记（评审多方向点名，防漏改）**：
 - **run 级清理豁免**：现 `cleanup_rules.py` 按 agent+suite 保留 N 次删 `EvalRun`；error_regression run 须 pinned 豁免（契约 §7.3 #3），清理先归档 pass_fail 终态（评审 A-I1/D-8）。
 - **dashboard 全聚合排除**：`dashboard.py` gate/trend/compare/perf/cost/baseline 现只排除 `held_out`，批 2 引入 error_regression run（无 agent_score）后须统一加 `trigger_type != 'error_regression'` 排除，否则污染版本/趋势/成本卡片与 stale suite 判定（评审 A-A3）。
-- **error_regression run 创建入口强制**：`case_ids` 必须显式非空定向集合（不置 null——§8.2 反查 JSON_CONTAINS 依赖，评审 B-V1/A-A4）；`version` 落被测 agent 声称修复版本 = online claim fix_version。
+- **error_regression run 创建入口强制**：`case_ids` 必须显式非空定向集合（不置 null——原 §8.2 反查 JSON_CONTAINS 依赖；该节 v0.2.3 已作废，但「定向非空」约束因归因需要**独立保留**，评审 B-V1/A-A4）；`version` 落被测 agent 声称修复版本 = online claim fix_version。
 - **version 非 semver 放开（评审 D-14）**：现 `create_run` 强校验 `^\d+\.\d+\.\d+$`，online fix_version 形如 `2026.08.31-r47`——批 2 error_regression run 创建入口须放开该校验（fixture 阶段无感，批 2 会踩）。
 
 ---
@@ -430,37 +432,29 @@ error_regression run 的执行语义（免互斥槽 / 不经 SCORING / 不产 ag
 > - **保留有效**：**§8.3 字面量对表**——`run_status` 终态值集仍被结果推送载荷复用（§2.4），该表的字面量对齐工作**仍须做**，只是承载它的是推送载荷字段而非只读面响应。
 > - 保留章节正文仅为历史设计记录，**实施时以 §2.4 推送契约为准**。
 
-### 8.1 路由与鉴权挂点
+### 8.1 路由与鉴权挂点——**v0.2.3 作废**
+
+> **v0.2.3 作废**：新文件 `backend/app/api/platform_runs.py` 与依赖 `require_service_scope("platform:readonly")` **一并取消实现**（§8 整节作废）；结果回传改由 offline 主动推送 `POST /backflow/regression-results`（§2.4）承载。以下正文仅作历史设计记录。
 
 - 新文件 `backend/app/api/platform_runs.py`：`APIRouter(prefix="/api/v1/runs")`，`main.py` 挂载（`include_router(platform_runs.router)` 即可，prefix 已在路由内）。
 - **鉴权独立**：不依赖 `get_current_user`/`require_role`（人类 JWT 体系）。新增依赖 `require_service_scope("platform:readonly")`（§9），校验服务凭证 JWT（iss/scope/type/exp）。
 - 该面**只读**、无任何写端点；现人类 `/api/runs` 及业务逻辑（redact/留出集隐藏）一概不动。
 
-### 8.2 端点规格
+### 8.2 端点规格——**v0.2.3 作废**
 
-**`GET /api/v1/runs?agent=&version=&status=&case_id=`**
-
-- **服务端强制只返回回归 run（评审 B-V1 修入）**：该面查询默认前置 `trigger_type='error_regression'`——online 不带 case_id 只查 agent+version（"待 <version> 回归 run"提示）时，不会被同 agent 同 version 的 manual/held_out run 冒充回归覆盖。
-- 过滤语义：`agent` = `Agent.name` 精确匹配（砍别名后与 pull 侧同源，评审 B-V4/A-I3 问题自消；参数可空窄化——不命中只收窄结果、不因它整空）；`version` = `EvalRun.version`（error_regression run 存被测 agent 声称修复版本 = online claim fix_version）；`status` = run 状态枚举；**`case_id` = run 的 `case_ids`（JSON）含该 case**。
-- `case_id` 过滤实现约定：error_regression run 的创建方（批 2/测试）**必须显式写 `case_ids`**（定向全集，不置 null）——反查按 JSON_CONTAINS 精确命中，null 视为"未记录"不参与该过滤，避免语义二义（评审 A-A4：`[]` 与 `null` 在批 2 创建入口一并钉死——现 `_load_run_cases` 把 `[]` 当 falsy=全量）。
-- 响应（最小字段裁剪，不含内部租约/成本等）：`run_id, agent, version, trigger_type, status, started_at, finished_at, total_case, pass_case, fail_case, error_case`。
-- 未判定语义：agent 下无覆盖该 case 的 run → 返回空列表（online 继续轮询 pending，正确）。
-
-**`GET /api/v1/runs/{run_id}/results?case_id=`**
-
-- 返回该 run 的 eval_result（可选 `case_id` 过滤），每条：`case_id, case_type, pass_fail`。`case_type` 从 `TestCase.case_type` join 直出（D3 零转换）；普通 case 参与该 run（正常不会）时 case_type=null 原样返回。
-- 无该 run / run 无结果 → 空列表。真实判定 run 批 2 才有结果；批 1 用 fixture run 验证序列化（§12）。
+> **v0.2.3 作废**：本节点规格（`GET /api/v1/runs`、`GET /api/v1/runs/{run_id}/results`）随 v0.2.3 契约反转**整组作废**；结果回传改由 offline 主动推送 `POST /backflow/regression-results`（§2.4）承载。
+> 原规格的服务端强制 `trigger_type=error_regression` 前置、`agent/version/status/case_id` 过滤语义、`case_id` 的 JSON_CONTAINS 约定、响应最小字段裁剪、未判定返空集语义**均不再实现**——整组降格为历史设计记录（可追溯见 git 历史与本文件修订记录）。
 
 ### 8.3 字面量对表（评审 B-V3，批 1 产出物）
 
-offline 只读面暴露的是平台内部枚举，online 回查判定依赖其精确语义，契约未给字面量。批 1 出一张对表作为环 2 输入，明确：
+offline 判定结果暴露的是平台内部枚举，online **接收推送后判定**依赖其精确语义，契约未给字面量。批 1 出一张对表作为环 2 输入，明确：
 - run `status` ∈ `{pending, running, scoring, scoring_failed, completed, partial_failed, timeout, cancelled}` → online 判定映射（哪些算"已出结果"：completed / partial_failed 都算可判？scoring_failed/timeout 算 infra-error → online needs_review？）；
 - `pass_fail` 四值 `{pass, fail, error, na}` → error/na 是否计入 online「failed」；error 型 case 只应有 pass/fail。
 - 约定：**批 2 verifier 对 error case 只落 pass/fail 终值**（不落 error/na），避免歧义进入 online 判定语义（评审 N4 提前约定）。
 
-### 8.4 online 侧调用约束（本平台配合项）
+### 8.4 online 侧调用约束（本平台配合项）——**v0.2.3 作废**
 
-online 回查只读、连续失败退避在 online 侧；本平台无需状态。凭证轮换兼容见 §9.5。
+> **v0.2.3 作废**：原约束（online 回查只读、连续失败退避在 online 侧、本平台无需状态）随契约反转**整组作废**——online 不再出站，本平台**无配合义务**；online 侧失败探测改为「**超时未收到推送**」的被动形态（§2.4/§2.5）。出站凭证轮换见 §9.5。本节原正文随作废删除。
 
 ---
 
@@ -470,8 +464,7 @@ online 回查只读、连续失败退避在 online 侧；本平台无需状态�
 
 | 方向 | 请求方 | 验方 | trust root（签发方） | scope |
 |---|---|---|---|---|
-| offline→online（pull/ack） | offline | online | **online** 生成 `BACKFLOW_OUTBOUND_SECRET` 下发给 offline | `backflow:pull` |
-| **offline→online（结果推送，v0.2.3 新增）** | offline | online | **同上（同一个 secret）** | **`backflow:report`** |
+| offline→online（pull/ack **+ 结果推送**，**v0.2.3 合并为一行**） | offline | online | **online** 生成 `BACKFLOW_OUTBOUND_SECRET` 下发给 offline | ~~`backflow:pull` / `backflow:report`~~ **v0.2.3 无 scope 分置**（三出站端点共用同一 secret） |
 | ~~online→offline（回查只读）~~ | — | — | **v0.2.3 作废**（online 不再出站） | — |
 
 > **v0.2.3 方向反转**：`BACKFLOW_INBOUND_SECRET` 及其 `_PREV` 宽限值**整条凭证链作废**——online 已删除全部出站调用，本平台不再需要验签 online 的任何请求，`scope=platform:readonly` 不再被使用。
@@ -480,7 +473,7 @@ online 回查只读、连续失败退避在 online 侧；本平台无需状态�
 
 验方持有验签材料并管理轮换；对称 HS256 下"持证方签发"与"验方验签"同 secret，方向隔离靠 **secret 分置 + iss/scope 载荷校验 + 审计**（D5 已接受此取舍；真正的密码学方向隔离=非对称，留 infra mTLS 升级位，§9.6）。
 
-### 9.2 JWT 载荷（offline 侧出站 token，按 scope 分两种）
+### 9.2 JWT 载荷（**v0.2.3 实证作废**：实际为静态预共享 secret、无 scope 分置、无 JWT）
 
 ```jsonc
 // offline 出站自签（pull/ack 用，offline 持 BACKFLOW_OUTBOUND_SECRET 签发）
@@ -505,12 +498,14 @@ verify_service_token(token, secret, *, expected_iss, expected_scope) -> payload
 ```
 
 与现 `create_access_token/decode_access_token`（jwt_secret 人类体系）完全隔离，不共用密钥、不共用载荷类型。
+> **v0.2.3 实证（勿再实现本节）**：online 侧**从未实现**本节设计的 JWT service token 体系——`create_service_token`/`verify_service_token` **不落地**；出站鉴权 = **静态预共享 secret** 置于 `Authorization: Bearer <secret>`（§2.4）。
+
 
 ### 9.4 配置（`core/config.py` + `.env.example`）
 
 | env | 说明 | 强校验 |
 |---|---|---|
-| `BACKFLOW_OUTBOUND_SECRET` | online 下发、offline 出站签发 pull **与结果推送**凭证用（**同一 secret，按 scope 分置**） | 非空 ≥256bit（仿 jwt_secret 启动强校验） |
+| `BACKFLOW_OUTBOUND_SECRET` | online 下发、offline 出站（pull **与结果推送**）携带的凭证（**三出站端点共用同一 secret，不做 scope 分置**——v0.2.3 实证收敛，§9.1） | 非空 ≥256bit（仿 jwt_secret 启动强校验） |
 | ~~`BACKFLOW_INBOUND_SECRET`~~ / ~~`BACKFLOW_INBOUND_SECRET_PREV`~~ | **v0.2.3 删除**——online 不再出站，本平台无入站验签面（原「轮换宽限旧值」随之取消） | — |
 | `BACKFLOW_ONLINE_API_BASE` | online `/api/v1` 基址（http(s)://host:port），出站拼 `/pull/payloads`、`/pull/ack`、**`/backflow/regression-results`**（v0.2.3） | 非空 URL |
 | `BACKFLOW_PULL_INTERVAL_SECONDS` | pull_loop 周期，默认 60 | >0 |
@@ -535,7 +530,7 @@ verify_service_token(token, secret, *, expected_iss, expected_scope) -> payload
 
 1. `.env.example` 增补 §9.4 全部键 + 启动脚本强校验（非空/长度/URL 格式）。
 2. `core/config.py` `Settings` 增补对应字段（`extra="ignore"` 保持）。**门控完整化（评审 D-5）**：`BACKFLOW_ENABLED=true` 时启动强校验强制两 secret 非空 ≥256bit + `BACKFLOW_ONLINE_API_BASE` 为合法 URL（补入现 `_validate_secrets`）——防「开了开关忘配 secret，pull_loop 每轮用空 secret 签名」。
-3. `main.py`：startup 增起 `pull_loop`（受 `BACKFLOW_ENABLED` 门控）；`platform_runs` router 挂载**随门控**——off 时不挂载（或挂但返回显式 `503 未启用`），杜绝「面挂但全 401」的半开态（排障误判凭证配错）。文档化行为：off = 平台面无服务。
+3. `main.py`：startup 增起 `pull_loop`（受 `BACKFLOW_ENABLED` 门控）。~~`platform_runs` router 挂载**随门控**~~ **v0.2.3 取消**（§8 只读面整节作废）——本平台无入站读面，门控只作用于 pull_loop 与（批 2）出站推送，不存在「面挂但全 401」半开态。
 4. alembic 迁移：§5.1 TestCase 扩列 + §5.2 inbox 新表 + §5.3 TestSuite.is_error_suite + §7.1 trigger_type ENUM 扩展。
 
 ---
@@ -590,7 +585,7 @@ verify_service_token(token, secret, *, expected_iss, expected_scope) -> payload
 
 ### 12.2 环 1 集成（fixture + fake-online，无真实 online）
 
-fake-online = 测试内 httpx MockTransport，stub `POST /pull/payloads` 与 `POST /pull/ack`（返回契约形状：payloads **逐条附 assembled_ts（R1）**、含 200 幂等语义），按契约 §7.1 信封样例造 fixture。覆盖：
+fake-online = 测试内 httpx MockTransport，stub `POST /pull/payloads` 与 `POST /pull/ack`（返回契约形状：payloads **逐条附 assembled_ts（R1）**、含 200 幂等语义）+ **`POST /backflow/regression-results` 端点桩（批 2 落点，批 1 仅立桩）**，按契约 §7.1 信封样例造 fixture。覆盖：
 
 1. **正向**：fixture 信封流 → pull_loop 单轮 → 自检 → 建 error case（active，无 CaseVersion 预建）→ ack active（Mock 断言收到 action=active+case_id）→ inbox 闭环。
 2. **reject**：畸形信封/空词表 → 不建 case → ack invalidated(reason=online_content_gap)；**版本不识别（schema_version="1.1"）→ 同 code 但 detail 注明需 offline 升级（V-8）**。
@@ -599,7 +594,9 @@ fake-online = 测试内 httpx MockTransport，stub `POST /pull/payloads` 与 `PO
 5. **requeue 重处理**：`rejected(online_content_gap)` 已闭环 → 重拉同 payload（Mock 再次返回，内容已刷新）→ **envelope_json 覆盖 + ack_status 复位 none** → 重自检通过 → 建 case ack active（A-B1/B-S3）。
 6. **幂等**：同 payload 重复拉 → 不重建、不重复 ack。
 7. **崩溃恢复**：登记后未 ack → 重启续跑 → 对账补 ack；**status=new 卡住行 → inbox 重扫恢复（A-B2）**。
-8. **fixture run 反查**：造 `error_regression` run（case_ids 含 error case）+ eval_result（**run 汇总字段按 scorer 同源聚合，不手工填——防字段形状假绿，D-10**）→ `GET /api/v1/runs?agent&version&case_id` 命中 → results 返回 `case_id/case_type/pass_fail`；**manual/held_out run 不被该面返回（B-V1）**；普通 run 不带哨兵隔离验证。
+8. **fixture 推送（**批 2 落点**，原「fixture run 反查」，v-next 改写）**：造 `error_regression` run（case_ids 含 error case）+ eval_result（**run 汇总字段按 scorer 同源聚合，不手工填——防字段形状假绿，D-10**）→ run 终态 **commit 之后**由 offline 主动推 `POST /backflow/regression-results`（fake-online 的 MockTransport **增补该端点桩**）→ 断言 online **收到**载荷，且载荷含 `case_id/case_type/pass_fail/error_type/error_detail` 与两个水位字段（`agent_latest_version` / `prev_terminal_version`）；**重放同 run 幂等**（`uk_verify_run` → `duplicated:true`，且 `cases_dropped` 不归零）；**manual/held_out run 不触发任何推送**（哨兵隔离验证）。
+
+   > **批 1 范围**：仅立 fake-online 的 MockTransport 端点桩；推送调用与载荷断言均在批 2 实现后启用。
 9. **凭证**：无凭证/人类 token/scope 错/iss 错 → 401/403；平台面人类 token 拒。
 10. **ack 400/404 链路级（D-9/B-S1）**：Mock ack 返 400 前置不符 → 有界重试后 inbox 落 blocked（非 acked）；404 → 连通性告警 + blocked。**空轮水位不前移 + 翻页中途新 assembled 不漏拉（B-B1/S6）**。
 
@@ -617,7 +614,7 @@ README 测试计数（后端/集成/前端）更新；环 1 验收报告仿 `acc
 |---|---|---|---|
 | 1 | **C4 前置依赖：被测 agent v2 接入就绪** | 高 | error 回流能收单的前提 = 被测 agent 已在 offline 注册（Agent+adapter+AgentInterface 可复现）。拉取按已注册名单逐名发起（§6.2），名单内未接入的 agent 的 payload 走 offline_cap_gap 驳回（接入补齐后自愈）。**环 2 联调前必须先走通被测 agent 接入轨**；方案 §6.7 显式声明。 |
 | 2 | error suite 运维认知 | 中 | 系统自动建的 suite 无 golden/无标注、前端只读；人工不得误当普通 suite 编辑/删。后端守卫强制 + 前端标注；文档/使用指南补一条。 |
-| 3 | 批 1/批 2 时序边界 | 中 | 批 1 反查面对真实 error case 恒返回空（无 run）——这是正确 pending 态；若运营误读为"未生效"需文档澄清。判定 run 覆盖到 error case 的端到端时序验证在批 2。 |
+| 3 | 批 1/批 2 时序边界 | 中 | 批 1 不含结果推送（推送 = 批 2 落点），online 侧簇在批 1 期间恒为 pending（无 `verify_run_record`）——这是正确态；若运营误读为"未生效"需文档澄清。推送 → 判定 → link 终态的端到端时序验证在批 2。 |
 | 4 | error case / inbox 长期驻留策略 | 中 | 哨兵 case 一旦 active 长期驻留（多次修复都覆盖它）；过期/废弃清理（online superseded 后 offline 是否回收）批 2 及后续定，当前不自动清理。**inbox 终态行（acked/blocked）保留策略同批 2 定**（acked 且 case superseded 后按 N 天归档清理）——当前登记开放项，防库膨胀 + 双存 envelope 体积（评审 C-I7/D-8）。 |
 | 5 | 积压限速与批 2 executor 耦合 | 低 | 批 1 收单速率高（无 executor）；批 2 引入复现后按 run 并发调节周期/limit。开放项。 |
 | 6 | 凭证轮换运维 | 低 | 双值宽限（§9.5）；轮换走配置变更 + 审计。 |
@@ -641,7 +638,7 @@ README 测试计数（后端/集成/前端）更新；环 1 验收报告仿 `acc
 | D1 | 扩 TestCase 同表 + 独立 error suite | §4、§5 |
 | D2 | 新 trigger_type='error_regression' | §4、§7 |
 | D3 | case_type nullable 列存 online 原值 | §4、§5 |
-| D4 | 独立平台只读面 /api/v1/runs | §4、§8 |
+| D4 | ~~独立平台只读面 /api/v1/runs~~ **v0.2.3 作废**（online 不再出站，本平台零入站读面） | ~~§4、§8~~ **§2.4**（改由出站推送承载） |
 | D5 | 双方向独立 secret + HS256 + iss/scope/exp | §4、§9 |
 | 传输通道再审视 | 保 HTTP pull，不引入 Kafka | §0、§13 |
 | 2026-09-03 四方向独立评审（A/B/C/D） | 阻断 3 簇 + 重要项 + 次要簇全量吸收：① inbox 两维状态机（拆 status/ack_status + 复位规则 + blocked 终态 + new 恢复）；② error case 写守卫（api/{cases,annotations,scaffold}.py 403 + create_run 拒 error suite + held_out 同防）；③ 增量锚改 assembled_ts 高水位（弃本地墙钟）+ 逐已注册 agent 拉取；④ 只读面限定 error_regression；⑤ orchestrator 早退闸；⑥ interface 归一（METHOD 前缀+占位通配）；⑦ 过滤面扩全（coverage/list_suites/dashboard 全聚合）；⑧ 门控完整化 + async 出站 | §5~§12 |
@@ -659,3 +656,4 @@ README 测试计数（后端/集成/前端）更新；环 1 验收报告仿 `acc
 | v0.2.1 | 2026-09-03 | **契约修订 R1~R3 落改确认**：online `solution_detail.md` v1.2 已落（R1 pull 响应逐 payload 附 `assembled_ts` / R2 ack 矩阵补 `invalidated(offline_cap_gap)→active` 例外 / R3 ack 400 带 `offline_status`+`invalidate_reason`；detail §7.2/§7.3/§8.7/§8.9 + task.md 环 0 登记），本方案对应实现依赖解除（§2 契约修订包 / risk 8 状态更新）。方案语义未再变更。 |
 | **v0.2.3** | 2026-09-10 | **平台间契约方向反转同步（online `solution_detail.md` v1.23）——本平台由「被回查」改为「主动推结果」。** ① **新契约**：新增出站 `POST /backflow/regression-results`（§2.4）——`error_regression` run 终态 commit 后异步推「run 终态 + 逐 case 原始行」，鉴权 `scope=backflow:report`，幂等键 `uk_verify_run(link_id,run_id)`，超时 5s / 重试 3 次 / 全败放弃不阻塞收尾；**必带 `bound_version_first_seen`**（online 的 fix_version 守卫依赖此字段，漏带即守卫失效）。② **整组作废**：原 online→offline 三个只读面（`GET /runs`、`GET /runs/{run_id}/results`、`GET versions`）**取消实现**——**§8 整节作废**（**§8.3 字面量对表保留有效**，`run_status` 值集仍被推送载荷复用）；§2.4 下行表、§2.5 期望行为第 2 条同步改写。③ **凭证链收缩**：`BACKFLOW_INBOUND_SECRET` 及 `_PREV` **整条作废**（本平台无入站验签面）；§9.1 方向表、§9.2 载荷、§9.4 配置、§9.5 轮换四处同步；出站为**同一 `BACKFLOW_OUTBOUND_SECRET` 按 scope 分置**（pull/ack=`backflow:pull`、推送=`backflow:report`）。④ **R 条去向**：R-4（`excluded_case_ids`）/ R-16（字段位）**取消**——推送为全量对账，不存在「缺行→轮询」；R-5「agent 已见版本」只保留守卫最小信息，改由载荷 `bound_version_first_seen` 承载（**本平台仍须自行判定该 (agent,version) 是否首见终态 run**）；R-3 的 online 侧缺行语义取消（**offline 侧版本差集补建保留**）。⑤ **范围影响**：本平台 error-backflow 系列**代码零落地**（详见 §7 与 task 文件自陈），故本次为**纯文档契约同步、零代码返工**；批 1 的收单链路（pull/ack）**不受影响**，新增出站为**批 2 落点**。⑥ **实证收敛（online 第 2 刀开工时回填）**：**(a) 凭证形态**——online 实际实现为**静态预共享 secret**（`api/deps.py` `require_evaluator`），**非本文件 §9 设计的 JWT service token**；§9.1/§9.2/§9.4 已就地标注收敛口径，**三个出站端点共用一 secret、无 scope 分置**，`create_service_token` / `verify_service_token` **本平台无需实现**。**(b) 载荷新增必填 `agent_latest_version`**——与 `bound_version_first_seen` 同一次查询产出；online `verify.py:247-255` 的**防假连续**原依赖「该版本有无终态 run」的主动查询（`list_runs` → `cur is None`），推送模式下无载体，故以该字段作「**offline 已覆盖版本水位**」。**两字段漏带任一，对应的 online 守卫即失效**（契约必填，非可选）。 |
 | v0.2.2 | 2026-09-07 | **code_detail v0.2 实施转译注记**：§6.2 单全局水位补「逐 agent 独立水位」注——编码实现按 per-agent `backflow_since_ts = {agent_name: iso8601}`（各自 max 推进、空轮各自不前移），消解逐 agent 拉取下「快 agent 推高单水位 → 慢 agent 已装配未拉 payload 永久漏拉」固有窗口；同一契约语义超集细化，不改权威口径与契约（code_detail v0.2 §5.2）。方案语义未变更。 |
+| **v0.3.0** | 2026-09-11 | **平台间契约第 2 刀 + 第 3 刀回填（online 结果推送接收面 / claim 判据收敛 / `rejudge` 安全网）——推送源收敛 + 载荷字段增删 + 只读面整组作废 + 术语对齐。** ① **载荷字段（§2.4 出站表）**：**删 `bound_version_first_seen`**（online 侧已无读取点）；保留 **`agent_latest_version`** 必填并明示其承担「fix_version 未发版 → `no_progress`」判定（`fix_version > agent_latest_version`）；**新增必填 `prev_terminal_version: str \| None`**（语义 = 本次 run 之前该 agent 最近一个**已到终态** run 的版本；**值可为 `null`** = 该 agent 此前无任何终态 run，即首次）——承担 online 的「缺行中断」守卫，**必须与 `agent_latest_version` 同一次查询产出，漏带则对应守卫失效**。**新增载荷契约约束 5 条**：`cases[]` 内 `case_id` **必须唯一**（同一 payload 内重复 → online **整单拒** `ERR_PULL_0002`）；`finished_ts` 必须为**合法 ISO8601**（否则拒单）；`cases_dropped` 幂等重放**不归零**（offline 重试时不得据此判断「没丢数据」）；`links_advanced` 口径 = online 侧**真正发生终态迁移的 link**（passed/failed/superseded），**非**「本次新落 run 行的 link」；**v1 硬约束：一次回归 run 只对应一个 cluster**（`trigger_signal_id` 单值，跨 cluster 批量回归不在 v1）。② **§2.5 加注**：online 判「结果未达」= **事件派生**（由 link/claim 状态事件推导，**非在线时窗轮询**），阈值 N = `dict_config.claim_ttl_days`（默认 14）+ 抑制条件（未到期 claim 期内不标记）；**本平台无需配合**。③ **轮询链整组作废（online `recheck_job` 已删）**：§3 数据流图 ⑧ 由「online 回查 `GET /api/v1/runs`」改画 **offline→online 出站推送箭头**（`POST /backflow/regression-results`，run 终态 commit 后 fire-and-forget）；§3 尾段「反查空集 → continue pending 轮询」改写为「**超时未收到推送**」被动探测；**§8.1 / §8.2 / §8.4 降格为作废引用块**（§8.2/§8.4 原规格正文随作废删除，§8.3 字面量对表保留有效）；§10 item 3 删 `platform_runs` router 门控条；§12.2 第 8 条「fixture run 反查」改写为「fixture 推送」（Mock 断言 online 收到 + 幂等 + 哨兵隔离）；附录 A D4 行补作废标注（原漏改）。④ **凭证口径自洽**：§9.4 `BACKFLOW_OUTBOUND_SECRET` 说明由「同一 secret，~~按 scope 分置~~」改为「**三出站端点共用同一 secret，不做 scope 分置**」；§9.1 方向表 `backflow:pull` / `backflow:report` 两行**合并为一行**（消除 §9.1 与 §9.4 的自相矛盾）。⑤ **术语**：「回查」凡按「online 主动拉取」解者一律作废改写（§1.3 / §8.3；历史修订记录与 v0.2.3 已改对处保留）。⑥ 本次为**纯文档回填、零代码改动**；批 1 收单链路（pull/ack）契约语义不变。 |
