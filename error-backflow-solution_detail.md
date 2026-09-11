@@ -330,6 +330,7 @@ def resolve_interface(db, agent: Agent, method: str, path: str) -> AgentInterfac
 
 1. inbox upsert(payload_id)：已存在按 §5.9 判据重处理/幂等跳过；新 → status='new', ack_status='none', envelope_json=原文。
 2. `validate_envelope` → content_gap/version_drift → status='rejected', reject_code=online_content_gap → **ack invalidated（§5.7）**。
+   **⚠️ 可达性（2026-09-11 注）**：本分支两条路中 **`content_gap` 真实可达**；**`version_drift` 在环 2/真实运行下不可达**——其触发条件已被 online **pull 层上游**挡死（`schema_version` 声明 ≠ `SCHEMA_VERSION` → 400 `ERR_PULL_0002` 拒单、`case_type` 非白名单 → 返空集，均属 online `api/pull.py:88`/`:94`），故 offline **收不到会触发它的信封**（详见 §12.6 X-1 注）。
 3. `resolve_agent`/`resolve_interface` → 任一不命中 → status='rejected', reject_code='offline_cap_gap' → ack invalidated。
 4. 命中 → **同事务内**：upsert error suite + 插 error case（字段装载见下）+ inbox → status='case_created', case_id, ack_status='none'。
 5. commit 后发 ack active（带 case_id）。**顺序铁律：本地先落库 → 再发 ack**（两阶段崩溃洞，批 1 §6.4）。
@@ -801,6 +802,8 @@ shutdown: 取消 task（幂等，游标已落 config，不丢进度）
 ### 12.6 集成异常与边界用例（环 1/环 2 验收，X 系列；error-backflow-task.md 阶段 D/F 引用）
 
 > 与 §12.1 单测矩阵（纯逻辑、不触库）区分：本小节登记**依赖真 MySQL / 对端 stub 的集成异常/边界面**验收用例，任务落点锚 O-*（`error-backflow-task.md`），环列 = 归属联调环（环 1 = 阶段 D/G3 单端 stub 收单；环 2 = 阶段 F/G5 双端走查）。X 系列为 `error-backflow-task.md` 阶段 D/F 集成测试的**编号化验收锚**，断言语义转正自各 O-D/O-F 任务验证目标（不新增语义）。场景编号与 online `solution_detail.md` §14.5 X-1~X-13 各自独立（跨仓不互引），但环 2 条目在 O-F.6 与 online T-4.6 / T-4.14⑤ 对端场景对齐。
+>
+> **⚠️ X-1 「不支持 schema_version」分支的可达性订正注（2026-09-11，仅限环 2 口径）**：X-1 的**环列 = 1**（单端 stub，信封由 fixture 直构、不经 online pull 层）⇒ 该分支**在环 1 下有效、用例保留且必须跑**。但在**环 2（真实 online 联调）与真实运行下不可达**：online `api/pull.py:88` 对声明 ≠ `SCHEMA_VERSION` 的拉取请求**直接 400 `ERR_PULL_0002` 拒单**、对非白名单 `case_type` **返空集不传**（`pull.py:94`），而 offline 的声明与校验均为同一常量 `"1.0"`（本仓 `:292` / `:309`）⇒ **收不到会触发它的信封**，属**防御性冗余**。**⇒ 勿据 X-1 推断线上会产生「版本不识别」类 invalidated 行**（online 侧 R-7 曾据此推断实害，已于 2026-09-11 订正为「对象不可达、实害不成立」）。
 
 | # | 环 | 测点 | 断言 | 落点 |
 |---|---|---|---|---|

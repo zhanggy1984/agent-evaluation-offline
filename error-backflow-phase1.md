@@ -589,6 +589,7 @@ fake-online = 测试内 httpx MockTransport，stub `POST /pull/payloads` 与 `PO
 
 1. **正向**：fixture 信封流 → pull_loop 单轮 → 自检 → 建 error case（active，无 CaseVersion 预建）→ ack active（Mock 断言收到 action=active+case_id）→ inbox 闭环。
 2. **reject**：畸形信封/空词表 → 不建 case → ack invalidated(reason=online_content_gap)；**版本不识别（schema_version="1.1"）→ 同 code 但 detail 注明需 offline 升级（V-8）**。
+   > **⚠️ 可达性订正注（2026-09-11，仅限环 2 口径，环 1 不受影响）**：本场景的「版本不识别」分支在**环 1（本节的 fixture + fake-online / MockTransport，信封由 fixture 直构）下有效且必须保留**——它测的是 offline 自身 `validate_envelope` 守卫，**链路不经过 online 的 pull 层**。但在**环 2（真实 online 联调）与真实运行下不可达**：online `api/pull.py:88` 对声明 ≠ `SCHEMA_VERSION` 的拉取请求**直接 400 `ERR_PULL_0002` 拒单**、对非白名单 `case_type` **返空集不传**（`pull.py:94`），而 offline 拉取时声明 `{schema_version:"1.0", case_type:"regression_error"}`（本仓 `error-backflow-solution_detail.md:292`）、`validate_envelope` 亦硬校验 `schema_version == "1.0"`（同文件 `:309`）⇒ **offline 永远收不到会触发该分支的信封**，该分支属**防御性冗余**。**⇒ 勿据本场景推断线上会产生「版本不识别」类 invalidated 行**（online 侧 R-7 曾据此推断实害，已于 2026-09-11 订正为「对象不可达、实害不成立」）。
 3. **cap_gap**：agent 已注册但接口未接入 → ack invalidated(offline_cap_gap)；**完全未知 agent → 拉取请求根本不带它、不进 inbox（D-13/Q4）**。
 4. **ack 对账**：模拟 ack 发送抛错 → inbox ack_status=pending → 下轮对账重放成功。
 5. **requeue 重处理**：`rejected(online_content_gap)` 已闭环 → 重拉同 payload（Mock 再次返回，内容已刷新）→ **envelope_json 覆盖 + ack_status 复位 none** → 重自检通过 → 建 case ack active（A-B1/B-S3）。
