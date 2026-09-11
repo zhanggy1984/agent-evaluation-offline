@@ -814,7 +814,7 @@ shutdown: 取消 task（幂等，游标已落 config，不丢进度）
 | X-8 | 2 | 双端停摆/恢复 | offline pull 停 N 天 → online 提示性标记（不设 offline 时钟）；offline 恢复续拉不丢、积压限速无峰值 | O-F.6（对齐 online T-4.6/E-11） |
 | X-9 | 2 | 共享 infra 断连 / 网络异常 | 单步独立 try/except 退避；恢复自愈无静默吞错；cap_gap 探测态无重复 invalidated 出站（R-8） | O-D.4/O-F.6（对 online X-11 对端面） |
 | X-10 | 2 | 并发交错（requeue/manual_invalidate × 并发拉取 × ack 重放） | 无覆盖竞态、审计链完整、幂等不重发 | O-D.4/O-F.6（对齐 online T-4.14⑤） |
-| X-11 | 2 | **推送载荷对拍异常 + 出站鉴权** | 推送载荷 10 字段形状与 online fake 接收面逐项一致（含两水位字段 agent 级口径、`cases[]` 空数组合法、na 行必带 error_type）；出站自检三条（`case_id` 唯一 / `finished_ts` 合法 ISO8601 / `schema_version`="1.0"）；静态 secret 缺失或错误 → online 401 且 offline **记 error 不阻塞收尾**；重复推送 → `duplicated:true` 且 `cases_dropped` 不归零 | O-F.2/O-F.3（§10.1/§10.2） |
+| X-11 | 2 | **推送载荷对拍异常 + 出站鉴权** | 推送载荷 10 字段形状与 online fake 接收面逐项一致（含两水位字段 agent 级口径、`cases[]` 空数组合法、na 行必带 error_type）；出站自检三条（`case_id` 唯一 / `finished_ts` 合法 ISO8601 / `schema_version`="1.0"）；**另加 `trigger_signal_id` 取值来源自检（= envelope `source.cluster_id`，非 `eval_run.trigger_signal_id`；填错静默不拒单）**；静态 secret 缺失或错误 → online 401 且 offline **记 error 不阻塞收尾**；重复推送 → `duplicated:true` 且 `cases_dropped` 不归零 | ~~O-F.2/O-F.3~~（**v1.23 已整条取消 → 现锚 O-F.7/O-F.8**）（§10.1/§10.2） |
 
 ---
 
