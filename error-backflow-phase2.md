@@ -464,7 +464,7 @@ error run 逐 case 落 `EvalResult` 时走 `orchestrator._ensure_case_version`�
 | `schema_version` | str | 固定 `"1.0"`；不匹配 → 拒单 |
 | `agent` | str | 被测 agent |
 | `agent_version` | str | = 本 run 绑定版本（原 `bound_version`） |
-| `run_id` | str | |
+| `run_id` | str | = offline `eval_run.id`，**必须转成字符串**（`str(run.id)`）—— 载荷声明 `str` 且 **Pydantic v2 不做 `int`→`str` 强转**（实测传 int → 422 全量拒单）；该值即 online **幂等键的一半**（online §8.7） |
 | `run_status` | enum | ∈ `completed` / `partial_failed` / `timeout` / `cancelled` |
 | `agent_latest_version` | str | **水位 1**：该 agent 全部终态 run 的最大版本 |
 | `prev_terminal_version` | str \| null | **水位 2**：本 run 之前该 agent 最近一个**已到终态** run 的版本；**必填但值可为 `null`**（= 此前无任何终态 run，即首次） |
