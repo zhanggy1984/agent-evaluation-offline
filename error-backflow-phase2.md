@@ -278,7 +278,7 @@ elif latest.status ∈ {timeout, cancelled} → 创建              # 坏终态�
 | `suite_id` | 该 agent 的 error suite（`agent_id + is_error_suite=true`，批 1 依赖） | error case 全集中此 suite，run.suite_id 无二义 |
 | `case_ids` | 该 error suite 下 `status='active' AND case_type IS NOT NULL` 的 case **newest-active-first 取至 cap**（溢出最老侧，§6.1 注 1；**显式非空**） | 批 1 §8.2 依赖：`[]`/`null` 一并钉死，反查 JSON_CONTAINS。§5.2 门禁查「该集 ≥1 runnable」（批 2 激活 case 恒非空 → 必在 newest 侧窗口内，故门禁基于全集即可，见 §5.2 C1 bullet） |
 | `version` | 信号 run 的 version（版本字面量域 §2.4，= fix_version） | manual/held_out 的 version 校验随本稿放宽为共享域校验（§2.4/§10）；error run 原样承载 agent 版本字符串，推送入站按相等命中（v0.4 Z1/A2） |
-| `trigger_signal_id` | 触发本 run 的信号 manual/held_out run 的 id（v0.4 新增 consumed 锚，§5.2/§5.3） | 补偿对账吸收态判定依据；重建 run 覆盖为最新信号 id |
+| `trigger_signal_id` | 触发本 run 的信号 manual/held_out run 的 id（v0.4 新增 consumed 锚，§5.2/§5.3） | 补偿对账吸收态判定依据；重建 run 覆盖为最新信号 id。**同名非同物**：出站载荷（§9.3）同名字段是 **online cluster id**，非本列 —— 勿混用 |
 | `trigger_type` | `'error_regression'` | 公开 create_run 白名单保持 manual/held_out 不变 |
 | `pinned` | `True` | cleanup 豁免 + D8 前置校验标识 |
 | `status` | `'pending'` | — |
@@ -457,7 +457,7 @@ error run 逐 case 落 `EvalResult` 时走 `orchestrator._ensure_case_version`�
 
 **失败语义（fire-and-forget）**：超时 **5s**、重试 **3 次**（退避 1s/2s/4s）；三次全败 → **记 error 日志后放弃、不阻塞 run 收尾**（online 作为接收方不重试）。**丢失代价**：该版本观察中断——online 侧「缺行中断」守卫（`prev_terminal_version` 本地无记录）使 K 序列不推进，不误判为 pass。
 
-**载荷 schema**（`schema_version` 固定 `"1.0"`）：
+**载荷 schema**（`schema_version` 固定 `"1.0"`）——**接收方权威口径 = online `solution_detail.md` §8.7 载荷字段表（本表与其为同一契约的两面，字段改动须双端同步）**：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -468,13 +468,13 @@ error run 逐 case 落 `EvalResult` 时走 `orchestrator._ensure_case_version`�
 | `run_status` | enum | ∈ `completed` / `partial_failed` / `timeout` / `cancelled` |
 | `agent_latest_version` | str | **水位 1**：该 agent 全部终态 run 的最大版本 |
 | `prev_terminal_version` | str \| null | **水位 2**：本 run 之前该 agent 最近一个**已到终态** run 的版本；**必填但值可为 `null`**（= 此前无任何终态 run，即首次） |
-| `trigger_signal_id` | str \| null | 可空（§5.3 consumed 锚） |
+| `trigger_signal_id` | int \| null | = 该 run 归属的 **online cluster id**（取值 = `TestCase.backflow_envelope['source']['cluster_id']`，收单时随用例落库、可空）；**≠ offline `eval_run.trigger_signal_id`（§5.2/§5.3 consumed 锚，记 `eval_run.id`）—— 同名非同物，且填错不报错（见本表下方 v1 硬约束注）** |
 | `finished_ts` | str | ISO8601 UTC；**非法格式 → 拒单** |
 | `cases[]` | array | `{case_id, case_type, pass_fail, error_type?, error_detail?}`；`pass_fail ∈ {pass, fail, na}`；na 行必带 `error_type`；**空数组合法** |
 
 - **两水位字段口径硬约束**：均为 **agent 级事实**——统计范围 = 该 agent **全部终态 run**，**不得**按 `trigger_type='error_regression'` 收窄（online `_agent_versions(session, agent)` 签名内无 trigger_type 过滤）；manual/held_out run 虽**不触发推送**，其版本**计入**水位。误收窄 → 与 online「缺行中断」判据系统性错位 → **假中断**。
 - **两水位必须同一次查询产出**：`prev_terminal_version` 漏带 → online 的「缺行中断」守卫失效 → 中间版本推送 fire-and-forget 丢失时被判「连续 pass」→ **簇被静默误判 fixed**。
-- **v1 硬约束**：一次回归 run 只对应一个 cluster（`trigger_signal_id` 单值）；跨 cluster 批量回归不在 v1。
+- **v1 硬约束**：一次回归 run 只对应一个 cluster（`trigger_signal_id` 单值）；跨 cluster 批量回归不在 v1。 **此处的 `trigger_signal_id` 即 online cluster id**：online `_find_current_link` 拿它比 `ErrorCaseLink.cluster_id` ∧ `verify_status='pending'`，查不到即落 orphan「仅留档、不推进判定」。**失败模式静默且不报错** —— 两侧同为 int（offline `EvalRun.id` 亦为 `Integer autoincrement`），若填成 offline run id：撞上 pending link → **推进到错误的簇**；撞不上 → **结果永久丢失**；两分支 online 均回 200 → fire-and-forget 不重试，双方日志各只留一行 orphan。
 
 **响应字段**（online 回执；offline 仅记日志，**不据此做业务分支**）：
 

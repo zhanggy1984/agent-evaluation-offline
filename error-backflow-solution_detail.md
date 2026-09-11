@@ -494,7 +494,7 @@ diff = signal_versions − have_versions
 | case_ids | error suite 下 `status='active' AND case_type IS NOT NULL` 的 case **newest-active-first 取至 cap**（溢出最老侧；**显式非空**） |
 | cap | 由 error-run 专用预算反推：`cap ≈ H_run/(case 平均复现时长 × 尾因子)`（示例 H_run=2h、avg 10s/case、尾因子 ×2 → cap≈360；按 agent adapter 实际上限 + 历史 case 时长定） |
 | version | 信号 run 的 version（共享域原样承载 = fix_version） |
-| trigger_signal_id | 触发本 run 的信号 manual/held_out run id（consumed 锚） |
+| trigger_signal_id | 触发本 run 的信号 manual/held_out run id（consumed 锚）。**同名非同物**：出站载荷（§9.3）同名字段是 **online cluster id**，非本列 —— 勿混用 |
 | trigger_type | `'error_regression'` |
 | pinned | True |
 | status | `'pending'` |
@@ -668,6 +668,7 @@ R-12 落地前产出 **pre-scan report**（现库实扫 + 处置登记），门�
 - **触发点**：`_finish_error_regression`（§8.6）收尾事务 **commit 之后异步**发起，**不在收尾事务内**；三种终态（completed / partial_failed / timeout / cancelled）**均推送**。终态写守卫（§8.6）保证终态后结果集冻结，故载荷**一次性产出**、数据集稳定。
 - **失败语义（fire-and-forget）**：超时 **5s**、重试 **3 次**（退避 1s/2s/4s）；三次全败 **记 error 日志后放弃、不阻塞 run 收尾**（online 作为接收方不重试）。**丢失代价** = 该版本观察中断（online `prev_terminal_version` 缺行守卫使 K 序列不推进，不误判为 pass）。
 - **载荷 schema**：见 phase2 §9.3（10 字段 = `schema_version` / `agent` / `agent_version` / `run_id` / `run_status` / `agent_latest_version` / `prev_terminal_version` / `trigger_signal_id` / `finished_ts` / `cases[]`）。`cases[]` = `{case_id, case_type, pass_fail, error_type?, error_detail?}`，`pass_fail ∈ {pass, fail, na}`，**空数组合法**；na 行**必带** `error_type`（§3.1 值域）。
+- **口径澄清（v1.23 补）**：上述载荷的 `trigger_signal_id` = **该 run 归属的 online cluster id**（取值 = `backflow_envelope['source']['cluster_id']`），**非** offline `eval_run.trigger_signal_id`（§6.1 consumed 锚）—— 同名非同物；填错**静默不报错**（撞上 pending link → 推进错簇；撞不上 → orphan 且 online 仍回 200 → 结果永久丢失），详见 phase2 §9.3 v1 硬约束注；**接收方权威口径 = online `solution_detail.md` §8.7 载荷字段表**。
 - **两水位字段口径硬约束**：`agent_latest_version` / `prev_terminal_version` 均为 **agent 级事实**——统计范围 = 该 agent **全部终态 run**，**不得**按 `trigger_type='error_regression'` 收窄。manual/held_out run 虽**不触发推送**，其版本**计入**水位。两字段**必须同一次查询产出**（漏带 → online「缺行中断」守卫失效 → 中间版本推送丢失时被判「连续 pass」→ **簇被静默误判 fixed**）。
 - **出站前自检（否则整单被拒）**：① `case_id` 在 `cases[]` 内**唯一**（重复 → `ERR_PULL_0002` 整单拒）；② `finished_ts` 为**合法 ISO8601 UTC**；③ `schema_version` = `"1.0"`。
 - **幂等**：online 侧幂等键 `uk_verify_run(link_id, run_id)`；重复推送 → 200 + `duplicated:true`。offline 重试**不得据 `cases_dropped` 判断「没丢数据」**——该值幂等重放恒返与首次相同、**不归零**，判据应看首次响应或 `duplicated` 标志。
