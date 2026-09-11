@@ -12,7 +12,7 @@
 
 > **🔧 coding 入口（新会话开工先读）——当前主线 = error-backflow（error 回流闭环）**：online 平台 error 事件 → 本仓复现判定 → verifier no_fallback 复验。
 >
-> 1. **权威实施源**：`error-backflow-task.md`（36 项 O-A.1~O-G.3 + 门 G0~G6 × 里程碑 M1~M9 + 联调环 1/2 + X 系列集成用例）按门认领；实现细节锚 `error-backflow-solution_detail.md` **v1.2**（正文「详设 §x.y」即其章节，含 §12.6 X-1~X-11 集成异常/边界用例）。
+> 1. **权威实施源**：`error-backflow-task.md`（37 项 O-A.1~O-G.3 + 门 G0~G6 × 里程碑 M1~M9 + 联调环 1/2 + X 系列集成用例）按门认领；实现细节锚 `error-backflow-solution_detail.md` **v1.2**（正文「详设 §x.y」即其章节，含 §12.6 X-1~X-11 集成异常/边界用例）。
 > 2. **语义溯源 / 上游契约**：改方案语义才读 `error-backflow-phase1.md`（批 1 v0.3.0）/ `error-backflow-phase2.md`（批 2 v0.8.0）；契约消费 online 仓 `solution_detail.md` v1.23（**v1.23 平台间契约反转：结果回传方向反转为 offline 主动推送 `POST /backflow/regression-results`，online 零 outbound**） / `solution.md` v3.5.9 / `task.md` 环 0~3。
 > 3. **实施铁律**：`backend/` 截至 2026-09-07 零 error-backflow 代码落地（`case_type`/`is_error_suite`/`error_backflow_inbox`/`error_regression`/`no_fallback` 均无标识符），动手前以当时 HEAD 重对现码；实施前置风险注见 `error-backflow-task.md` header。
 >
