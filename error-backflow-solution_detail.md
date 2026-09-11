@@ -1,14 +1,14 @@
 # 线上观测平台 error 回流 —— offline 侧权威编码详设（error-backflow solution_detail）
 
-> **定位**：Task #4 批 1 + 批 2 的**编码级详设**（= `backend/` 平台仓改造的实施规格）。**叠加基线**：批 1 = `error-backflow-phase1.md` **v0.2.2**；批 2 = `error-backflow-phase2.md` **v0.7.2**；消费契约 = online `solution_detail.md` **v1.10** / `solution.md` **v3.5.9** / `task.md` 环 0（R-13~R-24 实现清单登记，L49）。
+> **定位**：Task #4 批 1 + 批 2 的**编码级详设**（= `backend/` 平台仓改造的实施规格）。**叠加基线**：批 1 = `error-backflow-phase1.md` **v0.3.0**；批 2 = `error-backflow-phase2.md` **v0.8.0**；消费契约 = online `solution_detail.md` **v1.23** / `solution.md` **v3.5.9** / `task.md` 环 0（R-13~R-24 实现清单登记，L49）。
 >
-> **本稿承载范围**（一次性对齐终态语义，不再区隔批 1/批 2 时序——见 §1.3 实施顺序门）：error 回流整链在 offline 仓的代码落点 = ① DDL/迁移 ② 收单链路 pull_loop + inbox ③ error suite / error case 装载 / 断言固化（含 backfill） ④ error_regression run 自动触发（§5.2 consumed 锚 + R-3 差集对账） ⑤ error run 执行语义（orchestrator error 分支 / error 并发槽池 §8.3（limiter 共享 per-agent 层，M5 前置）/ 独立收尾 / scanner 短路，含 R-22 收尾 error_type 钉死） ⑥ 判定器 executor 复现 + verifier no_fallback（run_assertions 新调用点 + **R-12 text.py 空答 fail 修补——R-20 pre-scan 报告门禁先行**） ⑦ 平台只读面（R-4 cap 溢出列表 / R-5 agent 已见版本 / na_case+per-case error_type） ⑧ 统计/清理/读面隔离收口。**实施护栏**：R-19 code 一致性单测（executor error_type 常量 ⊆ phase2 §6.4 标注清单）+ R-22 收尾回填 error_type 单测（task 环 0 L49 登记）。
+> **本稿承载范围**（一次性对齐终态语义，不再区隔批 1/批 2 时序——见 §1.3 实施顺序门）：error 回流整链在 offline 仓的代码落点 = ① DDL/迁移 ② 收单链路 pull_loop + inbox ③ error suite / error case 装载 / 断言固化（含 backfill） ④ error_regression run 自动触发（§5.2 consumed 锚 + R-3 差集对账） ⑤ error run 执行语义（orchestrator error 分支 / error 并发槽池 §8.3（limiter 共享 per-agent 层，M5 前置）/ 独立收尾 / scanner 短路，含 R-22 收尾 error_type 钉死） ⑥ 判定器 executor 复现 + verifier no_fallback（run_assertions 新调用点 + **R-12 text.py 空答 fail 修补——R-20 pre-scan 报告门禁先行**） ⑦ **结果推送出站**（`POST /backflow/regression-results` + 静态预共享 secret，§10） ⑧ 统计/清理/读面隔离收口。**实施护栏**：R-19 code 一致性单测（executor error_type 常量 ⊆ phase2 §6.4 标注清单）+ R-22 收尾回填 error_type 单测（task 环 0 L49 登记）。
 >
-> **实施前置（关键）**：截至本稿（2026-09-07）`backend/` 全仓**零 error-backflow 落地**——`case_type / is_error_suite / error_backflow_inbox / error_regression / trigger_signal_id / excluded_case_ids / no_fallback` 均无标识符；`EvalRun.trigger_type` = `("manual","held_out")`；`TestCase.expected/assertions/metrics` 仍 `nullable=False`；无平台只读面。**本文 §2 的"现码事实"全部来自原文逐行核读（行号锚点），实施时以当时 HEAD 为准再对一遍**。
+> **实施前置（关键）**：截至本稿（2026-09-07）`backend/` 全仓**零 error-backflow 落地**——`case_type / is_error_suite / error_backflow_inbox / error_regression / trigger_signal_id / excluded_case_ids / no_fallback` 均无标识符；`EvalRun.trigger_type` = `("manual","held_out")`；`TestCase.expected/assertions/metrics` 仍 `nullable=False`；无推送出站端点。**本文 §2 的"现码事实"全部来自原文逐行核读（行号锚点），实施时以当时 HEAD 为准再对一遍**。
 >
-> **状态**：**v1.1 权威详设**（演进史：v0.1 首稿 → v0.2 终审拍板 → v0.3 并发槽池裁决 A → v1.0 权威定稿（2026-09-07 由 code_detail v0.3 升格权威化：交付核对单移除 / commit 收口 / 草稿措辞清理）→ v1.1 登记层增补（2026-09-07：§12 新增 §12.6 集成异常与边界用例 X-1~X-11，纯登记层无语义变更）；v0.3 并发槽池裁决 A：§8.3 由 v0.2「接受叠加 ≤4 路」改为 **M5 前置 = limiter 进程级共享 per-agent 层**，向 phase2 §6.2 step4 R2 权威对齐；连带 M5 落点 / §2.5 结论 3 / §8.2 / §12 #23 / §13 行 3）。基线文档引用：文中「批 1 §x.y / 批 2 §x.y」= phase1 v0.2.2 / phase2 v0.7.2 章节号（phase1 引用其 v0.2.2 现行语义、phase2 引用其 v0.7.2 现行语义，含各自 v0.x 修订注记覆盖后的终态）；「detail §x.y」= solution_detail **v1.10**（现行；= v1.9 语义 + §14.5 X 系列集成异常/边界用例登记层，无语义变更；本详设 §12.6 X-1~X-11 独立编号、跨仓不互引）。双端已完成提交（2026-09-07：online main 0b4662f + e016c45 / offline dev dcf4680 + e85fa2e）。
+> **状态**：**v1.2 权威详设**（演进史：v0.1 首稿 → v0.2 终审拍板 → v0.3 并发槽池裁决 A → v1.0 权威定稿（2026-09-07 由 code_detail v0.3 升格权威化：交付核对单移除 / commit 收口 / 草稿措辞清理）→ v1.1 登记层增补（2026-09-07：§12 新增 §12.6 集成异常与边界用例 X-1~X-11，纯登记层无语义变更）→ **v1.2 v1.23 契约反转回填**（2026-09-11：§10 整节由「平台只读面 + service token」改写为「**结果推送出站与鉴权**」、§8.6 挂出站推送、R-16 取消、版本锚收口；**纯文档口径回填、offline 运行机制零改动**，见 §14 v1.2 行）；v0.3 并发槽池裁决 A：§8.3 由 v0.2「接受叠加 ≤4 路」改为 **M5 前置 = limiter 进程级共享 per-agent 层**，向 phase2 §6.2 step4 R2 权威对齐；连带 M5 落点 / §2.5 结论 3 / §8.2 / §12 #23 / §13 行 3）。基线文档引用：文中「批 1 §x.y / 批 2 §x.y」= phase1 v0.2.2 / phase2 v0.7.2 章节号（phase1 引用其 v0.2.2 现行语义、phase2 引用其 v0.7.2 现行语义，含各自 v0.x 修订注记覆盖后的终态）；「detail §x.y」= solution_detail **v1.23**（现行；= v1.9 语义 + §14.5 X 系列集成异常/边界用例登记层，无语义变更；本详设 §12.6 X-1~X-11 独立编号、跨仓不互引）。双端已完成提交（2026-09-07：online main 0b4662f + e016c45 / offline dev dcf4680 + e85fa2e）。
 >
-> **本文档 = error 回流 offline 侧权威编码详设**：语义基线 = phase1 v0.2.2 / phase2 v0.7.2 / detail v1.10 / solution v3.5.9；本 v1.1 承接该链的**代码级落点权威**，正文若与上述基线最新版冲突，以基线为准并回改本文（冲突历史见 §14 修订记录）。与 platform 本体 `solution_detail.md` v1.2 并存，error-backflow 词项零重叠，互不引用。
+> **本文档 = error 回流 offline 侧权威编码详设**：语义基线 = phase1 **v0.3.0** / phase2 **v0.8.0** / detail **v1.23** / solution v3.5.9；本 v1.2 承接该链的**代码级落点权威**，正文若与上述基线最新版冲突，以基线为准并回改本文（冲突历史见 §14 修订记录）。与 platform 本体 `solution_detail.md` v1.2 并存，error-backflow 词项零重叠，互不引用。
 
 ---
 
@@ -17,7 +17,7 @@
 1. **读者 = backend 实施工程师**。每节给出：目标文件（现码行号锚点）→ 改动语义（为什么）→ 函数/类/迁移签名与字段级规格 → 测试护栏。不重述权威文档已有的大段机制推导，只做落点转译与缺口补齐。
 2. **三份现码锚点报告已核读**（本稿 §2 引用）：data/API 层、执行层、case_loader/config 均按原文行号核过。`executor.py` 错误常量与 `RETRYABLE_ERRORS`、`scorer.py` 断言调用点、`limiter.py` 信号量作用域等**事实性结论**（如 "`run_assertions` 在 `assertions/run.py:12` 而非 scorer"）直接内化为本文落点前提，不再逐条标出处。
 3. **术语速查**：`error suite` = `TestSuite.is_error_suite=true`；`error case` = `TestCase.case_type='regression_error'`；`error run` = `trigger_type='error_regression'` 的 EvalRun；`error_type` = EvalResult 列的 na 分类值（§3.1 权威字面量域）；`na` = 「未取得可判终值」运行期缺判定态（五源矩阵 §3.2）。
-4. **na 载体全链口径（R-19/R-22 护栏的判别物）**：`EvalResult.error_type` 是**分类枚举**（String(32)，非实文），进平台只读面（na case 必带）；**字面量必须与 `executor.py` 常量逐字相等**（§3.1），否则 online 消费侧把 case 级错误当未知类型默认从严触发 unclean_run 风暴。
+4. **na 载体全链口径（R-19/R-22 护栏的判别物）**：`EvalResult.error_type` 是**分类枚举**（String(32)，非实文），进**推送载荷**（na case per-case 必带，§10.1）；**字面量必须与 `executor.py` 常量逐字相等**（§3.1），否则 online 消费侧把 case 级错误当未知类型默认从严触发 unclean_run 风暴。
 5. **门禁先行项**：R-12（`KeywordNotContainsOp` 空答 fail）**不得先于 R-20 pre-scan 报告上线**（§9.4）；pre-scan 报告产物入本仓，owner = offline 实施。
 
 ---
@@ -28,19 +28,19 @@
 
 | # | 交付 | 主落点（目标文件） | 权威规格 |
 |---|---|---|---|
-| M1 | 数据模型扩列 + 迁移 | `models/case.py`、`models/run.py`、新增 `models/error_backflow_inbox.py`、`alembic/versions/*`（3~4 个新迁移） | 批 1 §5.1/§5.2/§5.3 + 批 2 §6.1（trigger_signal_id + excluded_case_ids，R-4） |
+| M1 | 数据模型扩列 + 迁移 | `models/case.py`、`models/run.py`、新增 `models/error_backflow_inbox.py`、`alembic/versions/*`（3~4 个新迁移） | 批 1 §5.1/§5.2/§5.3 + 批 2 §6.1（trigger_signal_id + excluded_case_ids） |
 | M2 | 收单链路 pull_loop + inbox 状态机 + ack/对账/R-8 节流 + error suite upsert + error case 装载 | 新增 `runner/pull_loop.py`、`core/error_payload.py`、inbox DAO（如 `repositories/inbox.py` 或并入 pull_loop）、`main.py` startup | 批 1 §2/§3/§5.2/§6 + R-8（phase2 §2.3 v0.7 注④ / phase1 §5.2/§6.5 修订） |
 | M3 | error case 断言固化 + 存量 backfill + 词级净化 + keyword_not_contains 发布登记 | `pull_loop` 建 case 路径、`runner/backfill.py`（或并入补偿对账）、`core/constants.py`、`seed.py` | 批 2 §7.3/§7.4 + 批 1 §5.1 |
 | M4 | error_regression run 自动触发 + 补偿对账（R-3 差集）+ consumed 锚 | 新增 `runner/auto_schedule.py`（maybe_auto_schedule + 差集对账）、`api/runs.py`（version 共享域校验、互斥计数排除）、`runner/orchestrator.py`（信号终态挂接） | 批 2 §5 + R-3（phase2 §5.3 v0.7 块） |
 | M5 | error run 执行语义 | `runner/orchestrator.py`（error 分支、独立收尾）、`core/limiter.py`（**进程级共享 per-agent 层**，M5 前置 §8.3）、`runner/case_loader.py`（error 分支）、`runner/scanner.py`（短路 + 替代收尾 + pending 回收 + R-22） | 批 2 §2.2/§6（R2 共享槽池）+ D8 |
 | M6 | 判定器 executor 复现 + verifier no_fallback + R-12 | `runner/` error 分支逐 case 调用 `executor.execute_case` + `run_assertions`（`assertions/run.py`）；**R-12 改 `assertions/ops/text.py`** | 批 2 §7.1/§7.2 + R-12/R-20 |
-| M7 | 平台只读面 `/api/v1/runs` + results + versions + excluded_case_ids | 新增 `api/platform_runs.py`、`core/security.py` 服务 token helper、`main.py` 挂载 | 批 1 §8 + 批 2 §9.3 + R-4/R-5（phase2 §9.3 v0.7 注 / detail §8.7） |
+| M7 | **结果推送出站** `POST /backflow/regression-results` + 静态预共享 secret | 新增出站推送客户端（收尾后异步 fire-and-forget）+ `core/config.py` 出站 secret 项；**删除原只读面设计**（`api/platform_runs.py` + `core/security.py` service token helper 不再新增，§10.3） | 批 2 §9.3（v0.8.0，v1.23 契约反转） |
 | M8 | 统计/占位/人类读面隔离收口 + cleanup 豁免 | `api/dashboard.py`、`api/runs.py`、`runner/cleanup_rules.py`、人类 run 读面过滤 | 批 1 §5.3/§5.4 + 批 2 §9.1/§9.2/§9.4/§6.5 |
 | M9 | 测试 + 护栏 + 环 1/环 2 桩 | `backend/tests/*`、`backend/tests/integration/*` | 批 1 §12 + 批 2 §11 + R-19/R-22 护栏（task 环 0 L49） |
 
 ### 1.2 明确不做（本稿不落代码，二期/在线侧）
 
-- online 侧全部实现清单（R-13 同簇刷新复制、R-16 excluded 自动消费、R-21 root_late_complement、R-24 requeue guard）——归 online 仓；本稿仅保证 offline 只读面字段位与之对齐（M7）。
+- online 侧全部实现清单（R-13 同簇刷新复制、R-16 excluded 自动消费、R-21 root_late_complement、R-24 requeue guard）——归 online 仓；**v1.23 契约反转后 R-16 整条作废**（excluded 读面自动消费不复存在——只读面整组取消、载荷 schema 无该字段，§10.3 待议项）；本稿**只保证推送载荷字段位与之对齐**（M7 = 出站推送，§10.1）。
 - 传输 Kafka（HTTP pull 保持）；error case/inbox 长期驻留归档策略；`inconclusive` 三值判定；离线触发覆写（false-fixed 收敛 reentry/admin reopen）；跨端 deactivate / case 归档闭环。
 - 前端只读标注（error suite 只读样式）属批 1 收尾小改，归前端仓，本稿不落。
 - error run 无信号自动重跑（partial_failed/timeout 带退避自动补跑）留二期（批 2 §12 开放项）。
@@ -76,7 +76,7 @@
 - **runs.py**：`_SEMVER` L42、`_MUTEX_STATUS=("pending","running")` L46、`RunCreate` L55-62（`trigger_type: Literal["manual","held_out"]="manual"` L60、`case_ids` L62，**无 pinned 参数**——pinned 仅 model 默认 False L51）、`_validate_case_ids` L93-112、`_ensure_suite_has_cases` L115-132、`_run_out` 白名单 L200-221（已含 na_case；只加不改前提成立）、`create_run` L224-273（semver 校验 L230-231、互斥 409 L249-255、lease 90s L264）、`list_runs` L276、`rerun_run` L354-396（复制 src.trigger_type L384、无 trigger 白名单检查）、`run_results` L402。互斥扫描第二处在 rerun 内 L375-381。
 - **dashboard.py**：gate/trend/compare/perf/cost/baseline 六处聚合仅排除 held_out（现码行号 43/60/85-87/174/196/254）；`_agent_dim_series` L136-161。
 - **annotations.py / scaffold.py**：`add_annotation`、`add_case_scenes` 需对 error case 403。
-- **security.py**（93 行）：`create_access_token/decode_access_token`（人类 access token）；无 service token helper；无 platform m2m secret。
+- **security.py**（93 行）：`create_access_token/decode_access_token`（人类 access token）；无 service token helper；无 platform m2m secret（**v1.23 实证：出站鉴权 = 静态预共享 secret，非 service token/JWT，§10.2——本批亦不新增 helper**）。
 - **config.py**：只放 secrets + 基础设置；业务参数在 `seed.py` `DEFAULT_SYSTEM_CONFIG` L345-422（per_agent_concurrency=3 L351、case_timeout=120 L353、breaker_failure_threshold=5 L376、max_retries=1 L382、max_active_runs_per_agent=1 L389、heartbeat_interval=30 L391）。
 
 ### 2.3 执行层（`backend/app/runner/`）
@@ -237,7 +237,7 @@
 |---|---|
 | `TRIGGER_TYPE` L14 → `("manual", "held_out", "error_regression")` + MySQL ENUM 迁移（§4.5 rev3） |
 | `trigger_signal_id` | BIGINT NULL（批 2 §6.1 consumed 锚；建单记所据信号 manual/held_out run id） |
-| `excluded_case_ids` | JSON NULL（**R-4**：cap 截断挤出的最老溢出 case id 列表；NULL/[] = 未截断。诚实标记 = 非空；溢出计数 = len；供只读面响应透出，§10.1） |
+| `excluded_case_ids` | JSON NULL（**R-4**：cap 截断挤出的最老溢出 case id 列表；NULL/[] = 未截断。诚实标记 = 非空；溢出计数 = len；**v1.23 只读面整组取消后不再透出**，降级为本地诚实诊断，§10.3） |
 
 - **R-10 截断标记不在本表**：detail v1.9 R-10 `input_truncated` 是 **online needs_review 侧** reason 4 附加标记；offline error case 的 input ≤8K 截断快照边界由 **online 装配侧保证**（§5.5 注），offline 不截断、EvalRun 无对应列；R-10 纯为 online needs_review 侧 reason 4 标记，offline 无对应列、EvalRun 不加截断列。
 - `pinned` 已存在（model 默认 False）——内部创建器显式置 True。
@@ -250,7 +250,7 @@
 1. **rev1 `add_error_backflow_case_cols`**（down = 删列 + 三列回 NOT NULL + 撤 uk_case_payload_id）：
    - `case.py`：加 case_type/payload_id/backflow_envelope + uk_case_payload_id；ALTER 三列 `DROP NOT NULL`；`is_error_suite` 加列。
 2. **rev2 `create_error_backflow_inbox`**：建 `error_backflow_inbox`（全列 + uk_inbox_payload + idx_status_ack）。down = drop table。
-3. **rev3 `extend_run_trigger_and_anchor`**：`ALTER TABLE eval_run MODIFY COLUMN trigger_type ENUM('manual','held_out','error_regression') NOT NULL`（SQLAlchemy `sa.Enum` 原生 enum 名保持 `trigger_type`）；加 `trigger_signal_id BIGINT NULL`、`excluded_case_ids JSON NULL`。down = 还原 ENUM + 删两列。
+3. **rev3 `extend_run_trigger_and_anchor`**：`ALTER TABLE eval_run MODIFY COLUMN trigger_type ENUM('manual','held_out','error_regression') NOT NULL`（SQLAlchemy `sa.Enum` 原生 enum 名保持 `trigger_type`）；加 `trigger_signal_id BIGINT NULL`、`excluded_case_ids JSON NULL`（列保留；**透出面随 v1.23 只读面取消，§10.3**）。down = 还原 ENUM + 删两列。
 4. **rev4 `backfill_case_columns`**（数据迁移，可选合并进 rev1 数据步）：把现有普通 case 的 `case_type` 保持 NULL（无需数据动作）；确认无现网 'error_backflow' 数据（零落地前提）。
 
 - **验证**：`alembic upgrade head` 后 ORM `metadata.create_all` 不与迁移冲突（跑 `backend/tests` 建表冒烟）；`alembic downgrade -1` 逐级回滚成功（G1 门）。
@@ -360,7 +360,7 @@ def resolve_interface(db, agent: Agent, method: str, path: str) -> AgentInterfac
 
 ### 5.7 ack 发送 + 对账（R3 契约 / R1 增量）
 
-- `send_ack(payload_id, action∈{draft,active,invalidated}, case_id?, reason?)`：`POST {online}/pull/ack`；出站携 offline 自签服务凭证（`scope="backflow:pull"`，§10.3）。
+- `send_ack(payload_id, action∈{draft,active,invalidated}, case_id?, reason?)`：`POST {online}/pull/ack`；出站携 **`Authorization: Bearer <静态预共享 secret>`**（**v1.23 作废原「自签服务凭证 + scope 分置」措辞**——三出站端点共用同一 secret，§10.2）。
 - 前置矩阵（批 1 §2.3）：`active`=online 当前 ∈ {assembled,draft} 且必带 case_id；`invalidated`=online 当前 ∈ {assembled,draft} 且必带结构化 reason；`draft` 预留不用。
 - **错误分流**：
   - 404 `ERR_PULL_0003`：即时告警端到端连通性，ack_status=`blocked` + last_error 注明，人工核查（**400 与 404 处置分开**，B-S1）。
@@ -484,7 +484,7 @@ diff = signal_versions − have_versions
 
 - 吸收态（`trigger_signal_id==signal.id → return`）继续拦截已消费版本；差集管「从未建过版本」，两机制正交。**坏终态版本不矛盾（§7.2 vs §7.3）**：差集侧把 timeout/cancelled「视为有 run」只保证 diff 不重复补建；重建仍由 §7.2 行 timeout/cancelled 分支触发——条件是「该版出现比 `latest.trigger_signal_id` 更新的新信号」；consumed 锚前移后吸收态再次拦截 → 同一坏 run 至多重建一次、无自动重跑循环（phase2 §5.2 L237 / §5.3 L260 权威双路径同此，非缺陷）。
 - 兼任 **§6.3 backfill 清零对账**：对 `assertions IS NULL` 的 active error case 特权补写（幂等），直到清零（清零后 C1 门禁放行 → 差集内版本 run 自然覆盖存量 case，不依赖下次发版信号）。
-- 环 2：洪峰 3 版连发 → 3 run 最终全建出、中间版 claim 可回查（批 2 §11.2 场景 17）。
+- 环 2：洪峰 3 版连发 → 3 run 最终全建出、中间版不因活跃闸拒建而永久丢（批 2 §11.2 场景 17；**v1.23 只读面取消后由推送载荷逐版对账承接**）。
 
 ### 7.4 内部创建器 `_create_error_regression_run`（批 2 §6.1 参数表）
 
@@ -502,7 +502,7 @@ diff = signal_versions − have_versions
 | run_config | **error-run 专用预算**（不落缺省 case_timeout=120/max_retries=1）：按 adapter 上限冻结，如 case_timeout=600 / max_retries=2 / hard_deadline = 总预算含闸等待估值（实施依 adapter 实际上限定） |
 | 名额 | 不检查、不计数 `_max_active_runs`（公开 create_run 白名单不动） |
 
-- **截断诚实**：cap 截断时 `excluded_case_ids` = 被挤出的最老溢出 case id 列表（§4.4 列）；溢出 case 不进 run、无结果行、不落 na、不触发重建（守卫驻留，批 2 §6.1 注 2）。
+- **截断诚实**：cap 截断时 `excluded_case_ids` = 被挤出的最老溢出 case id 列表（§4.4 列）；溢出 case 不进 run、无结果行、不落 na、不触发重建（守卫驻留，批 2 §6.1 注 2）。**v1.23：溢出列表对 online 不再可见**（载荷无该字段，§10.3 待议项）。
 - **创建不走公开 create_run**（绕过 trigger Literal + `_max_active_runs` + semver），直接插 EvalRun 行 + 初始 lease + 发 `start_run`（`orchestrator.start_run(run_id)`）。
 
 ### 7.5 api 层配套（`api/runs.py`）
@@ -578,9 +578,10 @@ error 分支执行循环以**固定时间片**（间隔 ≪ lease TTL，如 15s�
 | 全部 case 有 pass/fail 终值（0 na） | `completed` | — |
 | 存在 ≥1 na case | `partial_failed` | — |
 | 未跑完被取消/超时（cancel/scanner，§8.7） | `timeout`/`cancelled` | 已完成 case 保留 pass/fail 终值；未完成 case 回填 na |
+| **终态 commit 后**（上三种终态共同） | — | **异步推送** `POST /backflow/regression-results`（fire-and-forget：超时 5s、重试 3 次、全败记 error **不阻塞收尾**；载荷/拒单/幂等见 §10.1，v1.23 契约反转） |
 
 - 计数：`na_case` = pass_fail=='na' 计数；`error_case` = =='error' 计数（error run 恒 0）；`agent_score` 恒 NULL。`completed` 仅当 0 na。
-- **实跑口径**：汇总以实跑集计（case_ids 创建时固化；实跑集 < case_ids 的 case → results 返回空，online 按缺行≠na 轮询）。
+- **实跑口径**：汇总以实跑集计（case_ids 创建时固化；实跑集 < case_ids 的 case → 推送载荷对该 case **无结果行**，online 按缺行≠na 处理——中断由载荷水位字段 `prev_terminal_version` 探测，**不再靠轮询**）。
 - **实跑集为空防御**（C1 兜底）：执行时实跑集仍为空 → **不落 `completed`**，落 `cancelled` + 告警。
 - **事务约束**：na 回填与 run 终态推进**同事务、同 db session 直插 EvalResult**（沿用共享 `_finish` L536-546 注释模式：持 eval_run FOR UPDATE 锁时经自开 session 的 `_save_result` 会 FK S/X 互锁 1205）；`_ensure_case_version` 若自开 session，收尾路径先取 case_version 再同事务插。`uk_result` 唯一约束作幂等兜底。**收尾自洽**：同事务内先插 na 行、后置 run 终态。**run 终态推进不另造 CAS**——沿用共享 `_finish` 同款 FOR UPDATE 行锁（orchestrator L527）+ scanner 条件 UPDATE rowcount==1 判胜（scanner L59-66），两写入路径已有行级串行化，error 收尾复用同模式。
 - **终态写守卫**：run 已入终态（completed/partial_failed/timeout/cancelled）后，EvalResult 写入一律拒绝（uk_result 撞键 = 丢弃迟到行 + 记日志）——防 orchestrator 长跑与 scanner 回收竞态下把 run 弄成半终态；守卫只拦「已提交终态之后」的迟到写，不拦同事务自身回填。**在途判定丢失**显式接受：宁 na 不半终态（个案假 needs_review 由下版重测收敛）。
@@ -650,7 +651,7 @@ R-12 落地前产出 **pre-scan report**（现库实扫 + 处置登记），门�
 ### 9.5 素材缺失运行期防御（兜底，双保险）
 
 - **加载前置过滤**已挡大部分（§8.1 error 分支 `assertions IS NOT NULL 且形态合法`——加载即剔除、不建 run case）。
-- **运行期兜底**（加载后到执行前的毫秒窗口 + 形态不符残留）：case.assertions 缺失/形态不符 → 该 case 按 `missing_assertion`/`assertion_shape` **na**（§3.1 值域内 na 源），run 走 partial_failed，不 crash；**空断言（[]）绝不判 pass**（漏判定比 na 危险，na 可回查、误 pass 毒化 auto-fixed 判据）。
+- **运行期兜底**（加载后到执行前的毫秒窗口 + 形态不符残留）：case.assertions 缺失/形态不符 → 该 case 按 `missing_assertion`/`assertion_shape` **na**（§3.1 值域内 na 源），run 走 partial_failed，不 crash；**空断言（[]）绝不判 pass**（漏判定比 na 危险，na 可重测收敛、误 pass 毒化 auto-fixed 判据）。
 
 ### 9.6 R-19 字面量一致性护栏（随 §3.1 代码落）
 
@@ -658,36 +659,42 @@ R-12 落地前产出 **pre-scan report**（现库实扫 + 处置登记），门�
 
 ---
 
-## 10. 平台只读面与外部鉴权（M7）
+## 10. 结果推送出站与鉴权（M7，**v1.23 契约反转：原「平台只读面 + service token」整组作废**）
 
-### 10.1 runs list/detail 只读输出扩展（`api/runs.py` `_run_out` L200-221 基座）
+> **方向反转（v1.23）**：offline 不再提供「供 online 回查」的只读面——改为 **offline 在 error_regression run 终态后主动推送结果**，online 侧零 outbound（收单仍是 offline 主动拉 online）。本节由「只读面 + 服务 token」改写为**出站推送与鉴权**；载荷契约与消费语义见 phase2 §9.3（v0.8.0）。
 
-普通 run 输出 schema 之上，error_regression run 透出（online 检索判据消费所需；字段全部只读）：
+### 10.1 结果推送出站（`POST /backflow/regression-results`）
 
-| 字段 | 值 | 消费方 |
-|---|---|---|
-| `trigger_type` | `'error_regression'` | online 识别 error run |
-| `version` | 信号 run 的 fix_version（共享域原样） | R-5 versions / 判 K 序列 |
-| `trigger_signal_id` | 触发信号 manual/held_out run id | consumed 锚 + R-16 缺行比对 |
-| `excluded_case_ids` | 创建时 cap 截断挤出的 case id 列表 | **R-16 落位点**（online runs list/detail 取此判「窗口外欠测」） |
-| `suite_id` | error suite id（随 run schema 既有字段承载） | online 反查 error suite |
-| per-case 结果行 | pass/fail/na + na 的 error_type | R-1/R-2 判据消费（claim 级、影响域） |
+- **触发点**：`_finish_error_regression`（§8.6）收尾事务 **commit 之后异步**发起，**不在收尾事务内**；三种终态（completed / partial_failed / timeout / cancelled）**均推送**。终态写守卫（§8.6）保证终态后结果集冻结，故载荷**一次性产出**、数据集稳定。
+- **失败语义（fire-and-forget）**：超时 **5s**、重试 **3 次**（退避 1s/2s/4s）；三次全败 **记 error 日志后放弃、不阻塞 run 收尾**（online 作为接收方不重试）。**丢失代价** = 该版本观察中断（online `prev_terminal_version` 缺行守卫使 K 序列不推进，不误判为 pass）。
+- **载荷 schema**：见 phase2 §9.3（10 字段 = `schema_version` / `agent` / `agent_version` / `run_id` / `run_status` / `agent_latest_version` / `prev_terminal_version` / `trigger_signal_id` / `finished_ts` / `cases[]`）。`cases[]` = `{case_id, case_type, pass_fail, error_type?, error_detail?}`，`pass_fail ∈ {pass, fail, na}`，**空数组合法**；na 行**必带** `error_type`（§3.1 值域）。
+- **两水位字段口径硬约束**：`agent_latest_version` / `prev_terminal_version` 均为 **agent 级事实**——统计范围 = 该 agent **全部终态 run**，**不得**按 `trigger_type='error_regression'` 收窄。manual/held_out run 虽**不触发推送**，其版本**计入**水位。两字段**必须同一次查询产出**（漏带 → online「缺行中断」守卫失效 → 中间版本推送丢失时被判「连续 pass」→ **簇被静默误判 fixed**）。
+- **出站前自检（否则整单被拒）**：① `case_id` 在 `cases[]` 内**唯一**（重复 → `ERR_PULL_0002` 整单拒）；② `finished_ts` 为**合法 ISO8601 UTC**；③ `schema_version` = `"1.0"`。
+- **幂等**：online 侧幂等键 `uk_verify_run(link_id, run_id)`；重复推送 → 200 + `duplicated:true`。offline 重试**不得据 `cases_dropped` 判断「没丢数据」**——该值幂等重放恒返与首次相同、**不归零**，判据应看首次响应或 `duplicated` 标志。
+- **响应处理**：offline 仅记日志（入参/出参 debug 级），**不据回执做业务分支**。
 
-- `_run_out` 增列**只加不改**：既有字段不 rename、不重排；error run 结果明细沿用现有 per-case results 通道（EvalResult 已含 pass_fail/error_type/assertion_results），**不加 offline 专属终态列**（判据纯派生，R-6 载体承诺）。
-- **error suite / error case 只读过滤**：普通 suite/case 只读端点（platform 检索）**排除** error suite（`is_error_suite=true`）与带哨兵 case（`case_type IS NOT NULL`）；error 对象仅经显式 error-suite 关联面可见（online 消费走 runs 面 + error suite 显式查）。**dashboard 数字口径容忍**：run 状态聚合若走 runs 表会含 error run 行——口径注记，不与 active-count 混（11.1）。
+### 10.2 出站鉴权（静态预共享 secret）
 
-### 10.2 R-4/R-5 只读检索面（error 侧显式端点，批 2 §9.3/§9.4）
+三出站端点（§5.4 `send_ack` 等收单链出站 + 本推送）**共用同一个静态预共享 secret**，置于 `Authorization: Bearer <secret>`：
 
-新增 error 侧显式只读面（**不与普通 suite/case 面混**）：
-- runs 过滤：`trigger_type='error_regression' AND suite_id=:sid`（按 agent/suite 拉 error run 序列 → 判 K 连续、R-16 缺行）。
-- error case 面：error suite 下 active case 的 `case_type / payload_id / assertions（装配后链）` 只读（实施与 R-3 对账 / online 诊断复用）。
-- **白名单过滤谓词统一**（§6.5 三谓词，只读面同一份，防只读/写路径谓词漂移）。
+- **无 scope 分置、无 JWT**——原 v0.3 §10.3 的 JWT HS256 / `type=service` / claim 面与 error 面分 scope 设计**整条作废**：`create_service_token` / `verify_service_token` **不落地**，`BACKFLOW_INBOUND_SECRET` 作废；§5.4 `send_ack` 的 `scope="backflow:pull"` 措辞同步作废。
+- **不存在「凭证调错面」401 分支**——三端点同一凭证，无 scope 不匹配的错配形态。
+- secret 载体 = `core/config.py` 配置项 + 环境变量注入，**不入库明文、不入日志**（§2 现码事实基线：`security.py` 现无 service token helper，本批亦不新增）。
 
-### 10.3 外部检索鉴权（service token，`core/security.py` 扩）
+### 10.3 取消项与保留项（勿再实现）
 
-online→offline 检索走**服务身份**，不冒充人工会话：
-- 现有 security.py 之上加 service token 校验：JWT HS256、`type=service`、scope 内（claim 面/error 面分 scope）。签发/轮换走 system_config 或本地密钥文件，**不入库明文**。
-- manual 人工面与 service 面分开：error 只读端点须带 service token（防人工误检索误差隔离语义被旁路）；人工面向现有认证不动。
+**取消**：
+
+- **runs list/detail 只读输出扩展**（原 §10.1 第 1 段：`trigger_type` / `version` / `trigger_signal_id` / `excluded_case_ids` / per-case 结果行透出）——**整组取消**；上述信息改由**推送载荷**承载（per-case 结果行 = 载荷 `cases[]`；`na_case` 计数由 online 从 `cases[]` 派生）。`_run_out` **不加** error 专属列（原「只加不改」前提随之作废）。
+- **R-4 cap 溢出 case 列表透出 / R-5「agent 已见版本」只读检索面**（原 §10.2）——**整条取消**（phase2 §9.3 v1.23）。
+- **error 侧显式只读检索端点**（原 §10.2 的 runs 过滤 / error case 面）——随上两条一并取消。
+
+**保留**：
+
+- **error suite / error case 的普通读面过滤**（原 §10.1 第 2 段）：普通 suite/case 只读端点仍**排除** error suite（`is_error_suite=true`）与哨兵 case（`case_type IS NOT NULL`）——与只读面取消无关，谓词收敛见 §11 共享常量集。**dashboard 数字口径容忍**注记不变（run 状态聚合若走 runs 表会含 error run 行，与 active-count 不混，§11.1）。
+- **`excluded_case_ids` 列**：§4.4 rev3 迁移**照旧建出**、cap 截断时**照旧记**溢出 case id——但**不再有任何对 online 的透出面**（载荷 schema 无该字段）。该列降级为 **offline 本地诚实诊断 + 告警**载体。
+
+> ⚠️ **待议项（本批如实登记，未决）**：只读面取消后，cap 截断的诚实标记（`case_truncated` 计数 + `excluded_case_ids` 列表）**对 online 不再可见**——online 无法再区分「该版本全判」与「窗口截断欠测」，原 R-4 的诊断目的落空。载荷 schema 为 online 代码事实源、本批不动 online，故 offline 侧**无从透出**。若后续需恢复该诊断能力，须另开一项议（候选：载荷增补可选字段，或经 cluster/claim 详情人工排查）。
 ---
 
 ## 11. 只读隔离 + 配置/启动（M8）
@@ -698,7 +705,7 @@ online→offline 检索走**服务身份**，不冒充人工会话：
 |---|---|---|
 | ① 数据面 | error case 带哨兵（case_type/payload_id）→ **不进** manual/held_out 加载（§8.1 普通分支）；普通 case 永不带哨兵 | case_loader |
 | ② 行为面 | error suite 拒建 manual run、error_regression 拒公开 start/rerun、error 断言特权补写（§6.5/§7.5/§8.9） | api/runs.py |
-| ③ 只读面 | 普通 suite/case 只读排除 error 对象（§10.1）；**active-count / 名额互斥计数排除 error run**（§7.5 项 2） | api + platform 检索 |
+| ③ 读面过滤 | 普通 suite/case 只读排除 error 对象（§10.3）；**active-count / 名额互斥计数排除 error run**（§7.5 项 2） | api + platform 检索 |
 
 - **active-count 口径**：error_regression 消费 agent 执行名额但**非对外发版评测** → 平台「对外服务中评测」活跃计数**排除** error run（含 10.1 dashboard 聚合若引用 active-count 时同排）。
 - 人工只读查看 error run 结果：允许（结果本身 = 发版观测数据，online 诊断消费），但经 **error suite 显式关联面 + 10.3 鉴权**，不与普通评测面混排。
@@ -733,7 +740,7 @@ shutdown: 取消 task（幂等，游标已落 config，不丢进度）
 
 ### 11.4 写守卫/谓词单一来源
 
-§6.5 全量写守卫 + §10.2 只读过滤谓词收敛为**共享常量集**（`case_type IS NULL` / `is_error_suite=false` / `trigger != 'error_regression'` 一处定义、api/case_loader/只读面复用）——防「api 挡了、loader 没挡」类缺口。
+§6.5 全量写守卫 + §10.2 只读过滤谓词收敛为**共享常量集**（`case_type IS NULL` / `is_error_suite=false` / `trigger != 'error_regression'` 一处定义、api/case_loader/读面复用）——防「api 挡了、loader 没挡」类缺口。
 
 ---
 
@@ -806,7 +813,7 @@ shutdown: 取消 task（幂等，游标已落 config，不丢进度）
 | X-8 | 2 | 双端停摆/恢复 | offline pull 停 N 天 → online 提示性标记（不设 offline 时钟）；offline 恢复续拉不丢、积压限速无峰值 | O-F.6（对齐 online T-4.6/E-11） |
 | X-9 | 2 | 共享 infra 断连 / 网络异常 | 单步独立 try/except 退避；恢复自愈无静默吞错；cap_gap 探测态无重复 invalidated 出站（R-8） | O-D.4/O-F.6（对 online X-11 对端面） |
 | X-10 | 2 | 并发交错（requeue/manual_invalidate × 并发拉取 × ack 重放） | 无覆盖竞态、审计链完整、幂等不重发 | O-D.4/O-F.6（对齐 online T-4.14⑤） |
-| X-11 | 2 | 只读面对拍异常 + service token | R-4 excluded（非空/空）/ R-5 versions / R-16 缺行比对输入形状与 online fake 读回逐项一致；service token 缺失/伪造 → 401/403、人工 token 拒绝 | O-F.2/O-F.3（§10.2/§10.3） |
+| X-11 | 2 | **推送载荷对拍异常 + 出站鉴权** | 推送载荷 10 字段形状与 online fake 接收面逐项一致（含两水位字段 agent 级口径、`cases[]` 空数组合法、na 行必带 error_type）；出站自检三条（`case_id` 唯一 / `finished_ts` 合法 ISO8601 / `schema_version`="1.0"）；静态 secret 缺失或错误 → online 401 且 offline **记 error 不阻塞收尾**；重复推送 → `duplicated:true` 且 `cases_dropped` 不归零 | O-F.2/O-F.3（§10.1/§10.2） |
 
 ---
 
@@ -826,7 +833,7 @@ shutdown: 取消 task（幂等，游标已落 config，不丢进度）
 | 10 | adapter 上限差异（timeout/并发/媒体形态） | 中 | §7.4 预算「依 adapter 实际上限冻结」开放待联调环收敛；媒体 case 复现另议（本稿不设计） |
 | 11 | error case 装载 payload 历史积压首次量大 | 中 | 增量游标首拉限量（§5.2 empty-round 规则）+ 差集对账逐版节流（§7.3 至多 1/agent/周期） |
 | 12 | R-20 pre-scan 报告结论与现状冲突 | 中 | 报告产出后按 G0 裁决；若存量依赖面大，R-12 可拆分豁免清单先行上线 |
-| 13 | 与 online 侧实现清单（R-13/R-16/R-21/R-24）时序 | 中 | 本稿只定 offline 契约面（字段/状态/鉴权）；online 消费在 online 仓库实现清单完成，联调环 1 对齐 |
+| 13 | 与 online 侧实现清单（R-13/R-21/R-24）时序 | 中 | 本稿只定 offline 契约面（**推送载荷字段 / 出站鉴权**）；online 消费在 online 仓库实现清单完成，联调环 1 对齐。**R-16 随 v1.23 只读面取消整条作废**；**新增待议项** = cap 截断诚实标记（`case_truncated` / `excluded_case_ids`）对 online 不再可见（§10.3） |
 | 14 | 慢 agent 增量漏拉（单全局水位固有窗口） | 低 | v1 已按 per-agent 独立 since_ts 消解（§5.2）；残留仅 online 装配时钟乱序侧（幂等 upsert 兜底）；如需跨 agent 水位聚合告警，二期再议 |
 
 ## 14. 修订记录
@@ -838,3 +845,4 @@ shutdown: 取消 task（幂等，游标已落 config，不丢进度）
 | v0.3 草稿 | 2026-09-07 | 并发槽池裁决（用户拍板 A）：§8.3 由 v0.2「不改 limiter、接受叠加上限 manual(≤3)+error(1)=4」改为 **M5 前置 = KeyedLimiter 增进程级共享 per-agent 信号量层**（`_agent_sem: dict[str, asyncio.Semaphore]`，容量 = per_agent_concurrency；acquire 序 shared-agent → 桶内；manual/held_out 业务零改动 + 行为等价回归；error ≤1 路 FIFO 排队、同 agent 总并发 ≤ 上限、不叠加超限）——向 phase2 §6.2 step4（R2 共享槽池）权威对齐，撤销 v0.2 叠加接受取向；连带 §1.1 M5 落点加 core/limiter.py / §2.5 结论 3 重写 / §8.2 槽 acquire 措辞 / §12.1 矩阵 + #23 / §13 行 3 重写。双端未 commit（CLAUDE.md 禁忌），待用户终审。 |
 | v1.0 权威定稿 | 2026-09-07 | 由 code_detail v0.3 升格（更名 `error-backflow-solution_detail.md`；原 code_detail 加归档注保留不删）：header 状态升 **v1.0 权威定稿** + 自我降格声明改写为权威声明（B1）；修订记录增本行（B2）；文末交付核对单（Task #53 回执块）移除不并入（B3，用户拍板）；§4.4 L242 草稿过程指涉改写为规则陈述（B4）；双端 commit 收口 = online main 0b4662f + e016c45 / offline dev dcf4680 + e85fa2e。基线确认 = phase1 v0.2.2 / phase2 v0.7.2 / detail v1.9 / solution v3.5.9。 |
 | v1.1 权威详设 | 2026-09-07 | §12 新增 §12.6「集成异常与边界用例（环 1/环 2 验收，X 系列；error-backflow-task.md 阶段 D/F 引用）」X-1~X-11：把 `error-backflow-task.md` 阶段 D（G3 环 1 收单/ack/崩溃）与阶段 F（G5 环 2 双端）集成测试的异常/边界验收锚编号化（断言语义转正自 O-D.1~O-D.5 / O-F.1~O-F.6 验证目标 + 批 1 §12.2 环 1 / 批 2 §11.2 环 2 对端面），不新增语义；header 状态同步 v1.1。语义基线 phase1 v0.2.2 / phase2 v0.7.2 / solution v3.5.9 / 消费契约 detail 对应版不动。 |
+| v1.2 权威详设 | 2026-09-11 | **v1.23 契约反转回填（T-3.8；纯文档口径回填、offline 运行机制零改动）**：结果回传方向反转——offline 主动推送 `POST /backflow/regression-results`、online 零 outbound。**§10 整节改写**（原「平台只读面与外部鉴权（M7）」→「**结果推送出站与鉴权（M7）**」）：10.1 出站推送（触发点 = 收尾 commit 后异步 / 失败语义 5s·3 重试·不阻塞收尾 / 载荷 schema 指针 phase2 §9.3 / 两水位字段 agent 级口径硬约束 / 出站前自检 / 幂等 / 响应仅记日志）；10.2 出站鉴权 = **静态预共享 secret**（原 JWT HS256 + `type=service` + 分 scope 整条作废，`create_service_token`/`verify_service_token` 不落地）；10.3 取消项与保留项（runs 只读扩展 / R-4 / R-5 整组取消；`excluded_case_ids` 列保留但**不再透出**）。**连带**：M7 表行重写（`api/platform_runs.py` + service token helper → 出站推送客户端）、§1.1 M1 行去 R-4、§8.6 收尾表挂「推送」行 + 实跑口径措辞、§3.3 `send_ack` scope 措辞作废、§11/§12.6 X-11 重写、R-16 六处取消标注；header 版本锚 phase1 v0.2.2→v0.3.0 / phase2 v0.7.2→v0.8.0 / detail v1.10→v1.23、状态升 v1.2。**待议项**：cap 截断诚实标记（`case_truncated` / `excluded_case_ids`）随只读面取消后**对 online 不再可见**（载荷 schema 无该字段），原 R-4「online 判窗口外欠测」的诊断目的落空。 |
