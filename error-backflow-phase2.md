@@ -2,11 +2,11 @@
 
 > **定位**：Task #4 批 2 方案（= online `task.md` T-3.8 落点），**叠加于批 1 实施之后**（批 1 = `error-backflow-phase1.md` v0.2.2）。本批交付 error case 的**真实判定闭环**：error_regression run 执行语义、自动创建触发、executor 复现 + verifier no_fallback 判定、offline 推送回传（online 被动接收即判）。
 >
-> **契约**：error-only run 语义引用 online `solution_detail.md` **v1.9**（批 2 B 包按本稿落字于 v1.3、R5-R7 auto-fixed 判定语义落字于 v1.4、**R-1/R-2 修订包落字于 v1.5**、**R-3~R-10 修订包落字于 v1.6**、**R-18/R-19 修订包落字于 v1.7**、**R-13~R-17 修订包落字于 v1.8（v0.7.2 补录引用）**、**R-20~R-24 修订包落字于 v1.9（本批 v0.7.2；R-21/R-24 为 online 侧机制/语义、offline 侧零机制项随本批落 §2.3 v0.7.2 注/§7.2 R-20 注/§10）**，落点与回执见 §10）；offline 侧对等引用批 1（文中「批 1 §x.y」）。
+> **契约**：error-only run 语义引用 online `solution_detail.md` **v1.23**（批 2 B 包按本稿落字于 v1.3、R5-R7 auto-fixed 判定语义落字于 v1.4、**R-1/R-2 修订包落字于 v1.5**、**R-3~R-10 修订包落字于 v1.6**、**R-18/R-19 修订包落字于 v1.7**、**R-13~R-17 修订包落字于 v1.8（v0.7.2 补录引用）**、**R-20~R-24 修订包落字于 v1.9（本批 v0.7.2；R-21/R-24 为 online 侧机制/语义、offline 侧零机制项随本批落 §2.3 v0.7.2 注/§7.2 R-20 注/§10）**，落点与回执见 §10）；offline 侧对等引用批 1（文中「批 1 §x.y」）。
 >
 > **⚠ 前置依赖（关键）**：截至本稿（2026-09-03）批 1 代码**尚未落地**——backend 全仓无 `case_type / is_error_suite / error_regression / no_fallback / pull_loop` 标识符，`EvalRun.trigger_type` 仍为 `("manual","held_out")`，`TestCase` 三列仍 `nullable=False`，无推送端点文件（原「平台只读面」随 v1.23 契约反转整组取消）。**批 1 必须先实施（含 alembic DDL、激活器 pull_loop、403 写守卫、error suite、`_load_run_cases` error 分支、5 行早退闸、rerun 拒绝守卫），批 2 才能落地**（原「平台只读面」一项随 v1.23 契约反转**整组取消**，结果改由 offline 主动推送 `POST /backflow/regression-results`）。本稿凡引用"批 1 承诺/依赖批 1 落地"处均以此为前提；实施顺序：批 1 代码 → 批 2 代码。
 >
-> **状态**：**v0.7.2**（v0.7.1 基础上 + **2026-09-07 修订包 R-20/R-22/R-23 落字**：R-22 收尾回填 na 统一钉死 `scheduler_unexecuted`（scanner 回收 / orchestrator cancel / run 级超时收尾三路径同源，§6.3 v0.7.2 注 + §6.4 源行补注，timeout 不作收尾回填原因）/ R-23 timeout 三层语义分界（case 级 na 源 / run 终态 timeout = 半途中断不直接触发 needs_review、claim TTL 兜底 / run 级超时收尾回填 na = 环境级 scheduler_unexecuted → 关联 pass case 入 unclean_run 批，§2.3 v0.7.2 注③ + §6.4）/ R-20 复现 run 空答 fail 语义定性 = leakage 空话术复发证据 + **pre-scan 显式立项 Phase B code_detail 实施门禁**（§7.2 R-20 注 + §11.1 补注 + §10 B 项登记；R-12 core 修补不动、本批 offline 运行机制零改动）——online 已落字 `solution_detail.md` v1.9 + `solution.md` v3.5.9，详见 §2.3 v0.7.2 注 + §13 v0.7.2 行）。**v0.7.1**（v0.7 基础上 + **2026-09-07 高危 2 条 R-18/R-19 落字**：R-19 error_type 判据字面量对齐 executor 真值 + 补漏项 `no_usage`/`contract_error`（§6.4 矩阵行 1/2 + 影响域语义块 + §11.1 镜像，权威标注修正、offline 零机制改动）/ R-18 input 明文载体 offline 零改动确认（§2.3 v0.7.1 注②，D19 evidence.input ≤8K 截断快照边界不变）——online 已落字 `solution_detail.md` v1.7 + `solution.md` v3.5.7，详见 §2.3 v0.7.1 注 + §13 v0.7.1 行）。**v0.7**（v0.6.2 基础上 + **2026-09-07 修订包 R-3~R-10 落字**：R-3 对账版本差集补齐（§5.3）/ R-4 cap 溢出 case 只读面透出（§9.3）/ R-5「agent 已见版本」只读面（§9.3）/ R-8 cap_gap 探测态节流（offline 现稿行为修正、代码单独立项）/ R-10 input 截断复现边界注记 / R-11 环 2 场景并入 §11.2——详见 §2.3 v0.7 注；online 已落字 `solution_detail.md` v1.6 + `solution.md` v3.5.6，offline 机制改动（R-3 对账差集 / R-8 节流 / R-4/5 只读面）代码变更单独立项，phase1 稿保持基线）。**v0.6.2**（v0.6.1 基础上 + **2026-09-07 修订包 R-1/R-2/R-12 落字**：auto-fixed K 改 claim 级固化 `claim_k` / 纯净判据下钻 claimed case 行 + na error_type 影响域分流 / verifier 空串/纯空白应答保守 fail 修补决策——详见 §2.3 v0.6.2 注 + §6.4 影响域标注列 + §7.2/§11.1 R-12；online 已落字 `solution_detail.md` v1.5 + `solution.md` v3.5.5，offline 运行机制零改动、R-12 代码变更单独立项）。**v0.6.1**（v0.6 基础上 + **2026-09-07 终审通过，3 处消费语义补定义**：聚合与 reason 值域 / 纯净可判判据 / K-TTL 收敛终点（见 §2.3 v0.6 注 ①②③ + §10 B-10~B-12）——R5-R7 由方向性登记精化为 **online 落字规格，已落字 `solution_detail.md` v1.4 + `solution.md` v3.5.4（2026-09-07）**，offline 侧运行机制零改动。历史：v0.6 在 v0.5.2 基础上 + **2026-09-03 数据流三案裁决 R5-R7（用户确认后落稿，方向性契约修订）**：auto-fixed 判据重构 = 纯净 run 前提 + 跨版本稳定序列 K / reentry 同版本复验禁 auto-fixed / 老 case 窗口中断 K = 接受退化诚实欠测——全文 §2.3 v0.6 注 + §10 B-10~B-12 登记，**待落字 online `solution_detail.md` v1.4**，offline 侧运行机制零改动）。v0.5.2 全部内容（落字回执 P0 + 措辞收口 P1 + 终审再修 1P1+4P2）保留于文中。待用户终审。 + **2026-09-03 落字回执并入（P0）**：online B 包已按本稿落 `solution_detail.md` v1.3（A1-A7 + 三处排查补正：needs_review_batch 载体定稿/批量端点/整批原子/reentry 同日 count+1 可见性提示）+ `solution.md` v3.5.3 + `task.md` 环 0 B-7，全文「现文 v1.2/仅 offline 主张/需确认后落」框架回正、风险 13 解除；**P1 措辞收口**：na 源计数统一五源矩阵、洪峰收敛创建侧落点、终态写守卫收尾同事务顺序）；**终审再修（2026-09-03，1 P1 + 4 P2）**：P1 心跳续租粒度钉死（固定时间片 ≪ lease TTL 覆盖单 case 执行窗，禁仅逐 case）、在途判定丢失显式声明（§6.3）、§11.1 na 矩阵镜像五源、§10 小结块快照注、offline 触发侧断链对称（风险 17/场景 13）。待用户终审 —— **v0.6.1（2026-09-07）已终审通过，3 处消费语义定义补毕（§2.3 v0.6 注 ①②③），已落字 online `solution_detail.md` v1.4 + `solution.md` v3.5.4 + `task.md` 环 0 登记（2026-09-07 收口；commit 待用户明示）**。
+> **状态**：**v0.8.0**（v0.7.2 基础上 + **2026-09-11 v1.23 契约反转回填（T-3.8 批 2b，纯文档口径回填、offline 运行机制零改动）**：§9.3 由「平台只读面」整节改写为「**推送载荷与出站行为**」（端点 / 触发时机 / 鉴权 / 失败语义 / 载荷 schema / 响应字段 / 拒单规则 / 幂等键，八项新增定义）+ §6.3 收尾表新增「推送」行 + §9.4 载体同步 + R-4/R-5 只读面取消，详见 §13 v0.8.0 行）。**v0.7.2**（v0.7.1 基础上 + **2026-09-07 修订包 R-20/R-22/R-23 落字**：R-22 收尾回填 na 统一钉死 `scheduler_unexecuted`（scanner 回收 / orchestrator cancel / run 级超时收尾三路径同源，§6.3 v0.7.2 注 + §6.4 源行补注，timeout 不作收尾回填原因）/ R-23 timeout 三层语义分界（case 级 na 源 / run 终态 timeout = 半途中断不直接触发 needs_review、claim TTL 兜底 / run 级超时收尾回填 na = 环境级 scheduler_unexecuted → 关联 pass case 入 unclean_run 批，§2.3 v0.7.2 注③ + §6.4）/ R-20 复现 run 空答 fail 语义定性 = leakage 空话术复发证据 + **pre-scan 显式立项 Phase B code_detail 实施门禁**（§7.2 R-20 注 + §11.1 补注 + §10 B 项登记；R-12 core 修补不动、本批 offline 运行机制零改动）——online 已落字 `solution_detail.md` v1.9 + `solution.md` v3.5.9，详见 §2.3 v0.7.2 注 + §13 v0.7.2 行）。**v0.7.1**（v0.7 基础上 + **2026-09-07 高危 2 条 R-18/R-19 落字**：R-19 error_type 判据字面量对齐 executor 真值 + 补漏项 `no_usage`/`contract_error`（§6.4 矩阵行 1/2 + 影响域语义块 + §11.1 镜像，权威标注修正、offline 零机制改动）/ R-18 input 明文载体 offline 零改动确认（§2.3 v0.7.1 注②，D19 evidence.input ≤8K 截断快照边界不变）——online 已落字 `solution_detail.md` v1.7 + `solution.md` v3.5.7，详见 §2.3 v0.7.1 注 + §13 v0.7.1 行）。**v0.7**（v0.6.2 基础上 + **2026-09-07 修订包 R-3~R-10 落字**：R-3 对账版本差集补齐（§5.3）/ R-4 cap 溢出 case 只读面透出（§9.3）/ R-5「agent 已见版本」只读面（§9.3）/ R-8 cap_gap 探测态节流（offline 现稿行为修正、代码单独立项）/ R-10 input 截断复现边界注记 / R-11 环 2 场景并入 §11.2——详见 §2.3 v0.7 注；online 已落字 `solution_detail.md` v1.6 + `solution.md` v3.5.6，offline 机制改动（R-3 对账差集 / R-8 节流 / R-4/5 只读面）代码变更单独立项，phase1 稿保持基线）。**v0.6.2**（v0.6.1 基础上 + **2026-09-07 修订包 R-1/R-2/R-12 落字**：auto-fixed K 改 claim 级固化 `claim_k` / 纯净判据下钻 claimed case 行 + na error_type 影响域分流 / verifier 空串/纯空白应答保守 fail 修补决策——详见 §2.3 v0.6.2 注 + §6.4 影响域标注列 + §7.2/§11.1 R-12；online 已落字 `solution_detail.md` v1.5 + `solution.md` v3.5.5，offline 运行机制零改动、R-12 代码变更单独立项）。**v0.6.1**（v0.6 基础上 + **2026-09-07 终审通过，3 处消费语义补定义**：聚合与 reason 值域 / 纯净可判判据 / K-TTL 收敛终点（见 §2.3 v0.6 注 ①②③ + §10 B-10~B-12）——R5-R7 由方向性登记精化为 **online 落字规格，已落字 `solution_detail.md` v1.4 + `solution.md` v3.5.4（2026-09-07）**，offline 侧运行机制零改动。历史：v0.6 在 v0.5.2 基础上 + **2026-09-03 数据流三案裁决 R5-R7（用户确认后落稿，方向性契约修订）**：auto-fixed 判据重构 = 纯净 run 前提 + 跨版本稳定序列 K / reentry 同版本复验禁 auto-fixed / 老 case 窗口中断 K = 接受退化诚实欠测——全文 §2.3 v0.6 注 + §10 B-10~B-12 登记，**待落字 online `solution_detail.md` v1.4**，offline 侧运行机制零改动）。v0.5.2 全部内容（落字回执 P0 + 措辞收口 P1 + 终审再修 1P1+4P2）保留于文中。待用户终审。 + **2026-09-03 落字回执并入（P0）**：online B 包已按本稿落 `solution_detail.md` v1.3（A1-A7 + 三处排查补正：needs_review_batch 载体定稿/批量端点/整批原子/reentry 同日 count+1 可见性提示）+ `solution.md` v3.5.3 + `task.md` 环 0 B-7，全文「现文 v1.2/仅 offline 主张/需确认后落」框架回正、风险 13 解除；**P1 措辞收口**：na 源计数统一五源矩阵、洪峰收敛创建侧落点、终态写守卫收尾同事务顺序）；**终审再修（2026-09-03，1 P1 + 4 P2）**：P1 心跳续租粒度钉死（固定时间片 ≪ lease TTL 覆盖单 case 执行窗，禁仅逐 case）、在途判定丢失显式声明（§6.3）、§11.1 na 矩阵镜像五源、§10 小结块快照注、offline 触发侧断链对称（风险 17/场景 13）。待用户终审 —— **v0.6.1（2026-09-07）已终审通过，3 处消费语义定义补毕（§2.3 v0.6 注 ①②③），已落字 online `solution_detail.md` v1.4 + `solution.md` v3.5.4 + `task.md` 环 0 登记（2026-09-07 收口；commit 待用户明示）**。
 >
 > **裁决记录**：2Q1 复用断言引擎 / 2Q2 复现失败 na / 2Q3 版本变更自动触发 / 2Q4 单 fix 版回归（v0.1 并入）；**R1 两平台同用 semver**（v0.2 并入；**v0.4 修订：收缩为跨端「版本字面量域」**，见 §2.4）/ **R2 执行期 agent 并发闸**（v0.2 并入；**v0.4 修订：共享 per-agent 执行并发槽池，废弃 run 级排他窗**，见 §2.2/D7/§6.2）/ **R3 分母治理 v1 裁决 = 守卫驻留 + 诚实欠测**（v0.5 并入，§6.1 注 1/2，v1 不引入跨端 deactivate）/ **R4 放弃离线触发覆写**（v0.5 并入，§2.3，false-fixed 收敛 reentry/下轮 claim）；**R5 auto-fixed 只接受纯净 run**（run 级 0 技术性 na，含 na 的 run 内 pass 不置 verify passed → needs_review，v0.6 并入）/ **R6 auto-fixed = claim fix_version 起连续 K 个纯净可判版本 run 无 fail**（K=2 默认可配；老 case 窗口截断中断 K → 接受退化诚实欠测，v0.6 并入）/ **R7 reentry 同版本复验禁 auto-fixed**（generation>1 cluster claim 同已完成版本 → 旧 run pass 转 needs_review，不放开 completed 不重建守卫，v0.6 并入）——详见 §2.3 v0.6 注 + B-10~B-12。
 
@@ -318,7 +318,9 @@ error 分支**不复用共享 `_finish`**（其 L541-545 对账回填 `pass_fail
 | 全部 case 有 pass/fail 终值（0 na） | `completed` | — |
 | 存在 ≥1 na case | `partial_failed` | — |
 | 未跑完被取消/超时（cancel/scanner，§6.6） | `timeout`/`cancelled`（沿用） | 已完成 case 保留 pass/fail 终值；**未完成 case 回填 `pass_fail='na'`**（不写 'error'，M4） |
+| **终态 commit 后**（上三种终态共同） | — | **异步推送** `POST /backflow/regression-results`（fire-and-forget：超时 5s、重试 3 次、全败记 error **不阻塞收尾**；载荷与拒单规则见 §9.3，v1.23 契约反转） |
 
+- **推送时机（v1.23）**：**三种终态均推送**——终态 commit 之后（**不在收尾事务内**）异步发起；online 侧按 `run_status` + per-case 终值判定（§2.3 对表），run 级中断不整单丢弃。
 - 计数：`na_case` = pass_fail=='na' 计数；`error_case` = =='error' 计数（error run 恒 0）；`agent_score` 恒 NULL。
 - `completed` 仅当 0 na（评审 B4：全 na 不得落 completed——那会误导 online 认为可判）。
 - **实跑口径（评审 A2 → v0.4 扩展）**：run 汇总（total/pass/fail/na_case）以**实跑集**计——`case_ids` 在创建时固化，若个别 case 致实跑集 < case_ids：① run pending/running 期间被作废（批 1 invalidate 路径，v1 不变式下极窄窗）；② **空断言被加载过滤**（v0.4 I2，批 1→批 2 间隙存量未 backfill 的 case）——推送载荷对该 case 无结果行（而非伪值），online 按无终值处理（§2.3 缺行≠na），避免静默失配。过滤出的空断言 case 由 backfill 对账清零，下轮信号自然纳入。
@@ -443,20 +445,62 @@ error run 逐 case 落 `EvalResult` 时走 `orchestrator._ensure_case_version`�
 
 `api/runs.py` create_run/rerun_run 的互斥计数扫描（`_MUTEX_STATUS=pending/running` 同 agent 行数 → 409）**排除 `trigger_type='error_regression'` 的行**——error run 不占互斥槽名额、不堵 manual 建单。v0.1 §9.2「不另改该函数」撤销。改两处扫描（:251-253/:378）。
 
-### 9.3 平台只读面（依赖批 1 落地 + 本稿补 na_case）
+### 9.3 推送载荷与出站行为（**v1.23 契约反转：原「平台只读面」整组取消，本节改写**）
 
-批 1 §8 `/api/v1/runs` 只读面结构不变；run 汇总响应**补 `na_case` 字段**（total/pass/fail/error_case/na_case）；**per-case 响应在 na 行补 `error_type`（v0.4 I3/S2，na case 必带）**——online 靠它分组聚合 needs_review / 转 reason，error_type 是分类枚举非实文，进 machine-to-machine 只读面不构成敏感泄漏（人类读面仍隔离，见 §9.4）。error run 的 na 消费语义（online needs_review 触发）以 na_case/per-case na 为准。批 1 §8.3 对表输出随本稿更新。真 run 产出后直接可查；**不因本批改动 platform_runs.py 查询逻辑**（字段序列化白名单已控读面，见 §9.4）。
+> **方向反转（v1.23）**：offline 不再提供「供 online 回查」的只读面——改为 **offline 在 error_regression run 终态后主动推送结果**，online 侧零 outbound。原 §9.3 的只读面内容（批 1 §8 `/api/v1/runs` 上的 `na_case` / per-case `error_type` 消费）与 v0.7 只读面扩展（R-4 `excluded_case_ids` 溢出列表 / R-5「agent 已见版本」列表）**整组取消**；其中 `na_case` 与 per-case `error_type` **非废弃——载体改为推送载荷 `cases[]`**（`pass_fail='na'` + `error_type`），online 消费语义（na 聚合 needs_review）不变。
 
-**v0.7 只读面扩展（R-4/R-5，2026-09-07 评审拍板；机制新增只读、不改 run/判定语义，代码变更单独立项）**——online 消费侧语义已落 detail v1.6，offline 侧只读面新增两处：
+**端点**：`POST /backflow/regression-results`（online 收单，**同事务内完成判定**——判定已从轮询 job 搬进该端点）。
 
-- **R-4 cap 溢出 case 列表透出**：error run 因 cap newest-active-first 截断（§6.1 注 1）产生溢出时，`case_truncated` 从「计数」升级为可枚举——run 只读面响应补**溢出 case 列表字段**（如 `excluded_case_ids`，列出被截断挤出的具体 case id；语义 =「该版窗口外欠测、非修复失败」）。online 回查发现 claimed case 在 fix_version 版 run 缺行且 ∈ 该列表 → 判「该版本窗口外欠测」→ claim 详情可诊断状态（detail v1.6 §7.6/§8.7/§9.3），引导 admin 人工 fixed 或 agent 错误量治理。**不引入跨端保窗口**（v0.6 L111「接受退化、诚实欠测」维持；本项 = 让「诚实」可被 online 诊断，非改变截断语义）。
-- **R-5「agent 已见版本」读面**：新增 agent 已见版本列表只读面——返回该 agent `manual/held_out` runs 的 **distinct version + 最近终态时间**（按 run.trigger_type ∈ {manual, held_out} 取，排除 error_regression）；**只读、不改 run/判定语义**，供 online claim 表单软校验告警 + 版本活跃度动态 K 提示数据源（detail v1.6 §8.4 claim 交互/§9.3；R-1③ 提示合并数据源）。**字段清单与 online detail §8.7 versions 端点对齐（H7-5）**：响应含 cap 溢出 case 数 `case_truncated_count` 聚合（供 R-4 窗口外欠测核对），支持可选 `window_days` 入参过滤。manual_invalidate / §6.5 重处理语义不变。
+**触发时机**：run **终态 commit 之后异步**触发（§6.3 收尾表「推送」行）。终态写守卫（§6.3）保证终态后结果集冻结，故推送载荷**一次性产出**、数据集稳定。
+
+**鉴权**：`Authorization: Bearer <secret>` —— **三出站端点共用静态预共享 secret**；**无 scope 分置、无 JWT**（原 §9.2 JWT 设计不落地；`BACKFLOW_INBOUND_SECRET` 整条作废）。
+
+**失败语义（fire-and-forget）**：超时 **5s**、重试 **3 次**（退避 1s/2s/4s）；三次全败 → **记 error 日志后放弃、不阻塞 run 收尾**（online 作为接收方不重试）。**丢失代价**：该版本观察中断——online 侧「缺行中断」守卫（`prev_terminal_version` 本地无记录）使 K 序列不推进，不误判为 pass。
+
+**载荷 schema**（`schema_version` 固定 `"1.0"`）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `schema_version` | str | 固定 `"1.0"`；不匹配 → 拒单 |
+| `agent` | str | 被测 agent |
+| `agent_version` | str | = 本 run 绑定版本（原 `bound_version`） |
+| `run_id` | str | |
+| `run_status` | enum | ∈ `completed` / `partial_failed` / `timeout` / `cancelled` |
+| `agent_latest_version` | str | **水位 1**：该 agent 全部终态 run 的最大版本 |
+| `prev_terminal_version` | str \| null | **水位 2**：本 run 之前该 agent 最近一个**已到终态** run 的版本；**必填但值可为 `null`**（= 此前无任何终态 run，即首次） |
+| `trigger_signal_id` | str \| null | 可空（§5.3 consumed 锚） |
+| `finished_ts` | str | ISO8601 UTC；**非法格式 → 拒单** |
+| `cases[]` | array | `{case_id, case_type, pass_fail, error_type?, error_detail?}`；`pass_fail ∈ {pass, fail, na}`；na 行必带 `error_type`；**空数组合法** |
+
+- **两水位字段口径硬约束**：均为 **agent 级事实**——统计范围 = 该 agent **全部终态 run**，**不得**按 `trigger_type='error_regression'` 收窄（online `_agent_versions(session, agent)` 签名内无 trigger_type 过滤）；manual/held_out run 虽**不触发推送**，其版本**计入**水位。误收窄 → 与 online「缺行中断」判据系统性错位 → **假中断**。
+- **两水位必须同一次查询产出**：`prev_terminal_version` 漏带 → online 的「缺行中断」守卫失效 → 中间版本推送 fire-and-forget 丢失时被判「连续 pass」→ **簇被静默误判 fixed**。
+- **v1 硬约束**：一次回归 run 只对应一个 cluster（`trigger_signal_id` 单值）；跨 cluster 批量回归不在 v1。
+
+**响应字段**（online 回执；offline 仅记日志，**不据此做业务分支**）：
+
+| 字段 | 语义 |
+|---|---|
+| `accepted` | 是否收单 |
+| `duplicated` | 是否幂等重放 |
+| `run_record_id` | 落库的 `verify_run_record` id |
+| `links_advanced` | **真正发生终态迁移**的 link（passed/failed/superseded）；重复推送 / orphan 为空 |
+| `cases_dropped` | 丢弃的 case 数；**幂等重放恒返与首次相同的值、不归零** |
+
+**拒单规则**（整单拒；offline 记 error 日志后放弃，**不重试**）：
+
+- `case_id` 在 `cases[]` 内**重复** → `ERR_PULL_0002`（同 case 两条 = 载荷自相矛盾）→ **offline 出站前须保证 `case_id` 唯一**
+- `finished_ts` 非法 ISO8601 → `ERR_PULL_0002`
+- `schema_version` 不匹配 → 拒单
+
+**幂等键**：`uk_verify_run(link_id, run_id)` —— 同一 `(link, run)` 重复推送 → 200 + `duplicated:true`。
+
+批 1 §8.3 对表输出随本稿更新；`excluded_case_ids` / 「agent 已见版本」两处只读面**不再提供**。
 
 ### 9.4 人类读面隔离 + 排障路径（v0.3 安全 3 + 逻辑 S2 修入，新增）
 
-- **error run 的普通读面隔离**：error_regression run（含其 case_ids、error_detail、复现输出）与 error suite 同属敏感面——**不出现在普通 viewer 的 `list_runs`/`get_run`/`run_results` 人类读面**（与 §9.1 dashboard 排除同精神；批 1 只排除 dashboard/普通 suite，未覆盖 run 列表，本稿补）。error run 仅 admin/evaluator 角色或平台只读面可见。
-- **`case_version.snapshot` 继承 error case 读面限制**：error run 落 result 惰性建快照（§8），snapshot 含 `input` 实文 = 从信封 evidence 装载的复现输入——**平台只读面/人类读面对 error run 的 case 级 read 不随 results 暴露 snapshot 的 input 实文**（按批 1 §8.2 响应字段白名单裁剪），防批 1 §5.3「只隐藏 `backflow_envelope`」被快照旁路。
-- **排障路径（逻辑 S2）**：error run 需要可排查但不可全暴露——admin/evaluator 内部 API + 日志透出 error_type 明细（EvalResult.error_detail）、na 分类源、收尾终态；`partial_failed`/needs_review 根因（复现失败 vs 调度未执行；素材缺失经加载过滤已不构成 run 判定源，v0.4 I2）有日志/告警 key 可查（§5.3 补偿对账漏触发同纳入告警）。**error_type 的双面归属（v0.4 I3/S2 收口）**：普通人类 viewer 无 error_type/error_detail（隔离如上）；平台只读面（online 消费）na case 带 error_type 分类值（§9.3）；admin/evaluator 全量明细——三面分级，互不越界。
+- **error run 的普通读面隔离**：error_regression run（含其 case_ids、error_detail、复现输出）与 error suite 同属敏感面——**不出现在普通 viewer 的 `list_runs`/`get_run`/`run_results` 人类读面**（与 §9.1 dashboard 排除同精神；批 1 只排除 dashboard/普通 suite，未覆盖 run 列表，本稿补）。error run 仅 admin/evaluator 角色可见（其结果经**推送载荷**进 online，§9.3；原「平台只读面」随 v1.23 **整组取消**）。
+- **`case_version.snapshot` 继承 error case 读面限制**：error run 落 result 惰性建快照（§8），snapshot 含 `input` 实文 = 从信封 evidence 装载的复现输入——**人类读面对 error run 的 case 级 read 不随 results 暴露 snapshot 的 input 实文**（按批 1 §8.2 响应字段白名单裁剪），防批 1 §5.3「只隐藏 `backflow_envelope`」被快照旁路；**推送载荷（§9.3）亦不含 input 实文**——载荷 `cases[]` 仅 `case_id/case_type/pass_fail/error_type/error_detail`，无 `input` 字段。
+- **排障路径（逻辑 S2）**：error run 需要可排查但不可全暴露——admin/evaluator 内部 API + 日志透出 error_type 明细（EvalResult.error_detail）、na 分类源、收尾终态；`partial_failed`/needs_review 根因（复现失败 vs 调度未执行；素材缺失经加载过滤已不构成 run 判定源，v0.4 I2）有日志/告警 key 可查（§5.3 补偿对账漏触发同纳入告警）。**error_type 的双面归属（v0.4 I3/S2 收口）**：普通人类 viewer 无 error_type/error_detail（隔离如上）；**推送载荷（online 消费，§9.3）na case 带 error_type 分类值**；admin/evaluator 全量明细——**两面分级**，互不越界（原「三面」中的平台只读面随 v1.23 取消）。
 
 ---
 
@@ -617,6 +661,7 @@ mvn 编译 → 上述矩阵单测 → 环 2 双端走查 → 逐项告知已验�
 | v0.7 | 2026-09-07 | **修订包 R-3~R-10 落字（2026-09-07 逐问评审拍板；online 已落字 `solution_detail.md` v1.6 + `solution.md` v3.5.6）**——本批 = 方向性契约修订 + **offline 机制改动混合包**（突破「offline 零机制」项与 R-12 同类：本稿决策 + 规格登记、机制代码单独立项、phase1 稿保持基线）：**R-3 对账版本差集补齐**（§5.3 v0.7 落字块：单最新锚 → agent manual/held_out distinct version − 已有 error run version 差集逐版补建，中间版不再永久丢；§5.2 措辞对齐）；**R-4 cap 溢出 case 只读面透出**（§9.3：case_truncated 计数 → 溢出 case 列表，online 回查欠测诊断）；**R-5「agent 已见版本」只读面**（§9.3：manual/held_out distinct version + 最近终态时间，claim 软校验数据源）；**R-8 cap_gap 探测态节流**（phase1 §6.5 现稿行为修正：invalidated ack 只发一次 + 本地探测补齐，L359 判据收窄至 ack_status ∈ {none,pending} 或 requeue 覆盖；本稿 §2.3 v0.7 注④决策登记，phase1 注记随代码单独立项）；**R-10 input 截断复现边界注记**（§2.3 v0.7 注⑤：offline 不截断不改写、截断复现 pass 如实判，防护在 online 消费侧 reason `input_truncated` 3→4）；§2.3 v0.7 注（R-3~R-11 修订全景）+ §10 v0.7 落字回执块 + §11.2 场景 17-22（R-11 环 2 用例并入；R-6/R-9 online-only 场景归 detail v1.6 §14）。待用户终审 |
 | v0.7.1 | 2026-09-07 | **高危 2 条 R-18/R-19 落字（2026-09-07 逐问评审拍板；online 已落字 `solution_detail.md` v1.7 + `solution.md` v3.5.7；offline 运行机制零改动）**——**R-19 error_type 判据字面量错位 + 漏项修正**（本稿核心落点）：§6.4 矩阵行 1 短名 `connect/sse_parse/http` → executor 真值 `connect_error/sse_parse_error/http_error`（executor.py L38 RETRYABLE_ERRORS）；矩阵行 2 + §11.1 镜像补入漏项 `no_usage`/`contract_error`（executor.py L23/L31，非 RETRYABLE → 直接 na）；**落字后全表清点再追改一处遗漏 = §2.3 v0.6.2 注② 内嵌 case 级清单**（同为现行判据正文、初稿仍短名且漏二项，2026-09-07 收口改真值 + 补漏项，见 §2.3 v0.7.1 注①）；case 级清单与 executor 真值同域，从严兜底回归「仅兜底非常态」——防短名错位被 online 当「未知 error_type → 默认从严环境级」系统性误触发 unclean_run（§2.3 v0.7.1 注① + §6.4）；**R-18 input 明文载体 offline 零改动确认**（§2.3 v0.7.1 注②：online 判定态增列 input_snapshot_clean/input_truncated，D19 evidence.input ≤8K 截断快照边界不变，offline 无新字段、error run 复现如实判） |
 | v0.7.2 | 2026-09-07 | **修订包 R-20/R-22/R-23 落字（2026-09-07 逐问评审拍板；online 已落字 `solution_detail.md` v1.9 + `solution.md` v3.5.9；offline 运行机制零改动、仅收尾语义钉死 + 护栏登记）**：**R-22** 收尾回填 na 统一钉死 `scheduler_unexecuted`（§6.3 v0.7.2 注：scanner 回收 / orchestrator cancel / run 级超时收尾三路径回填 na 同源同 error_type；§6.4 源行补注；「na case 必带 error_type」不变量全覆盖收尾路径；timeout 不作收尾回填原因）；**R-23** timeout 三层语义分界（§2.3 v0.7.2 注③：case 级 na 源 / run 终态 timeout 半途中断不直接触发 needs_review、claim TTL 兜底 / run 级超时收尾回填 na 环境级 → 关联 pass case 入 unclean_run 批；「run 超时非源」不排除环境级回填污染的间接作用）；**R-20** 复现 run 空答 fail 语义定性 = leakage 空话术复发证据 + pre-scan 显式立项 Phase B code_detail 实施门禁（§7.2 R-20 注：R-12 core 修补不动、空答不落 na 落 verifier fail、现网 keyword_* 空字段依赖 pre-scan 报告 + 合法空答豁免白名单）；§11.1 补收尾 error_type 护栏断言 + §10 v0.7.2 落字 blockquote |
+| v0.8.0 | 2026-09-11 | **v1.23 契约反转回填（T-3.8 批 2b；纯文档口径回填、offline 运行机制零改动）**：结果回传方向反转——offline **主动推送** `POST /backflow/regression-results`、online 零 outbound（收单仍是 offline 主动拉 online）。**§9.3 整节改写**（原「平台只读面」→「**推送载荷与出站行为**」，八项新增定义：端点 / 触发时机 = 终态 commit 后异步 / 鉴权 = 静态预共享 secret（无 scope 分置、无 JWT）/ 失败语义 = 超时 5s·重试 3 次·全败记 error 不阻塞收尾 / 载荷 schema（含两水位字段 **agent 级口径硬约束**）/ 响应字段 `links_advanced`·`cases_dropped` 口径 / 拒单规则（`case_id` 重复、`finished_ts` 非法 ISO8601）/ 幂等键 `uk_verify_run`）；**§6.3 收尾表新增「推送」行** + 推送时机注；**§9.4 三处载体同步**（人类读面收为两面分级、推送载荷不含 input 实文）；**R-4 `excluded_case_ids` / R-5「agent 已见版本」只读面整组取消**（`na_case` + per-case `error_type` **非废弃**，载体改为载荷 `cases[]`，online 消费语义不变）。**规格外补改 2 处**：文首契约锚 `solution_detail.md` v1.9 → v1.23（§1 契约行）。 |
 
 ---
 
