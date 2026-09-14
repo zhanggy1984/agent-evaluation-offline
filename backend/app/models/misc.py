@@ -58,7 +58,11 @@ class AuditLog(Base):
 
 
 class AgentCircuit(Base):
-    """7.6 C3 熔断器跨 worker 持久化：agent 级一行，存状态机快照。
+    """7.6 C3 熔断器跨 worker 持久化：**agent × 域**一行，存状态机快照。
+
+    §8.4 熔断域隔离（C4b）：manual/held_out 与 error 复现各有独立状态行，互不牵连
+    （共用一行会让 error 复现连败把 manual 评测一起熔断）。域用同一张表的多行表达，
+    不为单维度开销一张新表。
 
     state 用 String 直存（closed/open/half_open），opened_at 为 wall clock epoch 秒
     （circuit_breaker 已统一 time.time 基准，跨进程/重启可比）。
@@ -69,6 +73,9 @@ class AgentCircuit(Base):
 
     agent_id: Mapped[int] = mapped_column(
         ForeignKey("agent.id", ondelete="CASCADE"), primary_key=True)
+    # 熔断域：manual（含 held_out）/ error_regression（§8.4）。default 给 Python 侧，
+    # 使既有调用点不传也能落 manual——DEFAULT 与列默认必须同值，否则 ORM 插入与裸 SQL 分叉
+    domain: Mapped[str] = mapped_column(String(32), primary_key=True, default="manual")
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="closed")
     failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # opened_at 必须 DOUBLE：MySQL FLOAT(单精度) 对 epoch 秒(1.7e9) 精度丢失（1787201704 → 1787200000），

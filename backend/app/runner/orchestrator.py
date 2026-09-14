@@ -66,6 +66,8 @@ ERROR_ACTIVE_QUOTA = 1
 ERROR_CASE_CAP = 200
 # D8 前置不通过时的落库标记（非终态语义，只作诊断）
 ERROR_SKIP_REASON = "error_precheck_failed"
+# §8.4 熔断域：error 复现的独立状态行（manual/held_out 用 circuit_repo 默认域 "manual"）
+ERROR_CIRCUIT_DOMAIN = "error_regression"
 
 
 def _now() -> datetime:
@@ -421,17 +423,19 @@ class RunOrchestrator:
                              max_retries, breaker_th, breaker_open) -> None:
         """单条 error case 复现（含限流/熔断/重试），结果落终值。
 
-        ⚠️ **熔断 key 仍与 manual 共用 agent 级**（§8.4 要求 `{agent_id}:error_regression`
-        独立 key，需给 `agent_circuit` 改主键/加列 ⇒ DDL，归 C4b）。当前后果：error 侧复现失败会
-        累计到该 agent 的熔断计数上，可能连带拦住 manual run——C1 验收不含并发，未暴露。
+        §8.4 熔断隔离已落地（C4b）：用 `domain="error_regression"` 的独立状态行，
+        与 manual 的默认域互不牵连。⚠️ §8.4 的「独立阈值（默认同 5）」**未做**——
+        两域共用 run 配置的 `breaker_threshold`，隔离的是状态不是阈值。
         """
         if self._is_cancelled(run_id):
             return
         await self._limiter.acquire(run_id, str(agent.id))
         try:
             async with SessionLocal() as db:
+                # §8.4 熔断域隔离：error 复现用独立状态行，连败不牵连 manual 评测
                 breaker = await circuit_repo.load(db, agent.id,
-                                                  CircuitBreaker(breaker_th, breaker_open))
+                                                  CircuitBreaker(breaker_th, breaker_open),
+                                                  domain=ERROR_CIRCUIT_DOMAIN)
                 try:
                     if not breaker.try_acquire():
                         # 熔断期未实际调用 → §8.2「调度层未执行拦截为 na」，不落 'error'
@@ -454,7 +458,8 @@ class RunOrchestrator:
                         elif outcome.error_type in RETRYABLE_ERRORS:
                             breaker.record_failure()
                 finally:
-                    await circuit_repo.save(db, agent.id, breaker)
+                    await circuit_repo.save(db, agent.id, breaker,
+                                            domain=ERROR_CIRCUIT_DOMAIN)
         finally:
             self._limiter.release(run_id, str(agent.id))
 

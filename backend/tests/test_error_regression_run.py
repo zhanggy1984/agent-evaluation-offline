@@ -9,18 +9,21 @@
 - `_finish_error_regression` 四态：completed / partial_failed / cancelled（取消）/ cancelled（空集）
   + `error_case` 恒 0 + `agent_score` 恒 NULL
 
-⚠️ 本文件**不覆盖**：真执行路径（见 tests/integration 的 error_run_probe）、并发槽池（§8.3 归 C4）、
-熔断独立 key（§8.4 归 C4，需 DDL）。
+⚠️ 本文件**不覆盖**：真执行路径（见 tests/integration 的 error_run_probe）、并发槽池（§8.3 的
+真库证据在 shared_pool_probe）、熔断域隔离的**行为**（§8.4 的真库证据在 circuit_domain_probe；
+此处只有接线形状）。
 """
 from types import SimpleNamespace
 
 import pytest
 
+from app.core import circuit_repo
 from app.runner import orchestrator as orch_mod
 from app.runner.case_loader import _is_error_case, _load_run_cases
 from app.runner.executor import CaseOutcome
 from app.runner.orchestrator import (
     ERROR_CASE_TIMEOUT_S,
+    ERROR_CIRCUIT_DOMAIN,
     CANCELLED,
     COMPLETED,
     PARTIAL_FAILED,
@@ -418,6 +421,62 @@ class TestRunErrorWiring:
     async def test_defaults_timeout_when_absent(self, monkeypatch):
         calls = await self._run(monkeypatch, {})
         assert calls["args"][6] == ERROR_CASE_TIMEOUT_S
+
+
+class TestErrorCircuitDomainWiring:
+    """§8.4 熔断域接线守卫（无 DB）：`_run_one_error` 必须按 **error 域**读写熔断行。
+
+    **这条守卫的来历**（批 C4b）：域隔离全靠调用点传 `domain=`——漏传时单测全绿、全量回归
+    也全绿（fallback 是 `"manual"`，不报错），只有真库的域隔离探针才翻得出来。故在此把
+    调用点钉死：换域/漏域必须让本组红。
+    """
+
+    class _FakeBreaker:
+        def __init__(self) -> None:
+            self.released = 0
+
+        def try_acquire(self) -> bool:
+            return True
+
+        def record_failure(self) -> None:
+            pass
+
+        def release_probe(self) -> None:
+            self.released += 1
+
+    class _FakeLimiter:
+        async def acquire(self, run_id, agent_key):  # noqa: D102
+            pass
+
+        def release(self, run_id, agent_key):  # noqa: D102
+            pass
+
+    @pytest.mark.asyncio
+    async def test_error_run_reads_and_writes_error_domain(self, monkeypatch):
+        calls: list = []
+        breaker = self._FakeBreaker()
+
+        async def fake_load(db, agent_id, br=None, domain="manual"):
+            calls.append(("load", domain))
+            return breaker
+
+        async def fake_save(db, agent_id, br, domain="manual"):
+            calls.append(("save", domain))
+
+        monkeypatch.setattr(circuit_repo, "load", fake_load)
+        monkeypatch.setattr(circuit_repo, "save", fake_save)
+        monkeypatch.setattr(orch_mod, "SessionLocal", lambda: _FakeSessionCtx(None))
+        orch = RunOrchestrator()
+        monkeypatch.setattr(orch, "_limiter", self._FakeLimiter())
+
+        async def fake_exec(*a, **kw):
+            return None          # 未执行 → 不改熔断计数，本组只看域的传递
+
+        monkeypatch.setattr(orch, "_execute_with_retry", fake_exec)
+        await orch._run_one_error(7, SimpleNamespace(), _Agent(), SimpleNamespace(id=11),
+                                  None, None, 30, 0, 2, 30)
+        assert calls == [("load", ERROR_CIRCUIT_DOMAIN), ("save", ERROR_CIRCUIT_DOMAIN)]
+        assert breaker.released == 1     # 探针名额必须归还（半开态单探针约束）
 
 
 def test_error_run_config_defaults_are_error_specific():
