@@ -154,9 +154,19 @@ class RunOrchestrator:
         self._run_limits: dict[int, tuple[int, int]] = {}  # run_id -> (global, per_agent)
 
     # ---------------- 熔断 / 限流 / 取消 ----------------
-    def set_run_limits(self, run_id: int, global_limit: int, per_agent_limit: int) -> None:
-        """为 run 建/更新 per-run 限流桶（7.8 前置④）。run 终态 drop_run_limits 清理。"""
+    def set_run_limits(self, run_id: int, global_limit: int, per_agent_limit: int,
+                       agent_key: str | None = None, agent_quota: int | None = None) -> None:
+        """为 run 建/更新 per-run 限流桶（7.8 前置④）。run 终态 drop_run_limits 清理。
+
+        带 `agent_key` 时同时登记该 agent 的**进程级共享槽池**（§8.3）。`agent_quota` 必须
+        显式给**配置值** `per_agent_concurrency`——不能拿 `per_agent_limit` 顶替：error 桶的
+        桶内限额是 1，用它当池容量会把同 agent 的 manual 一并压成串行（静默、只在并发下显形）。
+        """
         self._limiter.set_run(run_id, global_limit, per_agent_limit)
+        if agent_key is not None:
+            if agent_quota is None:
+                raise ValueError("登记共享槽池（§8.3）必须显式给 agent_quota（配置值，非桶内限额）")
+            self._limiter.register_agent(agent_key, agent_quota)
         self._run_limits[run_id] = (global_limit, per_agent_limit)
 
     def drop_run_limits(self, run_id: int) -> None:
@@ -275,7 +285,9 @@ class RunOrchestrator:
             logger.info("run %s 已被取消，放弃执行", run_id)
             return
         # 7.6 C3 熔断参数按 run 级配置传入 _run_one 构造（DB 化后无进程内单例可设置）
-        self.set_run_limits(run_id, global_limit, per_agent)  # 应用 run 级并发参数
+        # 应用 run 级并发参数；agent_quota 取配置值（§8.3 共享池容量，同 error 侧同源）
+        self.set_run_limits(run_id, global_limit, per_agent,
+                            agent_key=str(agent.id), agent_quota=per_agent)
 
         # 心跳 task：刷新 lease_until
         hb = asyncio.create_task(self._heartbeat(run_id, hb_interval, lease_sec))
@@ -370,9 +382,11 @@ class RunOrchestrator:
         if self._is_cancelled(run_id):
             logger.info("run %s 已被取消，放弃执行", run_id)
             return
-        # §8.3 error 侧桶参数：global=1 / per_agent=1（逐条复现，不做并发）
-        self.set_run_limits(run_id, 1, 1)
-
+        # §8.3 error 侧桶参数：global=1 / per_agent=1（逐条复现，不做并发）。
+        # agent_quota 取**配置值**而非桶内 1——共享池是 manual/error 共用的容量，
+        # 池内 error ≤1 路由 error 桶自己的 per_agent=1 保证。
+        self.set_run_limits(run_id, 1, 1, agent_key=str(agent.id),
+                            agent_quota=run_config.get("per_agent_concurrency", 3))
         timeout_s = run_config.get("case_timeout", ERROR_CASE_TIMEOUT_S)
         max_retries = run_config.get("max_retries", ERROR_MAX_RETRIES)
         breaker_th = run_config.get("breaker_failure_threshold", 5)
@@ -408,7 +422,7 @@ class RunOrchestrator:
         """单条 error case 复现（含限流/熔断/重试），结果落终值。
 
         ⚠️ **熔断 key 仍与 manual 共用 agent 级**（§8.4 要求 `{agent_id}:error_regression`
-        独立 key，需给 `agent_circuit` 加列 ⇒ DDL，归 C4）。当前后果：error 侧复现失败会
+        独立 key，需给 `agent_circuit` 改主键/加列 ⇒ DDL，归 C4b）。当前后果：error 侧复现失败会
         累计到该 agent 的熔断计数上，可能连带拦住 manual run——C1 验收不含并发，未暴露。
         """
         if self._is_cancelled(run_id):

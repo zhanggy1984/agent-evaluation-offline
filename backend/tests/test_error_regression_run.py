@@ -365,6 +365,61 @@ class TestFinishErrorRegression:
         assert row.case_id == 42
 
 
+class TestRunErrorWiring:
+    """`_run_error` 全链接线（无 DB）。
+
+    **这条守卫的来历**（批 C4a 真库探针抓出）：改 §8.3 共享池时误删了 `_run_error` 里的
+    `timeout_s = run_config.get(...)`，执行到构造任务列表处抛 `NameError` ⇒ error run 一律
+    落 partial_failed，而当时**全量 916 条单测全绿**——没有一条走过 `_run_error` 全链。
+    单测覆盖不到的分支，只有真跑才现形；故此处在无 DB 下把该函数走一遍。
+    """
+
+    class _CfgDB:
+        async def get(self, model, pk, **kw):
+            from app.models import TestSuite
+            return SimpleNamespace(is_error_suite=True) if model is TestSuite else None
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def _run(self, monkeypatch, run_config) -> dict:
+        calls: dict = {}
+        monkeypatch.setattr(orch_mod, "SessionLocal",
+                            lambda: _FakeSessionCtx(self._CfgDB()))
+        monkeypatch.setattr(orch_mod, "build_agent_client", lambda **kw: self._FakeClient())
+        orch = RunOrchestrator()
+        monkeypatch.setattr(orch, "_decrypt_auth", lambda a: None)
+        monkeypatch.setattr(orch, "_heartbeat", lambda *a: _ret(None))
+
+        async def fake_one(*args):
+            calls["args"] = args
+
+        async def fake_finish(rid):
+            calls["finished"] = rid
+
+        monkeypatch.setattr(orch, "_run_one_error", fake_one)
+        monkeypatch.setattr(orch, "_finish_error_regression", fake_finish)
+        run = SimpleNamespace(suite_id=1, pinned=True, case_ids=[1], run_config=run_config)
+        await orch._run_error(7, run, _Agent(), [SimpleNamespace(id=11)], run_config)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_wires_case_timeout_from_run_config(self, monkeypatch):
+        calls = await self._run(monkeypatch, {"case_timeout": 123, "max_retries": 2})
+        assert calls["args"][6] == 123                      # timeout_s 位（第 7 个位置参数）
+        assert calls["args"][3].id == 11                    # case 透传
+        assert calls["finished"] == 7
+
+    @pytest.mark.asyncio
+    async def test_defaults_timeout_when_absent(self, monkeypatch):
+        calls = await self._run(monkeypatch, {})
+        assert calls["args"][6] == ERROR_CASE_TIMEOUT_S
+
+
 def test_error_run_config_defaults_are_error_specific():
     """§7.4：error-run 专用 run_config 与常规评测不同（复现更长、重试更多）。"""
     assert ERROR_CASE_TIMEOUT_S == 600
