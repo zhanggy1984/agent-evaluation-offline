@@ -42,6 +42,14 @@ services:
       SMOKE_PASSWORD: ${SMOKE_PASSWORD:-}
       # P2-D17：被评 agent 调用凭证（JSON，key=agent name；缺省按匿名处理，seed_data 不含明文）
       AGENT_AUTH_SECRETS: ${AGENT_AUTH_SECRETS:-}
+      # 批 B（#232）：online 侧 /pull/* 预共享 secret。**必须与 online 仓 .env 同值**，
+      # 否则调用侧 fail-closed 全 401（看起来像「没有载荷」）。缺省空 = 不启用。
+      EVALUATOR_SERVICE_SECRET: ${EVALUATOR_SERVICE_SECRET:-}
+      # 批 B：online 基址。容器名直连（ai-eval-backend 与 obs-backend 同网，实测解析
+      # 172.23.0.3，落在 SSRF 白名单 DEFAULT_AGENT_CIDRS 的 172.16.0.0/12 内）
+      BACKFLOW_ONLINE_BASE: ${BACKFLOW_ONLINE_BASE:-http://obs-backend:8000}
+      # 批 B：回流水线总开关。**缺省关**——不在既有部署上擅自开跑
+      BACKFLOW_ENABLED: ${BACKFLOW_ENABLED:-false}
     # P2-D12：后端不暴露宿主端口（对外唯一入口 = 前端 nginx → 网关，含 traceId/限流/防串线）。
     # 需要宿主直连调试时临时加：ports: ["127.0.0.1:8100:8000"]（用后移除）。
     # 7.6 C5 多 worker：默认 1 保持现状；置 BACKEND_WORKERS=2 可验证多 worker 互斥

@@ -23,6 +23,7 @@ from app.core.db import SessionLocal
 from app.core.errors import E_BODY_TOO_LARGE, register_error_handlers
 from app.core.logging import setup_logging, trace_id_var
 from app.judge.worker import judge_worker_loop
+from app.runner.pull_loop import pull_loop
 from app.runner.scanner import scanner_loop
 
 setup_logging()
@@ -125,6 +126,7 @@ app.include_router(meta.router, prefix="/api")
 
 _scanner_task: asyncio.Task | None = None
 _judge_task: asyncio.Task | None = None
+_pull_task: asyncio.Task | None = None
 
 
 @app.get("/healthz")
@@ -143,10 +145,13 @@ async def healthz():
 
 @app.on_event("startup")
 async def startup():
-    global _scanner_task, _judge_task
+    global _scanner_task, _judge_task, _pull_task
     _scanner_task = asyncio.create_task(scanner_loop())
     _judge_task = asyncio.create_task(judge_worker_loop())
-    logger.info("startup: scanner + judge worker 已启动")
+    # 批 B #232：回流拉取。**门控在 pull_loop 内部**（backflow_enabled 缺省 false 时直接
+    # return），不在此处判断——保证「task 起没起」与「开关开没开」两件事不互相掩盖。
+    _pull_task = asyncio.create_task(pull_loop())
+    logger.info("startup: scanner + judge worker + 回流拉取 已启动")
 
 
 @app.on_event("shutdown")
@@ -155,4 +160,6 @@ async def shutdown():
         _scanner_task.cancel()
     if _judge_task is not None:
         _judge_task.cancel()
+    if _pull_task is not None:
+        _pull_task.cancel()
         logger.info("shutdown: scanner + judge worker 已停止")
