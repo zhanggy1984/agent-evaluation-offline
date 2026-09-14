@@ -10,7 +10,8 @@
 
 ⚠️ **折叠让短 ASCII 关键词的误命中面变大**（`"AI"` 会命中 `"he said"`）：对
 `keyword_not_contains` 是假红（方向安全），对 `keyword_contains` 是**假绿**（方向不安全）。
-实际发生率待量化（#235 遗留），未加长度闸。
+未加长度闸（#235 遗留开放项）——注意**别把「真库实测 0 例」读成「已验无需加闸」**：
+该 0 取自结构上装不下此风险的样本（详见 `core/error_payload.py` 文件头的量不出说明）。
 """
 from __future__ import annotations
 
