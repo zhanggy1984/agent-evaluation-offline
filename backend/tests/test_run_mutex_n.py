@@ -89,7 +89,8 @@ def _agent():
 
 
 def _suite():
-    return SimpleNamespace(id=1, agent_id=1)
+    # is_error_suite 是真模型列（models/case.py:19-20）：§7.5 项 3 守卫要读它，替身须同形
+    return SimpleNamespace(id=1, agent_id=1, is_error_suite=False)
 
 
 def _body(**kw):

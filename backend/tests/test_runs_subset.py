@@ -44,8 +44,9 @@ class _FirstResult:
 
 
 class _FakeDB:
-    """rerun_run/_validate_case_ids 的查询分派：get→src，TestCase→cases，active→list（含 status）。
-    case_count 供 V1 空转校验 count（默认 1=suite 有 active 用例；0 → 空转 400）。"""
+    """rerun_run/_validate_case_ids 的查询分派：get→src（TestSuite 走 suite 缺省），TestCase→cases，
+    active→list（含 status）。case_count 供 V1 空转校验 count（默认 1=suite 有 active 用例；
+    0 → 空转 400）。suite 缺省 is_error_suite=False（真模型列，§7.5 项 3 守卫要读它）。"""
 
     def __init__(self, src=None, cases=None, active=None, case_count=1):
         self._src, self._cases, self._active = src, cases or [], active or []
@@ -53,6 +54,8 @@ class _FakeDB:
         self.added = []
 
     async def get(self, model, pk, with_for_update=False):
+        if model.__name__ == "TestSuite":
+            return SimpleNamespace(id=pk, agent_id=1, is_error_suite=False)
         return self._src
 
     async def execute(self, stmt):
