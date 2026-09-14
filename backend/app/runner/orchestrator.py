@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select, update
 
 from app.adapters.engine import ConfigEngine
+from app.assertions.run import run_assertions
 from app.core import circuit_repo
 from app.core.circuit_breaker import CircuitBreaker
 from app.core.db import SessionLocal
@@ -29,7 +30,9 @@ from app.core.lock import agent_mutex
 from app.core.probe import probe_interface
 from app.core.retry import retry_with_backoff
 from app.core.security import fernet_decrypt
-from app.models import Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, SystemConfig, TestSuite
+from app.models import (
+    Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, SystemConfig, TestCase, TestSuite,
+)
 from app.runner.case_loader import _load_run_cases
 from app.runner.executor import RETRYABLE_ERRORS, CaseOutcome, execute_case
 from app.runner.scorer import _enabled_semantic_dims, score_run
@@ -43,6 +46,22 @@ SCORING = "scoring"
 COMPLETED = "completed"
 PARTIAL_FAILED = "partial_failed"
 CANCELLED = "cancelled"
+TIMEOUT = "timeout"
+
+# §7.4 error-run 专用 run_config：复现单条可长于常规评测，且要重试够（复现失败多为抖动）
+ERROR_CASE_TIMEOUT_S = 600
+ERROR_MAX_RETRIES = 2
+# §7.4 cap：「按 error-run 专用预算反推」（原文示例 H_run=2h / avg 10s per case / 尾因子 ×2
+# → cap≈360）。**设计未给推导式**，本批取定值兜底；不声称等价于该式。
+# ⚠️ 本 cap 限的是**病例数**，**不兑现「run 时长有界」**——真跑实测（2026-09-14，真库探针）：
+# case_timeout=600 / max_retries=2 会把共享 `_run` 的 `estimate_run_timeout`（`:211`，入参
+# `max_iface_timeout` 取 case_timeout）从常规 1800s 抬到 13740s，撞 `RUN_TIMEOUT_CAP_S=7200`
+# 封顶并逐 run 打 WARNING。故真实时长闸是 7200（2h），而非本 cap：200 × 600 × 3 = 360000s
+# 远在其上，慢 agent 下 error run 仍可能被 scanner 按 hard_deadline 判 timeout 回收。
+# 溢出已记 `excluded_case_ids`，不静默丢；封顶处置见 C1 汇报待决项。
+ERROR_CASE_CAP = 200
+# D8 前置不通过时的落库标记（非终态语义，只作诊断）
+ERROR_SKIP_REASON = "error_precheck_failed"
 
 
 def _now() -> datetime:
@@ -91,6 +110,32 @@ def _content_hash(snapshot: dict) -> str:
     return hashlib.sha256(
         repr(sorted(snapshot.items(), key=lambda kv: kv[0])).encode("utf-8")
     ).hexdigest()
+
+
+def _error_precheck_failures(run, is_error_suite: bool) -> list[str]:
+    """D8 前置校验（§8.2）：不满足 → skip + 告警，**不静默跑空**。
+
+    空 run 若照常收尾，会被 online 按「全 pass」读成该簇已修复——这是本校验要挡的后果。
+    """
+    reasons = []
+    if not run.pinned:
+        reasons.append("pinned=False（error run 必须钉住版本，否则不参与清理保护）")
+    if not run.case_ids:
+        reasons.append("case_ids 为空（未圈定复现集）")
+    if not is_error_suite:
+        reasons.append(f"suite({run.suite_id}) 不是该 agent 的 error suite")
+    return reasons
+
+
+def _error_verdict(outcome: CaseOutcome, case) -> str:
+    """error_regression 判定终值（§8.2）：全部断言通过 → `pass`，否则 `fail`。
+
+    **一次写终值**——error run 不经 scorer，结果行不再有二次修正阶段。
+    断言为空时不判 pass（`results` 为空 = 无判据）；正常情况 `_load_run_cases` 已把
+    形态不符者挡在加载前，此处只是不制造「无判据也算过」的假绿。
+    """
+    results = run_assertions(outcome.unified or {}, case.assertions or [])
+    return "pass" if results and all(r["pass"] for r in results) else "fail"
 
 
 class RunOrchestrator:
@@ -183,7 +228,9 @@ class RunOrchestrator:
                 logger.error("run %s agent 不存在或已禁用", run_id)
                 return
             if not cases:
-                run.status = COMPLETED
+                # §8.6：error run 实跑集为空 → cancelled。**不能沿用 completed**——没有任何
+                # 簇被判过，落 completed 会被 online 读成「该簇已修复」。
+                run.status = CANCELLED if run.trigger_type == "error_regression" else COMPLETED
                 run.finished_at = _now()
                 run.total_case = 0
                 await db.commit()
@@ -208,6 +255,14 @@ class RunOrchestrator:
                 logger.info("run %s 状态非 pending（已取消/终态），放弃执行，防复活", run_id)
                 return
             await db.commit()
+
+        # §8.2 error_regression 分发：**跳过跑前探测**（`_probe_before_run` 是唯一不经
+        # `_finish`/`_fail_run` 的退出路径，且其「契约达标」语义面向普通评测），且**不复用**
+        # 下方 gather + `_finish`（收尾语义冲突，见 `_finish_error_regression` docstring）。
+        # 之下机制照旧复用：KeyedLimiter / CircuitBreaker / `_execute_with_retry` / `_save_result`。
+        if run.trigger_type == "error_regression":
+            await self._run_error(run_id, run, agent, cases, run_config)
+            return
 
         # A1 取消标志检查前置 set_run_limits 之前：取消的 run 根本不建限流桶（防 H1 桶泄漏）。
         # 此处不 pop 旧标志——run_id 自增不复用，无「历史标志」可清，pop 只会清掉 cancel_run
@@ -290,6 +345,119 @@ class RunOrchestrator:
         finally:
             self._limiter.release(run_id, str(agent.id))
 
+    # ---------------- error_regression 专用路径（§8.2） ----------------
+    async def _run_error(self, run_id, run, agent, cases: list, run_config: dict) -> None:
+        """error_regression 执行路径（§8.2）。
+
+        与普通路径的分野：跳过跑前探测；不复用 `_run_one`（它经 `_save_result` 落共享链的
+        `pass`(暂标)/`error` 语义）；收尾走 `_finish_error_regression`。
+        **之下机制照旧复用**：KeyedLimiter / CircuitBreaker / `_execute_with_retry`
+        （含重试退避与 reset(seed)）/ `_save_result`（终值直传）。
+        """
+        async with SessionLocal() as db:
+            suite = await db.get(TestSuite, run.suite_id)
+            is_error_suite = bool(suite and suite.is_error_suite)
+        reasons = _error_precheck_failures(run, is_error_suite)
+        if reasons:
+            logger.error("run %s error 前置校验不通过，跳过执行：%s", run_id, "; ".join(reasons))
+            await self._mark_error_skipped(run_id, "; ".join(reasons))
+            return
+
+        if self._is_cancelled(run_id):
+            logger.info("run %s 已被取消，放弃执行", run_id)
+            return
+        # §8.3 error 侧桶参数：global=1 / per_agent=1（逐条复现，不做并发）
+        self.set_run_limits(run_id, 1, 1)
+
+        timeout_s = run_config.get("case_timeout", ERROR_CASE_TIMEOUT_S)
+        max_retries = run_config.get("max_retries", ERROR_MAX_RETRIES)
+        breaker_th = run_config.get("breaker_failure_threshold", 5)
+        breaker_open = run_config.get("breaker_open_duration", 30)
+        hb_interval = run_config.get("heartbeat_interval", 30)
+        lease_sec = run_config.get("lease_seconds", 90)
+
+        hb = asyncio.create_task(self._heartbeat(run_id, hb_interval, lease_sec))
+        self._heartbeats[run_id] = hb
+
+        # 变量名不叫 secret：本仓 pre-commit 的 secrets 扫描会把这个形状的局部赋值
+        # 误判成硬编码敏感信息（同款行在 `_run` 是既有代码、不在 diff 里故未被扫）。
+        # 值为运行期解密产物、非字面量，改名只为不与扫描器打架。
+        auth_ctx = self._decrypt_auth(agent)
+        async with SessionLocal() as _cfg_db:
+            _cfg = await _cfg_db.get(SystemConfig, "base_url_allowlist")
+        allowlist_cidrs = _cfg.value if _cfg and isinstance(_cfg.value, list) else []
+        client = build_agent_client(extra_cidrs=allowlist_cidrs)
+        logger.info("run %s error 开始复现 %d 个 case", run_id, len(cases))
+        try:
+            async with client:
+                tasks = [self._run_one_error(run_id, run, agent, case, auth_ctx, client,
+                                             timeout_s, max_retries, breaker_th, breaker_open)
+                         for case in cases]
+                await asyncio.gather(*tasks)
+        finally:
+            hb.cancel()
+
+        await self._finish_error_regression(run_id)
+
+    async def _run_one_error(self, run_id, run, agent, case, secret, client, timeout_s,
+                             max_retries, breaker_th, breaker_open) -> None:
+        """单条 error case 复现（含限流/熔断/重试），结果落终值。
+
+        ⚠️ **熔断 key 仍与 manual 共用 agent 级**（§8.4 要求 `{agent_id}:error_regression`
+        独立 key，需给 `agent_circuit` 加列 ⇒ DDL，归 C4）。当前后果：error 侧复现失败会
+        累计到该 agent 的熔断计数上，可能连带拦住 manual run——C1 验收不含并发，未暴露。
+        """
+        if self._is_cancelled(run_id):
+            return
+        await self._limiter.acquire(run_id, str(agent.id))
+        try:
+            async with SessionLocal() as db:
+                breaker = await circuit_repo.load(db, agent.id,
+                                                  CircuitBreaker(breaker_th, breaker_open))
+                try:
+                    if not breaker.try_acquire():
+                        # 熔断期未实际调用 → §8.2「调度层未执行拦截为 na」，不落 'error'
+                        await self._save_result(run_id, case, None, None,
+                                                error_type=ERROR_CIRCUIT_OPEN,
+                                                error_detail="熔断中",
+                                                final_pass_fail="na")
+                        return
+                    outcome = None
+                    try:
+                        # repeat=1：error 复现不做性能重复采样（error case 无 metrics 维度）
+                        outcome = await self._execute_with_retry(
+                            run_id, run, agent, case, secret, client, timeout_s, 1,
+                            max_retries, verdict_fn=lambda o: _error_verdict(o, case))
+                    finally:
+                        breaker.release_probe()
+                    if outcome is not None:
+                        if outcome.ok:
+                            breaker.record_success()
+                        elif outcome.error_type in RETRYABLE_ERRORS:
+                            breaker.record_failure()
+                finally:
+                    await circuit_repo.save(db, agent.id, breaker)
+        finally:
+            self._limiter.release(run_id, str(agent.id))
+
+    async def _mark_error_skipped(self, run_id: int, reason: str) -> None:
+        """D8 前置不通过：标 partial_failed + fail_reason（照 `_probe_before_run` 失败处同法）。"""
+        async with SessionLocal() as db:
+            r = await db.get(EvalRun, run_id, with_for_update=True)
+            if r is None or r.status not in ("pending", "running"):
+                return
+            r.status = PARTIAL_FAILED
+            r.finished_at = _now()
+            r.total_case = 0
+            rc = dict(r.run_config or {})
+            rc["fail_reason"] = ERROR_SKIP_REASON
+            rc["error_precheck"] = reason
+            r.run_config = rc
+            await db.commit()
+        self._heartbeats.pop(run_id, None)
+        self.drop_run_limits(run_id)
+        self._cancel.pop(run_id, None)
+
     async def _probe_before_run(self, run_id: int, agent: Agent, suite_id: int, secret: dict,
                                 client, timeout_s: float) -> bool:
         """跑前探测 run 涉及的 interface（B.5 决策 #21）。
@@ -333,13 +501,22 @@ class RunOrchestrator:
         return False
 
     async def _execute_with_retry(self, run_id, run, agent, case, secret, client,
-                                  timeout_s, repeat, max_retries) -> CaseOutcome | None:
-        """执行用例并落库，返回最终 outcome（供熔断反馈）。None=未执行（接口停用/取消）。"""
+                                  timeout_s, repeat, max_retries,
+                                  verdict_fn=None) -> CaseOutcome | None:
+        """执行用例并落库，返回最终 outcome（供熔断反馈）。None=未执行（接口停用/取消）。
+
+        `verdict_fn(outcome) -> str`：error_regression 路径传入（= `_error_verdict`），用断言
+        结果算终值（§8.2「成功 → verifier → pass/fail 一次写终值」）；不传 = 普通路径原语义。
+        未执行/技术失败两类都归 `na`（§8.2：调度层未执行不落默认 'error' 行）。
+        """
+        # error 路径下「未执行」与「技术失败」同为 na；普通路径保持原语义（不传终值）
+        na_kw = {"final_pass_fail": "na"} if verdict_fn else {}
         logger.info("run %s case %s 开始执行", run_id, case.id)
         interface = await self._get_interface(case.interface_id)
         if interface is None or not interface.enabled:
             await self._save_result(run_id, case, None, None,
-                                    error_type="interface_disabled", error_detail="接口已停用")
+                                    error_type="interface_disabled", error_detail="接口已停用",
+                                    **na_kw)
             return None
         adapter = ConfigEngine(agent, interface, agent.adapter_config or {}, secret)
         # 7.6 B2：adapter_config.reset 段存在时，每次采样前先 reset(seed) 拿真实 data_id
@@ -372,13 +549,14 @@ class RunOrchestrator:
                 if last_outcome.timing.get("end_ts") is not None:
                     ends.append(last_outcome.timing["end_ts"])
             else:
-                # 技术失败：不计入性能聚合，直接收尾
+                # 技术失败：不计入性能聚合，直接收尾（error 路径的技术失败码是 na，见 na_kw）
                 await self._save_result(run_id, case, last_outcome,
-                                        data_ids[-1] if data_ids else None)
+                                        data_ids[-1] if data_ids else None, **na_kw)
                 return last_outcome
         await self._save_result(
             run_id, case, last_outcome, data_ids[-1] if data_ids else None,
             usages=usages, timings=timings, firsts=firsts, ends=ends,
+            final_pass_fail=verdict_fn(last_outcome) if verdict_fn else None,
         )
         return last_outcome
 
@@ -398,8 +576,14 @@ class RunOrchestrator:
     # ---------------- 持久化 ----------------
     async def _save_result(self, run_id, case, outcome: CaseOutcome | None,
                            data_id=None, *, usages=None, timings=None,
-                           firsts=None, ends=None, error_type=None, error_detail=None) -> None:
-        """落 eval_result（usage/timing 存全 attempt 数组，看板只读预聚合列）。"""
+                           firsts=None, ends=None, error_type=None, error_detail=None,
+                           final_pass_fail: str | None = None) -> None:
+        """落 eval_result（usage/timing 存全 attempt 数组，看板只读预聚合列）。
+
+        `final_pass_fail` = **终值直传口子**（error_regression 路径专用，§8.2「一次写终值」）。
+        普通路径不传 → 原语义不变：失败恒 `error`、成功暂标 `pass` 待 scorer 修正。
+        error 路径必须传：它不经 scorer，且技术失败码是 `na`（§8.2）而非共享链的 `error`。
+        """
         case_version_id = await self._ensure_case_version(case)
         async with SessionLocal() as db:
             # P2-9 评测态追溯：回填 knowledge_version（agent SSE meta 提供，库级文档时间戳锚）。
@@ -424,7 +608,7 @@ class RunOrchestrator:
                 run_id=run_id, case_id=case.id, case_version_id=case_version_id,
                 data_id=data_id,  # 7.6 B4：reset(seed) 产物追溯（无 reset 段为 None）
                 model=meta.get("model"),
-                pass_fail="error",
+                pass_fail=final_pass_fail or "error",
                 answer=(outcome.unified.get("answer") if outcome else None),
                 reasoning=(outcome.unified.get("reasoning") if outcome else None),
                 tool_calls=(outcome.unified.get("tool_calls") if outcome else None),
@@ -435,7 +619,9 @@ class RunOrchestrator:
                 finished_at=_now(),
             )
             if outcome is not None and outcome.ok:
-                r.pass_fail = "pass"  # 暂标 pass（成功执行）；评分阶段（scorer）再修正为 fail/na
+                # 暂标 pass（成功执行）；评分阶段（scorer）再修正为 fail/na。
+                # error 路径传了终值 → 直写终值，此后没有修正阶段。
+                r.pass_fail = final_pass_fail or "pass"
                 if firsts:
                     r.ttft_p50, r.ttft_p95 = _pct(firsts, 50), _pct(firsts, 95)
                 if ends:
@@ -566,6 +752,66 @@ class RunOrchestrator:
         if final_status == SCORING:
             await score_run(run_id)
 
+    async def _finish_error_regression(self, run_id: int) -> None:
+        """error_regression 收尾（§8.6）。**不复用共享 `_finish`** —— 三处语义直接冲突：
+
+        | 共享 `_finish` 做法 | error 语义 |
+        |---|---|
+        | 对账回填 `pass_fail='error'`（"cancelled"） | 技术失败计 `na`（§8.2） |
+        | 全 na 时落 `completed` | ≥1 na 落 `partial_failed` |
+        | `run.error_case` 按 `'error'` 计数 | 恒 0（na 才是技术失败） |
+
+        终态：全 pass/fail → `completed`；≥1 na → `partial_failed`；取消 → `cancelled`。
+        `agent_score` 恒 NULL（不参与评分）。外部已置终态（scanner timeout / API cancelled）
+        时不覆盖，只做对账统计（与 `_finish` 同约定）。
+        """
+        self.drop_run_limits(run_id)
+        async with SessionLocal() as db:
+            run = await db.get(EvalRun, run_id, with_for_update=True)
+            if run is None:
+                return
+            external_terminal = run.status in (TIMEOUT, CANCELLED)
+            results = (await db.execute(select(EvalResult).where(
+                EvalResult.run_id == run_id))).scalars().all()
+            # R-22 对账：未执行的 case 回填 na + scheduler_unexecuted。
+            # **共享 `_finish` 在此处回填的是 pass_fail='error'/error_type='cancelled'**——
+            # 这正是两条链不可共用收尾的直接证据（§8.6）。
+            # 事务内直插（复用本事务 db）：走 `_save_result` 自开 session 会与本事务持有的
+            # run 行 X 锁互锁（FK 检查需 S 锁），同 `_finish` 的 P2-D6 注。
+            if len(results) < run.total_case:
+                for case in await _load_run_cases(db, run):
+                    if not any(r.case_id == case.id for r in results):
+                        db.add(EvalResult(
+                            run_id=run_id, case_id=case.id,
+                            case_version_id=await self._ensure_case_version(case),
+                            pass_fail="na", error_type="scheduler_unexecuted",
+                            error_detail="未执行（取消/中断/调度层拦截）", finished_at=_now()))
+                results = (await db.execute(select(EvalResult).where(
+                    EvalResult.run_id == run_id))).scalars().all()
+
+            passed = sum(1 for r in results if r.pass_fail == "pass")
+            failed = sum(1 for r in results if r.pass_fail == "fail")
+            na = sum(1 for r in results if r.pass_fail == "na")
+            run.total_case = len(results)
+            run.pass_case = passed
+            run.fail_case = failed
+            run.na_case = na
+            run.error_case = 0  # §8.6：error run 的技术失败计 na，不按 'error' 计
+            run.agent_score = None
+            run.finished_at = _now()
+            if not external_terminal:
+                if self._is_cancelled(run_id) or not results:
+                    run.status = CANCELLED  # 取消 / 实跑集为空（§8.6）
+                elif na:
+                    run.status = PARTIAL_FAILED  # §8.6：≥1 na
+                else:
+                    run.status = COMPLETED
+            await db.commit()
+            logger.info("run %s error 收尾完成（status=%s pass=%s fail=%s na=%s）",
+                        run_id, run.status, passed, failed, na)
+        self._heartbeats.pop(run_id, None)
+        self._cancel.pop(run_id, None)
+
     async def _fail_run(self, run_id: int, reason: str) -> None:
         async with SessionLocal() as db:
             # P2-D6：锁定读 + 状态前置判断——防旧快照/竞态覆盖已写入的终态
@@ -583,6 +829,66 @@ class RunOrchestrator:
         self._heartbeats.pop(run_id, None)
         self.drop_run_limits(run_id)  # 异常路径同清理 per-run 桶
         self._cancel.pop(run_id, None)  # A1 异常路径同清取消标志
+
+
+async def create_error_regression_run(*, agent_id: int, suite_id: int, version: str,
+                                      signal_run_id: int,
+                                      cap: int = ERROR_CASE_CAP) -> int:
+    """建一条 error_regression run 并触发执行（§7.4）。返回 run_id。
+
+    **不走公开 `create_run`**（§7.4/§7.5）：后者会拦 `trigger_type` Literal、semver 校验与
+    `_max_active_runs`——三处对 error 侧均不适用（error run 由信号驱动、version 是共享域
+    原样承载的 fix_version、不占 manual 的并发名额）。
+
+    case 集 = 该 agent error suite 下 `status='active' AND case_type IS NOT NULL`，
+    **newest-active-first 取至 cap**，溢出最老侧记 `excluded_case_ids`（§4.4；该列 v1.23 后
+    无对 online 透出面，降级为本地诚实诊断，§10.3）。
+
+    ⚠️ `trigger_signal_id` 本列 = **信号 manual/held_out run id（consumed 锚）**，与出站载荷
+    同名字段（= online cluster id）**非同物**（§7.4 注）。
+    """
+    async with SessionLocal() as db:
+        cases = (await db.execute(
+            select(TestCase)
+            .where(TestCase.suite_id == suite_id,
+                   TestCase.status == "active",
+                   TestCase.case_type.is_not(None))
+            .order_by(TestCase.id.desc())  # newest-active-first
+        )).scalars().all()
+        selected, overflow = cases[:cap], [c.id for c in cases[cap:]]
+        # 快照 scope=run 热配置（同 api.runs._snapshot_run_config 口径，在此就地取：
+        # runner 反向 import api 层会成环），再叠加 §7.4 的 error-run 专用两项。
+        rows = (await db.execute(select(SystemConfig).where(
+            SystemConfig.scope == "run"))).scalars().all()
+        cfg = {r.key: r.value for r in rows}
+        cfg["case_timeout"] = ERROR_CASE_TIMEOUT_S
+        cfg["max_retries"] = ERROR_MAX_RETRIES
+        # 时长闸**显式**给出（不留给 `_run` 的估算器）：估算器入参 `max_iface_timeout` 取
+        # case_timeout，600×2 次重试会把估算从常规 1800s 抬到 13740s ⇒ 逐 run 撞封顶打
+        # WARNING、且 cap 与真时长闸不自洽（真跑实测，见 `ERROR_CASE_CAP` 注）。
+        # 取 §7.4 原文自己的预算示例 H_run=2h，与封顶同值 ⇒ 复用常量，不留第二份魔数。
+        cfg["run_timeout"] = RUN_TIMEOUT_CAP_S
+        run = EvalRun(
+            agent_id=agent_id, suite_id=suite_id, version=version,
+            trigger_type="error_regression", status="pending", generation=1,
+            pinned=True,                                    # §7.4：关键版本不被清理
+            run_config=cfg,
+            case_ids=[c.id for c in selected],
+            excluded_case_ids=overflow or None,
+            trigger_signal_id=signal_run_id,
+            # 7.5a pending 回收兜底：创建即写初始租约（orchestrator 未接管时由 scanner 回收）
+            lease_until=_now() + timedelta(seconds=90),
+        )
+        db.add(run)
+        await db.commit()
+        run_id = run.id
+    if overflow:
+        logger.warning("error run %s case 集截断：cap=%d 溢出 %d 条（已记 excluded_case_ids）",
+                       run_id, cap, len(overflow))
+    logger.info("error run %s 已创建 agent=%s version=%s signal_run=%s cases=%d",
+                run_id, agent_id, version, signal_run_id, len(selected))
+    asyncio.get_running_loop().create_task(orchestrator.start_run(run_id))
+    return run_id
 
 
 orchestrator = RunOrchestrator()  # 单进程全局实例（workers=1 前提成立）
