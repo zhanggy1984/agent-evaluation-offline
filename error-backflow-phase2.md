@@ -393,7 +393,7 @@ error case 不产 LLM-judge、不产中间评测指标——复现输出只喂�
 - 判定：`run_assertions` 结果（该断言 bool）→ `True` → 'pass'（不再 fallback）；`False` → 'fail'（命中任一词 或 path 缺失/非文本保守 fail，D2；v0.6.2 扩：strip 后空串/纯空白应答亦 fail，见下注）。
 - 产出：单 case pass/fail 终值，直接落 `EvalResult.pass_fail`（不经 scorer 聚合、无 agent_score）。
 
-词表 = case 内固化断言关键词（激活时自 `no_fallback_config.words` 转录 + 词级净化，§7.3）；判定以固化为准，改词表不 retroactive。**命中一致性（v0.3 安全 4）**：净化规则（strip/拒空串/拒纯空白/拒超长词/大小写归一）须与执行端 `KeywordNotContainsOp` 子串匹配语义对齐（大小写是否敏感实施时核对并归一），防「边界词致恒 fail」或「大小写不一致致漏判恒 pass」。
+词表 = case 内固化断言关键词（激活时自 `no_fallback_config.words` 转录 + 词级净化，§7.3）；判定以固化为准，改词表不 retroactive。**命中一致性（v0.3 安全 4）**：净化规则（strip/拒空串/拒纯空白/拒超长词/大小写归一）须与执行端 `KeywordNotContainsOp` 子串匹配语义对齐（大小写是否敏感实施时核对并归一），防「边界词致恒 fail」或「大小写不一致致漏判恒 pass」。✅ **2026-09-14 结清（#235）**：核对 = 执行端原**大小写敏感**，与净化侧归一小写冲突 ⇒ 该漏判真实存在过（词表 `dsml` 匹配不上 `"<DSML>"`，金丝雀静默放行）；两侧已同批改为大小写不敏感。**量化**：真库 934 个「断言×结果」组合翻转 0 条，但可折叠面仅 2 个关键词 ⇒ 0 = 样本薄，非「安全」证明（详见 SD §6.1 同条）。
 
 **R-12 修补决策（v0.6.2，2026-09-07 拍板落字；代码变更单独立项）**：核对 offline 实现 `KeywordNotContainsOp.run`（`backend/app/assertions/ops/text.py`）发现——answer 键缺失/None/非 str 已全保守 fail（path 缺失/非文本层，D2），但 **answer 为 str 且空串/纯空白 → `hits` 空 → 判 pass**，且与 run 有无 na 正交（executor 跑通 + agent 空话术即中招）。决策 = **strip 后空串/纯空白应答 → 保守 fail**（并入 D2 分层守卫「无有效内容谈不上修复生效」，与 path 缺失/非文本 fail 同层），不新增 error_type、不改 executor 成功语义（§7.1：空应答仍落 verifier 判）。该修补作用于**共享算子**（普通 run keyword_contains/keyword_not_contains 断言亦走此 op）→ **属 offline 机制微改、突破本稿「offline 零机制改动」承诺 → 代码变更单独立项**（不在本批消费语义落字范围）；实施前置 = 先扫现网断言对空字段的依赖（确认纯收紧不误伤）+ 单测矩阵补「空串/纯空白应答 → fail」行（§11.1）+ 回归 keyword 金丝雀。
 
