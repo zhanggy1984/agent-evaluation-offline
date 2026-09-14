@@ -33,11 +33,36 @@ logger = logging.getLogger(__name__)
 _INTERVAL = 30.0
 _LOCK = "backflow_pull_loop"
 
-# 驳回原因码（落 inbox.reject_code，供 online 侧与运维定位）
+# 驳回原因码 —— **本仓内部码，只落 `inbox.reject_detail` 前缀，不落 `reject_code`**。
+# 四个码各自对应一个不同的处置动作，粒度不压缩。
 REJECT_CONTENT_GAP = "content_gap"
 REJECT_VERSION_DRIFT = "version_drift"
 REJECT_CAP_GAP = "offline_cap_gap"
 REJECT_EMPTY_WORDS = "empty_words"
+
+# 内部码 → online `ack.invalidate_reason` 值域（online 只有 3 个粗码，本仓内部 4 个细码）。
+# online 侧校验是**严格相等**且原样落库，故只能发纯码；细粒度靠本仓 inbox.reject_detail 承载。
+#
+# **本表的值就是 `inbox.reject_code` 落库值**（详设 §3.3 列值域 / §5.5 verdict 语义逐字：
+# `reject_code=online_content_gap`）。这两处必须同源——不是巧合：§5.9 requeue 重处理谓词
+# （`rejected(online_content_gap)`）与 §5.8 `CAP_GAP_PROBE`（`reject_code=='offline_cap_gap'`）
+# 都按**该列**筛选，存内部细码会让 requeue 谓词匹配不上（真机复核时发现，此前实现存的是内部码）。
+#
+# **三码折叠到一个 online_content_gap 是设计已定的**（详设 §5.5 verdict 语义：`content_gap`
+# 与 `version_drift` **同 reject_code**，靠 reject_detail 区分），依据 = register R-7
+# 2026-09-11 重估：`version_drift` 的两个触发条件在同一版本对内**无产出对象**（online 恒用
+# `build_envelope` 写常量 SCHEMA_VERSION），细分码「无对象可区分」⇒ 该腿已作废，勿复活。
+#   content_gap   → 载荷字段缺/畸形，admin 补齐后 requeue 可愈
+#   empty_words   → 空词表源自 online `dict_config.fallback_utterance`，同属 requeue 可愈
+#   version_drift → 同码，但 detail 注明「版本不识别，需 offline 升级/联调同步，requeue 不愈」
+#   offline_cap_gap → 须离线侧补登记 agent/interface。**必须原样**：R2 自愈例外
+#                     （invalidated→active）判的是该列 == "offline_cap_gap" 严格相等。
+_ONLINE_REASON = {
+    REJECT_CONTENT_GAP: "online_content_gap",
+    REJECT_EMPTY_WORDS: "online_content_gap",
+    REJECT_VERSION_DRIFT: "online_content_gap",
+    REJECT_CAP_GAP: "offline_cap_gap",
+}
 
 
 async def pull_loop() -> None:
@@ -93,8 +118,15 @@ async def _process_envelope(envelope: dict) -> str:
         if existing is not None:
             # 幂等：已 ack 过 → 整条跳过。但**已落库、未 ack**（上轮 ack 失败）必须重放——
             # 否则 online 的 link 永远停在 assembled，每轮都被重新拉到却永远 skipped。
-            if existing.status == "case_created" and existing.ack_status == "pending":
-                await _ack_active(payload_id, existing.case_id)
+            # 两条落库路径都要覆盖：激活（case_created）与驳回（rejected）。**漏掉驳回那条
+            # 是实测缺陷**：驳回归档后 ack 永不重发，link 恒 assembled 且无限重拉。
+            if existing.ack_status == "pending":
+                if existing.status == "case_created":
+                    await _ack_active(payload_id, existing.case_id)
+                elif existing.status == "rejected" and existing.reject_code:
+                    # 该列存的就是 online 粗码（见 `_reject`），故可直接透传，**不再过映射表**——
+                    # 过了反而是 KeyError（表键是内部细码）。
+                    await _ack_rejected(payload_id, existing.reject_code)
             return "skipped"
 
         ok, errors, verdict = validate_envelope(envelope)
@@ -193,30 +225,43 @@ async def _activate(db, envelope: dict, payload_id: str, agent: Agent, interface
 
 
 async def _reject(db, envelope: dict, payload_id: str, code: str, detail: str) -> str:
-    """驳回：记 inbox → commit → ack invalidated（同样先落库再 ack）。"""
+    """驳回：记 inbox → commit → ack invalidated（同样先落库再 ack）。
+
+    `code` 是本仓内部细码；**落 `reject_code` 的是映射后的 online 粗码**（详设 §3.3 列值域），
+    内部细码前置进 `reject_detail` 保住粒度（§5.5：「detail 注明」）。
+    """
     db.add(ErrorBackflowInbox(
         payload_id=payload_id,
         schema_version=str(envelope.get("schema_version") or ""),
         case_type=str(envelope.get("case_type") or ""),
         envelope_json=envelope,
         status="rejected",
-        reject_code=code,
-        reject_detail=detail[:512],
+        reject_code=_ONLINE_REASON[code],
+        reject_detail=f"{code}: {detail}"[:512],
         ack_status="pending",
     ))
     await db.commit()
+    await _ack_rejected(payload_id, _ONLINE_REASON[code])
+    return "rejected"
 
+
+async def _ack_rejected(payload_id: str, online_reason: str) -> None:
+    """发 invalidated ack 并回写 acked。**失败不抛**（留 pending，由幂等分支下轮重放）。
+
+    入参是**已映射好的 online 粗码**（与 `reject_code` 列同值）：online 侧是严格相等校验，
+    且该值会原样落进 `link.invalidate_reason`（R2 自愈例外的比较对象）。
+    人读明细只留在本地 `reject_detail`，**不许拼进来**。
+    """
     try:
-        await backflow_client.ack(payload_id, "invalidated", reason=f"{code}: {detail}"[:200])
+        await backflow_client.ack(payload_id, "invalidated", reason=online_reason)
     except backflow_client.BackflowClientError:
-        # ack 失败不回滚驳回（已落库是事实），留 ack_status=pending 由对账扫描重放
+        # 已落库是事实，不回滚；留 ack_status=pending 由 `_process_envelope` 幂等分支重放
         logger.exception("驳回 ack 失败，留 pending 待重放：payload_id=%s", payload_id)
-        return "rejected"
+        return
 
     async with SessionLocal() as db2:
         await _mark(db2, payload_id, status="rejected", ack_status="acked")
         await db2.commit()
-    return "rejected"
 
 
 async def _mark(db, payload_id: str, *, status: str, ack_status: str, case_id: int | None = None) -> None:
