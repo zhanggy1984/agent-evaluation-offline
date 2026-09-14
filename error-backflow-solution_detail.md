@@ -28,7 +28,7 @@
 
 | # | 交付 | 主落点（目标文件） | 权威规格 |
 |---|---|---|---|
-| M1 | 数据模型扩列 + 迁移 | `models/case.py`、`models/run.py`、新增 `models/error_backflow_inbox.py`、`alembic/versions/*`（3~4 个新迁移） | 批 1 §5.1/§5.2/§5.3 + 批 2 §6.1（trigger_signal_id + excluded_case_ids） |
+| M1 | 数据模型扩列 + 迁移 | `models/case.py`、`models/run.py`、新增 `models/error_backflow_inbox.py`、`alembic/versions/c3d4e5f6a7b8_add_error_backflow_ddl.py`（**实现为 1 个**，设计原写 3~4 个 → §4.5 偏离记录） | 批 1 §5.1/§5.2/§5.3 + 批 2 §6.1（trigger_signal_id + excluded_case_ids） |
 | M2 | 收单链路 pull_loop + inbox 状态机 + ack/对账/R-8 节流 + error suite upsert + error case 装载 | 新增 `runner/pull_loop.py`、`core/error_payload.py`、inbox DAO（如 `repositories/inbox.py` 或并入 pull_loop）、`main.py` startup | 批 1 §2/§3/§5.2/§6 + R-8（phase2 §2.3 v0.7 注④ / phase1 §5.2/§6.5 修订） |
 | M3 | error case 断言固化 + 存量 backfill + 词级净化 + keyword_not_contains 发布登记 | `pull_loop` 建 case 路径、`runner/backfill.py`（或并入补偿对账）、`core/constants.py`、`seed.py` | 批 2 §7.3/§7.4 + 批 1 §5.1 |
 | M4 | error_regression run 自动触发 + 补偿对账（R-3 差集）+ consumed 锚 | 新增 `runner/auto_schedule.py`（maybe_auto_schedule + 差集对账）、`api/runs.py`（version 共享域校验、互斥计数排除）、`runner/orchestrator.py`（信号终态挂接） | 批 2 §5 + R-3（phase2 §5.3 v0.7 块） |
@@ -69,7 +69,7 @@
 
 - **run.py**：`RUN_STATUS` L13 = `("pending","running","scoring","scoring_failed","completed","partial_failed","timeout","cancelled")`；`TRIGGER_TYPE` L14 = `("manual","held_out")`（**需扩 `error_regression`**）；`PASS_FAIL` L15 = `("pass","fail","error","na")`。`EvalRun` L20-60：`agent_id/suite_id/version String(64)/trigger_type Enum/status/lease_until/hard_deadline/total_case/pass_case/fail_case/error_case/na_case/agent_score/judge_incomplete/pinned/env_snapshot/run_config JSON/case_ids JSON`。**缺**：`error_regression` 枚举值、`trigger_signal_id`、`excluded_case_ids`（JSON，R-4）。`EvalResult` L63-97：`uk_result` L67 UniqueConstraint(run_id,case_id)；`error_type String(32)` L89（**已存在，非 ENUM，可装新错误码 ≤32**）；`error_detail Text` L90；`assertion_results/judge_results JSON`。索引 `idx_result_run_pf(run_id,pass_fail)` L70。
 - **case.py**：`TestSuite` L11-18（同文件，**本仓无 models/test_suite.py**）；`TestCase` L21-59：`expected/assertions/metrics` 均 `nullable=False`（**需 ALTER 放宽**）、`status Enum(draft,active,invalidated)`、无 `case_type/payload_id/backflow_envelope`。`CaseVersion` L62-75：`content_hash CHAR(64)` + `snapshot JSON`（无独立 content 列）。
-- **alembic head** = `b1a2c3d4e5f6`（add_updated_at_onupdate）；迁移文件命名 = 16hex_rev + snake（见 `backend/alembic/versions/`）。无 error-backflow 迁移。
+- **alembic head** = `b1a2c3d4e5f6`（add_updated_at_onupdate）；迁移文件命名 = 16hex_rev + snake（见 `backend/alembic/versions/`）。~~无 error-backflow 迁移~~ **（2026-09-14 订正）已新增 `c3d4e5f6a7b8_add_error_backflow_ddl.py`，head 随之推进到 `c3d4e5f6a7b8`**。
 
 ### 2.2 API 层（`backend/app/api/`）
 
@@ -235,7 +235,7 @@
 
 | 列/变更 | 值 |
 |---|---|
-| `TRIGGER_TYPE` L14 → `("manual", "held_out", "error_regression")` + MySQL ENUM 迁移（§4.5 rev3） |
+| `TRIGGER_TYPE` L14 → `("manual", "held_out", "error_regression")` + MySQL ENUM 迁移（§4.5，**实现合并于单迁移 `c3d4e5f6a7b8`**） |
 | `trigger_signal_id` | BIGINT NULL（批 2 §6.1 consumed 锚；建单记所据信号 manual/held_out run id） |
 | `excluded_case_ids` | JSON NULL（**R-4**：cap 截断挤出的最老溢出 case id 列表；NULL/[] = 未截断。诚实标记 = 非空；溢出计数 = len；**v1.23 只读面整组取消后不再透出**，降级为本地诚实诊断，§10.3） |
 
@@ -243,17 +243,28 @@
 - `pinned` 已存在（model 默认 False）——内部创建器显式置 True。
 - EvalResult **不加列**：`error_type String(32)` / `error_detail Text` / `assertion_results` / `judge_results` 均已有，够用。
 
-### 4.5 alembic 迁移拆分（4 个新迁移，顺序 + 可回滚）
+### 4.5 alembic 迁移拆分（**设计 4 个 → 实现 1 个，本条为偏离记录**）
 
-> 当前 head = `b1a2c3d4e5f6`。每个迁移写 `downgrade` 完整回滚；**单一迁移内操作同表同事务**。
+> ⚠️ **2026-09-14 批 A 实施订正（本节从「设计稿」转为「偏离记录」）**：设计原拆 4 个 revision，
+> **实际实现为 1 个** = `c3d4e5f6a7b8_add_error_backflow_ddl.py`（revises `b1a2c3d4e5f6`，新 head
+> 即它）。**偏离理由（有意，非失误）**：① 四段改动**同批开发、同批部署**，拆开只多三次 upgrade
+> 往返，不产生任何独立可验收的中间态；② 合起来才对运维成立「upgrade 到 head 即可用」。
+> **偏离的实际代价（承认）**：`downgrade` 粒度从「逐级回滚」降为**一次全回**；且该迁移的
+> downgrade 有两处**已知不回退限制**（库内已有错误 case / 已有 error_regression run 时，
+> MySQL 拒绝把 `expected|assertions|metrics` 收紧回 NOT NULL、把 `trigger_type` 收回两值）——
+> 见迁移文件头「已知限制」，属「不回退已投产数据」的正常语义。
+>
+> 下述 rev1~rev4 清单**保留有效**（四段 DDL 内容逐条仍准确），只是**不再对应四个文件**。
+
+> 当前 head = `c3d4e5f6a7b8`。每个迁移写 `downgrade` 完整回滚；**单一迁移内操作同表同事务**。
 
 1. **rev1 `add_error_backflow_case_cols`**（down = 删列 + 三列回 NOT NULL + 撤 uk_case_payload_id）：
    - `case.py`：加 case_type/payload_id/backflow_envelope + uk_case_payload_id；ALTER 三列 `DROP NOT NULL`；`is_error_suite` 加列。
 2. **rev2 `create_error_backflow_inbox`**：建 `error_backflow_inbox`（全列 + uk_inbox_payload + idx_status_ack）。down = drop table。
 3. **rev3 `extend_run_trigger_and_anchor`**：`ALTER TABLE eval_run MODIFY COLUMN trigger_type ENUM('manual','held_out','error_regression') NOT NULL`（SQLAlchemy `sa.Enum` 原生 enum 名保持 `trigger_type`）；加 `trigger_signal_id BIGINT NULL`、`excluded_case_ids JSON NULL`（列保留；**透出面随 v1.23 只读面取消，§10.3**）。down = 还原 ENUM + 删两列。
-4. **rev4 `backfill_case_columns`**（数据迁移，可选合并进 rev1 数据步）：把现有普通 case 的 `case_type` 保持 NULL（无需数据动作）；确认无现网 'error_backflow' 数据（零落地前提）。
+4. **rev4 `backfill_case_columns`**（数据迁移，**已并入单迁移**）：把现有普通 case 的 `case_type` 保持 NULL（无需数据动作）；确认无现网 'error_backflow' 数据（零落地前提）。
 
-- **验证**：`alembic upgrade head` 后 ORM `metadata.create_all` 不与迁移冲突（跑 `backend/tests` 建表冒烟）；`alembic downgrade -1` 逐级回滚成功（G1 门）。
+- **验证**：`alembic upgrade head` 后 ORM `metadata.create_all` 不与迁移冲突（跑 `backend/tests` 建表冒烟）；`alembic downgrade -1` 回滚成功（**G1 门**）——因实现合并为单迁移，这里的 `-1` = **一次全回**（原设计的「逐级」已不适用，见本节顶部偏离记录）。
 
 ### 4.6 写校验收口（`core/case_rules.py` 新增纯函数，批 1 评审 A-I6）
 
@@ -694,7 +705,7 @@ R-12 落地前产出 **pre-scan report**（现库实扫 + 处置登记），门�
 **保留**：
 
 - **error suite / error case 的普通读面过滤**（原 §10.1 第 2 段）：普通 suite/case 只读端点仍**排除** error suite（`is_error_suite=true`）与哨兵 case（`case_type IS NOT NULL`）——与只读面取消无关，谓词收敛见 §11 共享常量集。**dashboard 数字口径容忍**注记不变（run 状态聚合若走 runs 表会含 error run 行，与 active-count 不混，§11.1）。
-- **`excluded_case_ids` 列**：§4.4 rev3 迁移**照旧建出**、cap 截断时**照旧记**溢出 case id——但**不再有任何对 online 的透出面**（载荷 schema 无该字段）。该列降级为 **offline 本地诚实诊断 + 告警**载体。
+- **`excluded_case_ids` 列**：§4.5 迁移（**原写「§4.4 rev3」，两处均误——rev3 属 §4.5，且已并入单迁移 `c3d4e5f6a7b8`**）**照旧建出**、cap 截断时**照旧记**溢出 case id——但**不再有任何对 online 的透出面**（载荷 schema 无该字段）。该列降级为 **offline 本地诚实诊断 + 告警**载体。
 
 > ⚠️ **待议项（本批如实登记，未决）**：只读面取消后，cap 截断的诚实标记（`case_truncated` 计数 + `excluded_case_ids` 列表）**对 online 不再可见**——online 无法再区分「该版本全判」与「窗口截断欠测」，原 R-4 的诊断目的落空。载荷 schema 为 online 代码事实源、本批不动 online，故 offline 侧**无从透出**。若后续需恢复该诊断能力，须另开一项议（候选：载荷增补可选字段，或经 cluster/claim 详情人工排查）。
 ---

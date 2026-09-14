@@ -18,6 +18,10 @@ backups/
 # ---- Python 缓存 ----
 __pycache__/
 *.pyc
+
+# ---- 宿主虚拟环境（2026-09-14 新增：宿主跑 pytest 需自建 venv，体积大且随机器而异）----
+.venv/
+venv/
 .pytest_cache/
 
 # ---- 本地工具痕迹 ----
