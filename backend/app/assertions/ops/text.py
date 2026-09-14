@@ -1,8 +1,35 @@
-"""文本类断言算子（§7.1）：关键信息命中。"""
+"""文本类断言算子（§7.1）：关键信息命中。
+
+**关键词匹配一律大小写不敏感**（#235，2026-09-14 拍板）：词表侧 `sanitize_words` 归一，
+算子侧再对两侧 `lower()`。两侧都做不是冗余——词表侧归一解决**去重与呈现一致**，算子侧
+折叠解决**匹配**；只做前者正是原先那条漏判缺陷（`"Fallback"` 话术匹配不上折叠后的
+`"fallback"`）。
+
+⚠️ **两个算子共用 `_keyword_hits`，这是有意的结构性约束**：分别实现必然出现「只改了
+一侧」的脱节，共用一处则不可能脱节。新增文本算子请一律走它，勿再手写 `k in val`。
+
+⚠️ **折叠让短 ASCII 关键词的误命中面变大**（`"AI"` 会命中 `"he said"`）：对
+`keyword_not_contains` 是假红（方向安全），对 `keyword_contains` 是**假绿**（方向不安全）。
+实际发生率待量化（#235 遗留），未加长度闸。
+"""
 from __future__ import annotations
 
 from app.assertions.base import AssertionOp, AssertionOpError
 from app.assertions.path import resolve
+
+
+def _keyword_hits(keywords: list, val: str) -> list[str]:
+    """命中集：`keyword.lower() in val.lower()` 的子串匹配（大小写不敏感）。
+
+    元素类型显式校验后抛 `AssertionOpError`——原实现 `k in val` 对非 str 元素抛
+    `TypeError`，改成 `k.lower()` 后会变成 `AttributeError`（异常类型变了、报错更差），
+    故补这一道守卫把错误路径钉死。
+    """
+    for k in keywords:
+        if not isinstance(k, str):
+            raise AssertionOpError(f"keywords 元素须为字符串，实为 {type(k).__name__}")
+    low = val.lower()
+    return [k for k in keywords if k.lower() in low]
 
 
 class KeywordContainsOp(AssertionOp):
@@ -24,7 +51,7 @@ class KeywordContainsOp(AssertionOp):
             return False, f"<未取到 {path}>"
         if not isinstance(val, str):
             return False, f"<非文本: {type(val).__name__}>"
-        hits = [k for k in keywords if k in val]
+        hits = _keyword_hits(keywords, val)
         want_all = args.get("match", "all") == "all"
         ok = len(hits) == len(keywords) if want_all else bool(hits)
         return ok, val
@@ -54,7 +81,7 @@ class KeywordNotContainsOp(AssertionOp):
             return False, f"<未取到 {path}>"
         if not isinstance(val, str):
             return False, f"<非文本: {type(val).__name__}>"
-        hits = [k for k in keywords if k in val]
+        hits = _keyword_hits(keywords, val)
         want_all = args.get("match", "all") == "all"
         # match="all"（默认）：所有关键词都不出现才通过；任一出现即 fail
         # match="any"：至少一个关键词不出现即通过（全部出现才 fail）

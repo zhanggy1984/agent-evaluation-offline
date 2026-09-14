@@ -3,14 +3,16 @@
 `validate_envelope` 与 `sanitize_words` 是**无 IO 纯函数**（可单测穷举）；
 `resolve_agent` / `resolve_interface` 要查库，是同文件内的 async 例外（SD §5.4 就放在这里）。
 
-**⚠️ 与 SD §5.3「大小写归一」的偏离（有意，先取证后决定）**：
-文档写 `sanitize_words` 要做「大小写归一」。本实现**不做**，理由：净化后的 keywords 会被
-`KeywordNotContainsOp.run`（`assertions/ops/text.py:55`）以 `k in val` **大小写敏感**地匹配
-原始 answer。只把词表降为小写，等于让「Fallback」这类带大写的实际兜底话术**匹配不上** ⇒
-**静默漏判**（金丝雀失效，方向正是 R-12 要治的那个「空答漏判」同类）。
-R-12 已明确推迟、共享算子不动 ⇒ 归一化若要成立，必须**同时**改算子，那是另一个批次的事。
-在算子不改的前提下，**保持原样是唯一不引入漏判的选择**。
-（待办：真要做大小写不敏感，须算子侧同步 `val.lower()`/`k.lower()`，并回归全部现有用例。）
+**大小写归一：已落地（#235，2026-09-14 拍板）——本条此前是「有意偏离」，现为翻案记录。**
+
+历史：本实现原先**不做**归一，理由是净化后的 keywords 会被 `KeywordNotContainsOp` 以
+`k in val` **大小写敏感**地匹配原始 answer，只把词表降为小写等于让「Fallback」这类带大写的
+兜底话术**匹配不上** ⇒ 静默漏判。该推理当时成立，**结论在今天不再成立**——因为算子侧已
+同步改为对两侧 `lower()`（`assertions/ops/text.py` 的 `_keyword_hits`）。两半必须同批动：
+**只改词表 = 漏判，只改算子 = 词表未折叠（去重与呈现不一致）**。
+
+⚠️ 代价（承认，未闭环）：折叠扩大了**短 ASCII 关键词的误命中面**（`"AI"` 命中 `"he said"`），
+对 `keyword_contains` 是假绿方向。实际发生率**待量化**，本批未加长度闸。
 """
 from __future__ import annotations
 
@@ -122,10 +124,15 @@ def validate_envelope(envelope: dict) -> tuple[bool, list[str], str]:
 
 
 def sanitize_words(raw) -> list[str]:
-    """词级净化：strip → 弃空/纯空白 → 弃超长 → **保序去重**。
+    """词级净化：strip → **大小写归一** → 弃空/纯空白 → 弃超长 → **保序去重**。
 
-    **不做大小写归一**（理由见文件头）。返回的列表即 case.assertions 里 keywords 的值；
-    判定时直接子串匹配 answer，故净化必须只做「不会让命中变少」的变换。
+    归一是 #235（2026-09-14 拍板，**翻案**：此前本条明确「不做归一」，理由见文件头）
+    的一半。这里折叠的作用**不是匹配**（匹配由算子侧 `_keyword_hits` 对两侧 lower 兜住），
+    而是：① **去重**——`["Fallback","fallback"]` 折叠后并为一个，`len(keywords)` 才与
+    实际不同检查数一致（`KeywordNotContainsOp` 的 `match="any"` 用 `len(keywords)` 算，
+    有重复项会算错）；② **呈现一致**——审计/后台看到的词表与判定口径同形。
+
+    返回的列表即 case.assertions 里 keywords 的值。
     """
     if not isinstance(raw, list):
         return []
@@ -134,7 +141,7 @@ def sanitize_words(raw) -> list[str]:
     for item in raw:
         if not isinstance(item, str):
             continue
-        w = item.strip()
+        w = item.strip().lower()
         if not w or len(w) > MAX_WORD_LEN or w in seen:
             continue
         seen.add(w)

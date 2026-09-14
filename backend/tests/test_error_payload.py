@@ -195,14 +195,16 @@ def test_sanitize_ignores_non_str_and_non_list():
     assert sanitize_words("不是数组") == []
 
 
-def test_sanitize_does_not_change_case():
-    """**故意不归一大小写**（见 error_payload 文件头）：归一会让大写兜底话术匹配不上，
-    方向正是 R-12 要治的漏判。此用例把该决定钉住，防止后人「顺手补上」。
+def test_sanitize_folds_case():
+    """大小写归一（#235，2026-09-14 拍板，**翻案**）。
 
-    ⚠️ 该决定**已被翻案**（任务 #235：归一 + 算子同步改大小写不敏感）。本用例在 #235
-    落地时**必须一并改掉**——它现在的绿是「偏离仍在」的绿，不是「行为正确」的绿。
+    本用例此前名为 `test_sanitize_does_not_change_case`，钉的是**被翻案的旧行为**
+    （「故意不归一」）。此处一并翻过来，并留痕说明它并非一向如此——否则后人读历史
+    会以为从来就归一。
     """
-    assert sanitize_words(["Fallback"]) == ["Fallback"]
+    assert sanitize_words(["Fallback"]) == ["fallback"]
+    # 归一的实际作用之一：折叠后并入同一项（否则 match="any" 的 len(keywords) 会算错）
+    assert sanitize_words(["Fallback", "fallback", "FALLBACK"]) == ["fallback"]
 
 
 # ---------- no_fallback_config 形态：fail-open 回归护栏 ----------
