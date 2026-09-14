@@ -9,6 +9,7 @@ from app.models.case import (
     CaseAnnotation, CaseScene, CaseVersion, SceneCatalog, TestCase, TestSuite,
 )
 from app.models.run import EvalResult, EvalRun, JudgeTask
+from app.models.error_backflow_inbox import ErrorBackflowInbox
 from app.models.user import RefreshToken, User
 from app.models.misc import AgentCircuit, AuditLog, ExportToken, SystemConfig
 
@@ -20,6 +21,7 @@ __all__ = [
     "TestSuite", "TestCase", "CaseVersion", "CaseAnnotation",
     "SceneCatalog", "CaseScene",
     "EvalRun", "EvalResult", "JudgeTask",
+    "ErrorBackflowInbox",
     "User", "RefreshToken",
     "SystemConfig", "ExportToken", "AuditLog",
     "AgentCircuit",

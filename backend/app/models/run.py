@@ -1,7 +1,7 @@
 """run / 结果 / judge 任务 / 漂移历史。"""
 from sqlalchemy import (
-    Boolean, DateTime, Enum, ForeignKey, Index, Integer, JSON, Numeric, String, Text,
-    UniqueConstraint, text,
+    BigInteger, Boolean, DateTime, Enum, ForeignKey, Index, Integer, JSON, Numeric, String,
+    Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column
@@ -11,7 +11,7 @@ from app.models.base import Base
 # MySQL ENUM 值定义（与 DDL 一致）
 # scoring_failed：采集完成但评分超时（scanner 兜底），与 timeout（执行超时）区分
 RUN_STATUS = ("pending", "running", "scoring", "scoring_failed", "completed", "partial_failed", "timeout", "cancelled")
-TRIGGER_TYPE = ("manual", "held_out")
+TRIGGER_TYPE = ("manual", "held_out", "error_regression")
 PASS_FAIL = ("pass", "fail", "error", "na")
 # pending_human（人工复核）7.5e 预留机制已随轻量化删除：真实 judge 不输出 confidence 永不触发
 JUDGE_TASK_STATUS = ("pending", "processing", "done", "failed")
@@ -58,6 +58,11 @@ class EvalRun(Base):
     env_snapshot: Mapped[dict | None] = mapped_column(JSON)   # 两段：contract_version+adapter_config_hash；meta 回填 git_sha/knowledge_version/model
     run_config: Mapped[dict | None] = mapped_column(JSON)     # scope=run 配置冻结值（创建时快照）
     case_ids: Mapped[list | None] = mapped_column(JSON)       # #3 定向重跑子集（None=全量；run_out redact 时裁剪留出集）
+    # --- 回流错误回归 run 两列（P1 §7.1；普通 run 全 NULL）---
+    # 建单所据信号的 manual/held_out run id。**注意与出站载荷同名字段非同物**：
+    # 出站 trigger_signal_id 取 case.backflow_envelope['source']['cluster_id']
+    trigger_signal_id: Mapped[int | None] = mapped_column(BigInteger)
+    excluded_case_ids: Mapped[list | None] = mapped_column(JSON)  # R-4 cap 截断溢出的最老 case id；NULL/[] = 未截断
 
 
 class EvalResult(Base):
