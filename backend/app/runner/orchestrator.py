@@ -33,7 +33,7 @@ from app.core.security import fernet_decrypt
 from app.models import (
     Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, SystemConfig, TestCase, TestSuite,
 )
-from app.runner.case_loader import _load_run_cases
+from app.runner.case_loader import _is_error_case, _load_run_cases
 from app.runner.error_push import fire_push
 from app.runner.executor import RETRYABLE_ERRORS, CaseOutcome, execute_case
 from app.runner.scorer import _enabled_semantic_dims, score_run
@@ -52,6 +52,9 @@ TIMEOUT = "timeout"
 # §7.4 error-run 专用 run_config：复现单条可长于常规评测，且要重试够（复现失败多为抖动）
 ERROR_CASE_TIMEOUT_S = 600
 ERROR_MAX_RETRIES = 2
+# §5.2 洪峰收敛：同一 agent 同时最多 1 条活跃（pending/running）error run（含跨 version）。
+# 规范只说「配额值实施定」，此处取 1——它同时是 §5.2 活跃闸与「一周期至多补 1 个」的取值。
+ERROR_ACTIVE_QUOTA = 1
 # §7.4 cap：「按 error-run 专用预算反推」（原文示例 H_run=2h / avg 10s per case / 尾因子 ×2
 # → cap≈360）。**设计未给推导式**，本批取定值兜底；不声称等价于该式。
 # ⚠️ 本 cap 限的是**病例数**，**不兑现「run 时长有界」**——真跑实测（2026-09-14，真库探针）：
@@ -747,11 +750,23 @@ class RunOrchestrator:
             await db.commit()
             logger.info("run %s _finish 完成（status=%s pass=%s err=%s）", run_id, run.status, passed, error)
             final_status = run.status  # 块内捕获（commit 后属性已刷新），防 detached 读
+            # 会话关闭前取出信号三元组（commit 后读 ORM 属性会 detached）。
+            # 只有 manual/held_out 是发版信号（§5.2 信号前置）；error_regression 自身收尾走
+            # `_finish_error_regression`、不会到这里，此处的判据是双保险。
+            signal = ((run.agent_id, run.version, run.id)
+                      if run.trigger_type in ("manual", "held_out") and run.version else None)
         self._heartbeats.pop(run_id, None)
         self._cancel.pop(run_id, None)  # A1 清取消标志（:530 已消费 _is_cancelled 判定 CANCELLED 之后）
         # 阶段三评分：执行成功且非外部终态的 run 交给 scorer（重算 pass/fail + 落分）
         if final_status == SCORING:
             await score_run(run_id)
+        # §5.3 挂接点：信号 run **到达终态、事务提交后**触发自动排期（fire-and-forget）。
+        # 放在 `score_run` **之后**：`scoring` 不是终态，评分完成后 run 才真到终态（§5.2
+        # 信号前置）；且此处已不持任何行锁，不构成 §5.2 锁序约定的反向交叉。
+        # 早退路径（agent 禁用 / suite 无 active 用例 / 跑前探测失败）不经本函数 ⇒ 不触发，
+        # 边界见 C3 方案「挂接点边界」。
+        if signal is not None:
+            fire_auto_schedule(*signal)
 
     async def _finish_error_regression(self, run_id: int) -> None:
         """error_regression 收尾（§8.6）。**不复用共享 `_finish`** —— 三处语义直接冲突：
@@ -835,9 +850,73 @@ class RunOrchestrator:
         self._cancel.pop(run_id, None)  # A1 异常路径同清取消标志
 
 
+async def _lock_agent(db, agent_id: int) -> bool:
+    """取 agent 行锁并返回该 agent 是否存在（§5.2 锁序约定：error-run 相关路径**先取 agent
+    行锁，且持锁期间不得再取同 agent 的 eval_run 行锁做更新**）。
+
+    存在的返回值语义：False = agent 不存在，调用方不应继续建单（防 DB 直插脏行）。
+    """
+    got = (await db.execute(
+        select(Agent.id).where(Agent.id == agent_id).with_for_update())).scalar_one_or_none()
+    return got is not None
+
+
+async def _create_error_regression_run_locked(db, *, agent_id: int, suite_id: int, version: str,
+                                              signal_run_id: int,
+                                              cap: int) -> tuple[int | None, list[int]]:
+    """内层建单：**要求调用方已持 agent 行锁**（本函数不再取锁——再取即同进程自锁死）。
+
+    活跃闸（§5.2 洪峰收敛）在此、插建前校验：该 agent 活跃（pending/running）error run 数
+    ≥ 配额 → 返回 `(None, [])` 不建，交后续信号/补偿对账再试。返回 `(run_id, 溢出 case id)`。
+    """
+    active = (await db.execute(
+        select(func.count()).select_from(EvalRun).where(
+            EvalRun.agent_id == agent_id,
+            EvalRun.trigger_type == "error_regression",
+            EvalRun.status.in_(("pending", RUNNING))))).scalar_one()
+    if active >= ERROR_ACTIVE_QUOTA:
+        return None, []
+    cases = (await db.execute(
+        select(TestCase)
+        .where(TestCase.suite_id == suite_id,
+               TestCase.status == "active",
+               TestCase.case_type.is_not(None))
+        .order_by(TestCase.id.desc())  # newest-active-first
+    )).scalars().all()
+    selected, overflow = cases[:cap], [c.id for c in cases[cap:]]
+    # 快照 scope=run 热配置（同 api.runs._snapshot_run_config 口径，在此就地取：
+    # runner 反向 import api 层会成环），再叠加 §7.4 的 error-run 专用两项。
+    rows = (await db.execute(select(SystemConfig).where(
+        SystemConfig.scope == "run"))).scalars().all()
+    cfg = {r.key: r.value for r in rows}
+    cfg["case_timeout"] = ERROR_CASE_TIMEOUT_S
+    cfg["max_retries"] = ERROR_MAX_RETRIES
+    # 时长闸**显式**给出（不留给 `_run` 的估算器）：估算器入参 `max_iface_timeout` 取
+    # case_timeout，600×2 次重试会把估算从常规 1800s 抬到 13740s ⇒ 逐 run 撞封顶打
+    # WARNING、且 cap 与真时长闸不自洽（真跑实测，见 `ERROR_CASE_CAP` 注）。
+    # 取 §7.4 原文自己的预算示例 H_run=2h，与封顶同值 ⇒ 复用常量，不留第二份魔数。
+    cfg["run_timeout"] = RUN_TIMEOUT_CAP_S
+    run = EvalRun(
+        agent_id=agent_id, suite_id=suite_id, version=version,
+        trigger_type="error_regression", status="pending", generation=1,
+        pinned=True,                                    # §7.4：关键版本不被清理
+        run_config=cfg,
+        case_ids=[c.id for c in selected],
+        excluded_case_ids=overflow or None,
+        trigger_signal_id=signal_run_id,
+        # 7.5a pending 回收兜底：创建即写初始租约（orchestrator 未接管时由 scanner 回收）
+        lease_until=_now() + timedelta(seconds=90),
+    )
+    db.add(run)
+    logger.info("error run 建单：agent=%s version=%s signal_run=%s cases=%d 溢出=%d",
+                agent_id, version, signal_run_id, len(selected), len(overflow))
+    await db.commit()
+    return run.id, overflow
+
+
 async def create_error_regression_run(*, agent_id: int, suite_id: int, version: str,
                                       signal_run_id: int,
-                                      cap: int = ERROR_CASE_CAP) -> int:
+                                      cap: int = ERROR_CASE_CAP) -> int | None:
     """建一条 error_regression run 并触发执行（§7.4）。返回 run_id。
 
     **不走公开 `create_run`**（§7.4/§7.5）：后者会拦 `trigger_type` Literal、semver 校验与
@@ -852,47 +931,146 @@ async def create_error_regression_run(*, agent_id: int, suite_id: int, version: 
     同名字段（= online cluster id）**非同物**（§7.4 注）。
     """
     async with SessionLocal() as db:
-        cases = (await db.execute(
-            select(TestCase)
-            .where(TestCase.suite_id == suite_id,
-                   TestCase.status == "active",
-                   TestCase.case_type.is_not(None))
-            .order_by(TestCase.id.desc())  # newest-active-first
-        )).scalars().all()
-        selected, overflow = cases[:cap], [c.id for c in cases[cap:]]
-        # 快照 scope=run 热配置（同 api.runs._snapshot_run_config 口径，在此就地取：
-        # runner 反向 import api 层会成环），再叠加 §7.4 的 error-run 专用两项。
-        rows = (await db.execute(select(SystemConfig).where(
-            SystemConfig.scope == "run"))).scalars().all()
-        cfg = {r.key: r.value for r in rows}
-        cfg["case_timeout"] = ERROR_CASE_TIMEOUT_S
-        cfg["max_retries"] = ERROR_MAX_RETRIES
-        # 时长闸**显式**给出（不留给 `_run` 的估算器）：估算器入参 `max_iface_timeout` 取
-        # case_timeout，600×2 次重试会把估算从常规 1800s 抬到 13740s ⇒ 逐 run 撞封顶打
-        # WARNING、且 cap 与真时长闸不自洽（真跑实测，见 `ERROR_CASE_CAP` 注）。
-        # 取 §7.4 原文自己的预算示例 H_run=2h，与封顶同值 ⇒ 复用常量，不留第二份魔数。
-        cfg["run_timeout"] = RUN_TIMEOUT_CAP_S
-        run = EvalRun(
-            agent_id=agent_id, suite_id=suite_id, version=version,
-            trigger_type="error_regression", status="pending", generation=1,
-            pinned=True,                                    # §7.4：关键版本不被清理
-            run_config=cfg,
-            case_ids=[c.id for c in selected],
-            excluded_case_ids=overflow or None,
-            trigger_signal_id=signal_run_id,
-            # 7.5a pending 回收兜底：创建即写初始租约（orchestrator 未接管时由 scanner 回收）
-            lease_until=_now() + timedelta(seconds=90),
-        )
-        db.add(run)
-        await db.commit()
-        run_id = run.id
-    if overflow:
-        logger.warning("error run %s case 集截断：cap=%d 溢出 %d 条（已记 excluded_case_ids）",
-                       run_id, cap, len(overflow))
-    logger.info("error run %s 已创建 agent=%s version=%s signal_run=%s cases=%d",
-                run_id, agent_id, version, signal_run_id, len(selected))
-    asyncio.get_running_loop().create_task(orchestrator.start_run(run_id))
+        if not await _lock_agent(db, agent_id):
+            logger.error("error run 未建：agent %s 不存在", agent_id)
+            return None
+        run_id, overflow = await _create_error_regression_run_locked(
+            db, agent_id=agent_id, suite_id=suite_id, version=version,
+            signal_run_id=signal_run_id, cap=cap)
+    if run_id is None:
+        logger.warning("error run 未建：agent %s 活跃 error run 已达配额 %d（§5.2 洪峰收敛）",
+                       agent_id, ERROR_ACTIVE_QUOTA)
+        return None
+    _launch_error_run(run_id, agent_id, overflow)
     return run_id
+
+
+def _launch_error_run(run_id: int, agent_id: int, overflow: list[int]) -> None:
+    """建单成功后的收尾动作：告警 + 触发执行。两个调用方（显式建单 / 自动触发）共用。"""
+    if overflow:
+        logger.warning("error run %s case 集截断：cap 溢出 %d 条（已记 excluded_case_ids）",
+                       run_id, len(overflow))
+    logger.info("error run %s 已创建 agent=%s，交 orchestrator 执行", run_id, agent_id)
+    asyncio.get_running_loop().create_task(orchestrator.start_run(run_id))
+
+
+def _decide_schedule(*, latest_status: str | None, latest_signal_id: int | None,
+                     signal_run_id: int) -> bool:
+    """§5.2 skip 表（纯函数：唯一让「六分支」脱离 DB 可单测的落点）。True = 该建。
+
+    | latest | 判定 |
+    |---|---|
+    | 无 | 建（首建） |
+    | `trigger_signal_id == 本信号` | 不建（consumed 锚吸收态：每个信号至多产生一次动作） |
+    | pending / running | 不建（已建未跑完） |
+    | completed / partial_failed | 不建（已有可判终态，不重复回归） |
+    | timeout / cancelled | 建（坏终态：上次没判成，给一次重建机会） |
+    | 其余（scoring / 表外状态） | 不建（保守：宁漏建，不叠跑） |
+
+    ⚠️ `scoring_failed` **不在重建集**：§5.2 只列 timeout/cancelled，且 error run 的状态机
+    不含 scoring 态（本仓 `phase2.md:200`：error run 从不触发 score_run ⇒ scanner ③ 没有
+    标 scoring_failed 的对象）。把它并进来是**不可达分支**，故按「表外 → 不建 + WARNING」
+    处置：真出现即日志可见，而不是靠一段永不执行的代码兜。
+    """
+    if latest_status is None:
+        return True
+    if latest_signal_id == signal_run_id:
+        return False
+    if latest_status in ("pending", RUNNING, SCORING):
+        return False
+    if latest_status in (COMPLETED, PARTIAL_FAILED):
+        return False
+    if latest_status in (TIMEOUT, CANCELLED):
+        return True
+    logger.warning("auto schedule：latest status=%s 非 §5.2 skip 表已知值，按「不建」处置",
+                   latest_status)
+    return False
+
+
+async def _runnable_error_case_count(db, suite_id: int) -> int:
+    """§5.2 创建前门禁计数：**与 `_load_run_cases` error 分支同谓词**（形态判定复用同一
+    个 `_is_error_case`，不抄第二份），只在「全集」上计数（不套 cap 窗口，§6.1 注 1）。"""
+    cases = (await db.execute(select(TestCase).where(
+        TestCase.suite_id == suite_id,
+        TestCase.status == "active",
+        TestCase.case_type.is_not(None),
+        TestCase.is_held_out.is_(False)))).scalars().all()
+    return sum(1 for c in cases if _is_error_case(c))
+
+
+async def maybe_auto_schedule(agent_id: int, version: str | None,
+                              signal_run_id: int) -> int | None:
+    """§5.2/§5.3：信号 run 到达终态后，决定是否为其 (agent, version) 建 error 回归 run。
+
+    返回新建 run_id；任一判定不建（含配额满）返回 None。挂接点见 `_finish` 末尾——
+    必须在**事务提交后**调用：本函数要取 agent 行锁，与 `_finish` 持 eval_run 行锁构成
+    反向锁序（§5.2 锁序约定）。
+    """
+    if not version:
+        logger.info("auto schedule 跳过：信号 run %s 无 version（非发版语义）", signal_run_id)
+        return None
+    async with SessionLocal() as db:
+        # §5.2 并发防重：**先取 agent 行锁，之后才读 latest/查重**——否则两路并发都读到
+        # latest=None 再各自插建。建单在**同一会话同一锁内**完成（不调外层建单函数：
+        # 它自开会话再取同行锁 ⇒ 与本会话的 X 锁互等，同进程自锁死）。
+        if not await _lock_agent(db, agent_id):
+            logger.error("auto schedule 跳过：agent %s 不存在", agent_id)
+            return None
+        suite = (await db.execute(select(TestSuite).where(
+            TestSuite.agent_id == agent_id,
+            TestSuite.is_error_suite.is_(True)))).scalars().first()
+        if suite is None:
+            logger.info("auto schedule 跳过：agent %s 无 error suite", agent_id)
+            return None
+        if await _runnable_error_case_count(db, suite.id) == 0:
+            logger.info("auto schedule 跳过：error suite %s 无 runnable case（§5.2 门禁）", suite.id)
+            return None
+        latest = (await db.execute(select(EvalRun).where(
+            EvalRun.agent_id == agent_id,
+            EvalRun.trigger_type == "error_regression",
+            EvalRun.version == version,
+        ).order_by(EvalRun.id.desc()).limit(1))).scalars().first()
+        if not _decide_schedule(
+                latest_status=latest.status if latest else None,
+                latest_signal_id=latest.trigger_signal_id if latest else None,
+                signal_run_id=signal_run_id):
+            logger.info("auto schedule 不建：agent=%s version=%s 信号=%s latest=%s（status=%s）",
+                        agent_id, version, signal_run_id,
+                        latest.id if latest else None, latest.status if latest else None)
+            return None
+        run_id, overflow = await _create_error_regression_run_locked(
+            db, agent_id=agent_id, suite_id=suite.id, version=version,
+            signal_run_id=signal_run_id, cap=ERROR_CASE_CAP)
+    if run_id is None:
+        logger.warning("auto schedule 未建：agent %s 活跃 error run 已达配额 %d（§5.2 洪峰收敛）",
+                       agent_id, ERROR_ACTIVE_QUOTA)
+        return None
+    _launch_error_run(run_id, agent_id, overflow)
+    return run_id
+
+
+def fire_auto_schedule(agent_id: int, version: str | None, signal_run_id: int) -> None:
+    """信号 run 收尾后的 fire-and-forget 触发（§5.3）：失败只记日志，不冒泡打断收尾。
+
+    形态照 `error_push.fire_push`：持引用防 GC；异常在任务内消化。
+    """
+    async def _guarded() -> None:
+        try:
+            await maybe_auto_schedule(agent_id, version, signal_run_id)
+        except Exception:  # noqa: BLE001 — fire-and-forget：触发失败不许影响信号 run 收尾
+            logger.exception("auto schedule 触发失败：agent=%s version=%s 信号=%s",
+                             agent_id, version, signal_run_id)
+
+    try:
+        task = asyncio.get_running_loop().create_task(_guarded())
+    except RuntimeError:  # 无运行中 loop（同步上下文调用）——记日志不抛
+        logger.error("auto schedule 无法调度：无运行中的事件循环（信号 run=%s）", signal_run_id)
+        return
+    _AUTO_TASKS.add(task)
+    task.add_done_callback(_AUTO_TASKS.discard)
+
+
+_AUTO_TASKS: set = set()
 
 
 orchestrator = RunOrchestrator()  # 单进程全局实例（workers=1 前提成立）

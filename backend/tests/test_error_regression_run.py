@@ -25,6 +25,7 @@ from app.runner.orchestrator import (
     COMPLETED,
     PARTIAL_FAILED,
     RunOrchestrator,
+    _decide_schedule,
     _error_precheck_failures,
     _error_verdict,
 )
@@ -367,3 +368,58 @@ class TestFinishErrorRegression:
 def test_error_run_config_defaults_are_error_specific():
     """§7.4：error-run 专用 run_config 与常规评测不同（复现更长、重试更多）。"""
     assert ERROR_CASE_TIMEOUT_S == 600
+
+
+# ---------------- 批 C3：§5.2 skip 表（纯函数；DB 面由 auto_schedule_probe 覆盖） ----------
+
+SIGNAL = 4242
+OTHER_SIGNAL = 4243
+
+
+def _decide(status, latest_signal=OTHER_SIGNAL):
+    return _decide_schedule(latest_status=status, latest_signal_id=latest_signal,
+                            signal_run_id=SIGNAL)
+
+
+def test_decide_builds_when_latest_is_none():
+    """首次触发（该 (agent, version) 无 error run）→ 建。"""
+    assert _decide_schedule(latest_status=None, latest_signal_id=None,
+                            signal_run_id=SIGNAL) is True
+
+
+@pytest.mark.parametrize("status", ["pending", "running", "scoring"])
+def test_decide_skips_when_not_terminal(status):
+    """已建未跑完 / 非终态（scoring 也是未完成的评分态）→ 不建。"""
+    assert _decide(status) is False
+
+
+@pytest.mark.parametrize("status", ["completed", "partial_failed"])
+def test_decide_skips_when_judgeable_terminal(status):
+    """已有可判终态 → 不重复回归（技术 na 重跑 = 二期开放项，§5.2）。"""
+    assert _decide(status) is False
+
+
+@pytest.mark.parametrize("status", ["timeout", "cancelled"])
+def test_decide_rebuilds_on_bad_terminal_with_new_signal(status):
+    """坏终态 + **新信号** → 给一次重建机会（§5.2）。"""
+    assert _decide(status) is True
+
+
+def test_decide_skips_scoring_failed():
+    """`scoring_failed` **不在重建集**：§5.2 只列 timeout/cancelled，且 error run 状态机不含
+    scoring 态（`phase2.md:200`：error run 从不触发 score_run ⇒ scanner ③ 没有可标对象）
+    ⇒ 并进重建集是不可达分支。按表外状态处置（不建 + WARNING）。"""
+    assert _decide("scoring_failed") is False
+
+
+@pytest.mark.parametrize("status", ["completed", "partial_failed", "timeout", "cancelled",
+                                    "scoring_failed"])
+def test_decide_consumed_anchor_absorbs_same_signal(status):
+    """吸收态优先于终态规则：同一信号**无论 latest 处于何种终态**都只动作一次（§5.2 v0.4）。
+    这条是「补偿对账复用同一锚反复调用 → 无吸收态则自动重跑循环」的直接守卫。"""
+    assert _decide(status, latest_signal=SIGNAL) is False
+
+
+def test_decide_skips_unknown_status():
+    """表外状态（新状态被引入而此处未同步）→ 保守不建，且不静默（记 WARNING）。"""
+    assert _decide("interrupted") is False
