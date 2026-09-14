@@ -55,8 +55,14 @@ def _pick_next_version(anchor_by_version: dict) -> str | None:
 async def _error_agents(db) -> list:
     """有 active error case 的 agent（§7.3 逐字「对每个有 active error case 的 agent」）。
 
-    刻意**不用** `_runnable_error_case_count`——那会把「有 case 但断言未回填」的 agent 整条
-    跳过，而门禁（`maybe_auto_schedule` 内）本来就会挡回并留下日志。
+    刻意**不用** `_runnable_error_case_count`（形态判定 + held_out 过滤的那套）——本处按规格
+    字面取「有没有 case」，能不能跑交由 `maybe_auto_schedule` 内的空集门禁挡回并留日志。
+
+    ⚠️ 此处**不含**「等 §6.3 backfill 把断言补齐」的语义：`assertions IS NULL` 的 error case
+    在现实现下产不出来（`pull_loop._activate` 同一次写入内就构造 assertions，词表为空则 fail-closed
+    不建 case；存量真库实测 0 条），且 backfill 已判「前提不可达」不实现（`error-backflow-task.md`
+    O-E.2 的处置裁定注）。若日后真出现该形态，它会被 `case_loader._is_error_case` 剔除、不加载，
+    表现为「本 agent 被扫描到但建不出 run」——那是失败面，不是待 backfill 的中间态。
     """
     stmt = (select(TestSuite.agent_id)
             .join(TestCase, TestCase.suite_id == TestSuite.id)
