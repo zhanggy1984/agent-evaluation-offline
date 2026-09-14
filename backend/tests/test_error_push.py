@@ -1,0 +1,176 @@
+"""批 C2：出站结果推送（§10.1 载荷 / 分片 / 重试）。
+
+⚠️ 不覆盖：真 HTTP 推 online（见 `tests/integration/` 的推送探针）、C3 触发路径、C4 并发。
+"""
+from types import SimpleNamespace
+
+import pytest
+
+from app.runner import error_push as ep
+
+
+def _case(cid, cluster_id, case_type="regression_error"):
+    env = {"source": {"agent": "cs-agent", "cluster_id": cluster_id}} if cluster_id else {"source": {}}
+    return SimpleNamespace(id=cid, case_type=case_type, backflow_envelope=env)
+
+
+def _result(case_id, pf, error_type=None, detail=None):
+    return SimpleNamespace(case_id=case_id, pass_fail=pf, error_type=error_type,
+                           error_detail=detail)
+
+
+class TestCasesOfCluster:
+    def test_splits_by_cluster_id(self):
+        cases = [_case(1, 100), _case(2, 200), _case(3, 100)]
+        out = ep._cases_of_cluster(cases, {c.id: _result(c.id, "pass") for c in cases})
+        assert set(out) == {100, 200}
+        assert [c["case_id"] for c in out[100]] == ["1", "3"]
+
+    def test_missing_cluster_id_goes_to_none_bucket(self):
+        """无 cluster_id 不静默丢——调用方据 None 桶记 error 日志。"""
+        cases = [_case(1, None)]
+        out = ep._cases_of_cluster(cases, {1: _result(1, "pass")})
+        assert list(out) == [None]
+
+    def test_na_row_carries_error_type(self):
+        cases = [_case(1, 100)]
+        out = ep._cases_of_cluster(cases, {1: _result(1, "na", "timeout", "超时")})
+        assert out[100][0]["error_type"] == "timeout"
+        assert out[100][0]["error_detail"] == "超时"
+
+    def test_missing_result_row_defaults_to_na(self):
+        out = ep._cases_of_cluster([_case(1, 100)], {})
+        assert out[100][0]["pass_fail"] == "na"
+
+
+class TestAssemblePayload:
+    def _body(self, **kw):
+        run = SimpleNamespace(id=3042, version="2026.09.14-r1", status="partial_failed",
+                              finished_at=None)
+        args = dict(run=run, agent_name="cs-agent", cluster_id=100, cases=[], latest="v3", prev=None)
+        args.update(kw)
+        return ep.assemble_payload(**args)
+
+    def test_id_fields_are_str_and_cluster_id_is_int(self):
+        """⚠️ 序列化陷阱：online 侧 run_id/case_id 是 str、trigger_signal_id 是 int，方向相反。"""
+        body = self._body(cases=[{"case_id": "7", "case_type": "regression_error", "pass_fail": "pass"}])
+        assert isinstance(body["run_id"], str) and body["run_id"] == "3042"
+        assert isinstance(body["trigger_signal_id"], int)
+        assert isinstance(body["cases"][0]["case_id"], str)
+
+    def test_agent_is_online_side_identity_not_offline_agent_name(self):
+        assert self._body(agent_name="cs-agent")["agent"] == "cs-agent"
+
+    def test_prev_terminal_null_allowed(self):
+        assert self._body(prev=None)["prev_terminal_version"] is None
+        assert self._body(prev="v2")["prev_terminal_version"] == "v2"
+
+    def test_empty_cases_is_legal(self):
+        assert self._body()["cases"] == []
+        assert ep.self_check(self._body()) == []
+
+    def test_schema_version_is_1_0(self):
+        assert self._body()["schema_version"] == "1.0"
+
+
+class TestSelfCheck:
+    def _body(self, **kw):
+        body = {"schema_version": "1.0", "finished_ts": "2026-09-14T12:00:00", "cases": []}
+        body.update(kw)
+        return body
+
+    def test_ok(self):
+        assert ep.self_check(self._body()) == []
+
+    def test_duplicate_case_id_rejected(self):
+        dup = [{"case_id": "1"}, {"case_id": "1"}]
+        assert ep.self_check(self._body(cases=dup))
+
+    def test_bad_schema_version_rejected(self):
+        assert ep.self_check(self._body(schema_version="2.0"))
+
+    def test_bad_finished_ts_rejected(self):
+        assert ep.self_check(self._body(finished_ts="not-a-date"))
+
+
+class TestVerKey:
+    def test_numeric_ordering_not_lexicographic(self):
+        """字符串序会把 v10 排在 v9 前；水位判序必须走数值元组。"""
+        assert ep._ver_key("v10") > ep._ver_key("v9")
+        assert ep._ver_key("2026.09.14") < ep._ver_key("2026.10.01")
+
+    def test_non_numeric_segment_is_zero(self):
+        assert ep._ver_key("v1.r1") == (1, 0)
+
+
+class _RowsDB:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, stmt):
+        return SimpleNamespace(all=lambda: self._rows)
+
+
+class TestWatermarks:
+    """两水位口径（§10.1 硬约束 + online verify 用法推导）。"""
+
+    async def _wm(self, rows, run_id=5, version="v5"):
+        run = SimpleNamespace(id=run_id, version=version)
+        return await ep._watermarks(_RowsDB(rows), 1, run)
+
+    @pytest.mark.asyncio
+    async def test_latest_includes_self(self):
+        """必须含本 run：不含则 online `_ver_key(fv) > _ver_key(latest)` 恒 no_progress。"""
+        latest, _ = await self._wm([(5, "v5"), (3, "v3")])
+        assert latest == "v5"
+
+    @pytest.mark.asyncio
+    async def test_latest_is_max_by_ver_key_not_by_id(self):
+        latest, _ = await self._wm([(1, "v2"), (2, "v10")])
+        assert latest == "v10"
+
+    @pytest.mark.asyncio
+    async def test_prev_is_most_recent_before_self_not_max(self):
+        """prev 是**时间线紧邻前一个**（online 用它查缺行），不是最大版本。"""
+        _, prev = await self._wm([(1, "v9"), (3, "v3"), (5, "v5")])
+        assert prev == "v3"
+
+    @pytest.mark.asyncio
+    async def test_prev_none_when_no_prior(self):
+        _, prev = await self._wm([(5, "v5"), (6, "v6")])
+        assert prev is None
+
+
+class TestPushOneRetry:
+    async def _push(self, monkeypatch, outcomes):
+        calls = []
+
+        async def fake_push(body):
+            calls.append(body)
+            item = outcomes[len(calls) - 1]
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        async def no_sleep(_):
+            return None
+
+        monkeypatch.setattr(ep.backflow_client, "push_results", fake_push)
+        monkeypatch.setattr(ep.asyncio, "sleep", no_sleep)
+        return await ep._push_one({"run_id": "1", "trigger_signal_id": 9}), calls
+
+    @pytest.mark.asyncio
+    async def test_success_on_first_attempt_no_retry(self, monkeypatch):
+        resp, calls = await self._push(monkeypatch, [{"accepted": True}])
+        assert resp == {"accepted": True} and len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_retries_three_times_then_gives_up(self, monkeypatch):
+        """§10.1：首推 + 3 次重试（退避 1/2/4s），全败放弃且**不抛**（不阻塞收尾）。"""
+        resp, calls = await self._push(monkeypatch, [Exception("x")] * 4)
+        assert resp is None and len(calls) == 4
+
+    @pytest.mark.asyncio
+    async def test_recovers_on_second_attempt(self, monkeypatch):
+        resp, calls = await self._push(monkeypatch, [Exception("boom"), {"accepted": True}])
+        assert resp == {"accepted": True} and len(calls) == 2

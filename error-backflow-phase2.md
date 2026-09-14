@@ -492,7 +492,7 @@ error run 逐 case 落 `EvalResult` 时走 `orchestrator._ensure_case_version`�
 - `finished_ts` 非法 ISO8601 → `ERR_PULL_0002`
 - `schema_version` 不匹配 → 拒单
 
-**幂等键**：`uk_verify_run(link_id, run_id)` —— 同一 `(link, run)` 重复推送 → 200 + `duplicated:true`。
+**幂等键**：`uk_verify_run(cluster_id, run_id)`（= 载荷 `trigger_signal_id` + `run_id`）—— 同一 `(簇, run)` 重复推送 → 200 + `duplicated:true`。**不是 `(link_id, run_id)`**（v1.23 幂等键改造，2026-09-14）：online 侧 `link_id` 是**推送时现算**的——link 在 pending 时等于其 cluster_id，**判出终态后退化为哨兵 `0`**，故同一 (簇, run) 在 link 生命周期两侧落在两个键上，重推不命中首推行、`duplicated` 恒 false；而哨兵 `0` 被**所有簇共用**，后到的簇会命中**别的簇**的行（真机实测：簇 3850 拿到 3849 的 run 行）。`trigger_signal_id` 不随 link 生命周期变，故改由它承担幂等锚；**本发送侧行为无变化**（仍按簇分片推送、仅记日志）。
 
 批 1 §8.3 对表输出随本稿更新；`excluded_case_ids` / 「agent 已见版本」两处只读面**不再提供**。
 

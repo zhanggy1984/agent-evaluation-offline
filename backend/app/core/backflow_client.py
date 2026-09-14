@@ -22,6 +22,8 @@ from app.core.http import build_agent_client
 
 PULL_PATH = "/api/v1/pull/payloads"
 ACK_PATH = "/api/v1/pull/ack"
+PUSH_PATH = "/api/v1/backflow/regression-results"  # 结果推送（online router prefix=/backflow，
+# 外层再挂 /api/v1——由 pull 走 /api/v1/pull/... 同型印证）
 
 # 单次拉取上限（online 侧契约 limit ≤ 100）
 PULL_LIMIT = 100
@@ -115,3 +117,26 @@ async def ack(
             raise BackflowClientError(f"ack 请求失败：{type(exc).__name__}") from exc
     if resp.status_code != 200:
         raise BackflowClientError(f"ack 返回 {resp.status_code}")
+
+
+async def push_results(body: dict) -> dict:
+    """推送一个簇的 run 结果（§10.1）。返回 online 回执
+    `{accepted, duplicated, run_record_id, links_advanced, cases_dropped}`。
+
+    **鉴权与 pull/ack 同一 secret**（§10.2「三出站端点共用、无 scope 分置」，与 online 侧
+    三端点同用 `require_evaluator` 的实现一致）⇒ 直接复用 `_headers()`。
+
+    序列化口径由调用方（`runner/error_push.assemble_payload`）负责——`run_id`/`case_id` 须
+    `str`、`trigger_signal_id` 须 `int`，本函数只透传。
+    """
+    base = _base()
+    async with _client() as client:
+        try:
+            resp = await client.post(
+                f"{base}{PUSH_PATH}", json=body, headers=_headers(), timeout=TIMEOUT
+            )
+        except httpx.HTTPError as exc:
+            raise BackflowClientError(f"结果推送请求失败：{type(exc).__name__}") from exc
+    if resp.status_code != 200:
+        raise BackflowClientError(f"结果推送返回 {resp.status_code}")
+    return resp.json()

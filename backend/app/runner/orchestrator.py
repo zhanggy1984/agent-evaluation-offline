@@ -34,6 +34,7 @@ from app.models import (
     Agent, AgentInterface, CaseVersion, EvalResult, EvalRun, SystemConfig, TestCase, TestSuite,
 )
 from app.runner.case_loader import _load_run_cases
+from app.runner.error_push import fire_push
 from app.runner.executor import RETRYABLE_ERRORS, CaseOutcome, execute_case
 from app.runner.scorer import _enabled_semantic_dims, score_run
 
@@ -811,6 +812,9 @@ class RunOrchestrator:
                         run_id, run.status, passed, failed, na)
         self._heartbeats.pop(run_id, None)
         self._cancel.pop(run_id, None)
+        # §10.1：结果推送在收尾事务 **commit 之后**发起（不在事务内），fire-and-forget、
+        # 不阻塞收尾。四种终态均推送（上面已把终态与计数落库，此处只是读取）。
+        fire_push(run_id)
 
     async def _fail_run(self, run_id: int, reason: str) -> None:
         async with SessionLocal() as db:
