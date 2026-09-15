@@ -272,7 +272,10 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
   + 真机探针 + 台账回填（3 文件）。
 - offline `dd62c19..25e9d19` —— **批 2（P0-2 / R-12）**：`assertions/ops/text.py` 空答守卫
   + 单测两条 + 存量回归探针 + 四处文档回填（**7 文件 / 235 增 9 删**）。
-- 两笔均**快进、非 force**。**此后新增提交是否已推送，一律以 `git log @{u}..HEAD` 现跑为准。**
+- offline `dee1890..8385372` —— **批 3（P1-1 / O-F.8）**：`core/backflow_client.py` 状态码
+  + `runner/error_push.py` 分流 + `tests/test_error_push.py` +6 条 + 三处台账回填
+  （**6 文件 / 183 增 16 删**）。
+- 三笔均**快进、非 force**。**此后新增提交是否已推送，一律以 `git log @{u}..HEAD` 现跑为准。**
 
 > ⚠️ **本节不写「已/未推送」的裸标记，只记「已完成的推送范围 + 指向命令」**。
 > 理由（**实证，非预防性**）：本节**前后两版都栽在同一机制上**——第 1 版写「未提交 7 文件」，
