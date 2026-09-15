@@ -137,7 +137,12 @@ def render_template(value: Any, ctx: dict) -> Any:
             try:
                 return str(_get_path(ctx, mm.group(1)))
             except KeyError:
-                return mm.group(0)  # 未解析占位原样保留（由响应侧兜底或报错）
+                # 未解析占位**静默**原样保留 —— **响应侧没有兜底**（R-27 复核：全仓占位符
+                # 校验只有配置生成期 `contracts_v2._validate_refs`（只验域合法）与运行期
+                # `check_input_wiring`（只覆盖 case.input.*）两处；error case 的断言只判
+                # 「answer 含兜底话术词」，判不到请求发了占位符）。`{case.input.*}` 由请求侧
+                # 闸门 fail-closed；其余域不可达时失败是响亮的（HTTP 4xx/非 JSON），不重复设闸。
+                return mm.group(0)
 
         return _VAR.sub(_sub, value)
     return value

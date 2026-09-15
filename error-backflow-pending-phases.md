@@ -521,8 +521,27 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 > - **订正**：`inbox.reject_code` 存的是**对外收敛码** `online_content_gap`，offline 侧码 `content_gap`
 >   只在 `reject_detail` 前缀（三码折叠设计使然）—— 出方案时我写成前者，是实现对、我错。
 > - **修复只对新载荷生效**：存量 case 4072（6b 建）**不会被回溯驳回** —— 闸门在装载路径上，不回头扫历史。
-> - **仍未验**：② 响应侧兜底（`engine.py:140` 注释自陈的「由响应侧兜底或报错」，**至今无人验过**）；
->   ④ 文件型接口（contract-check 的 `{case.input.file_path}`）。两条仍挂账。
+> - **② 响应侧兜底 —— 已复核（2026-09-16）：该自陈不成立，代码注释已订正。** 全仓对占位符的校验
+>   只有两处：`contracts_v2._validate_refs`（**配置生成期**、只验**域**是否合法 —— `input.`/`auth.`
+>   在 `:163-164` 直接 `continue`，**不看路径可达性**，且它见不到运行期的 `evidence.input`）与
+>   `check_input_wiring`（**运行期、请求侧**，只覆盖 `case.input.*`）。error case 的断言只有一条
+>   `keyword_not_contains(words)`（`pull_loop.py:217-220`），`words` = online 兜底话术词表 ——
+>   它判的是「**回答里有没有出现兜底话术**」，**判不到「请求里发出了未渲染的占位符」**。
+>   ⇒ 「兜底」能否发生取决于被测 agent 的实际兜底文本**是否恰好命中词表**：命中 = FAIL（真红）、
+>   不命中 = pass（**假绿**，6b 现场即此）；「或报错」也只有被测 agent 自回 4xx 才显形。
+>   **是不确定，不是保障**。**处置 = 只订正注释、不新增响应侧检测**：请求侧闸门已在入口
+>   fail-closed，响应侧再加一道是冗余；其余域（`auth`/`prepare`/`reset`）不可达时失败是**响亮的**
+>   （HTTP 4xx / 响应非 JSON），不属静默类。
+> - **④ 文件型接口 —— 已复核（2026-09-16）：不可在仓内判定，改登记为「待采集方契约/真实样本」观测项。**
+>   **结构面已验**：`test_prepare_step_placeholders_are_scanned`（`tests/test_pull_loop_reject.py:329-339`）
+>   即照 contract-check 真实形态所写（`request` 无 body、占位只在 `prepare[*].files`），接受/驳回两向
+>   均有断言 —— 这正是我把抽取范围从 `request.body` 扩到整个 `adapter_config` 的理由，**已覆盖**。
+>   **缺的量不在本仓**：online `backend/app` 对 `file_path` **零命中** ⇒ 文件型 input 的形态**不由平台
+>   决定、由采集上报方决定**；而 `snapshot_input`（`core/input_hash.py:44`）是
+>   `raw if isinstance(raw, str) else json.dumps(raw)` ⇒ **快照形态 = 上报方 payload 的类型**，
+>   `parse_snapshot_input` 只是原样还原。⇒ 真机复验做不出有判别力的版本：线上零真实样本，
+>   我构造的形状仍是我按模板反推的（[[synthetic-input-skips-field-extraction]]）。
+>   **处置 = 不新增动作**，待真实样本出现再观测。
 > - **⚠️ 本批复验测不出、但风险最高的一点**：线上**零真实采集样本**，正例的 `{"content": …}`
 >   **是我按 agent 模板反推的**，不是从真实采集里取的（[[synthetic-input-skips-field-extraction]]）。
 >   ⇒ 若线上真实采集存的也是裸串，**good-question 的真实回流将被本修复 100% 驳回**。这既说明修复
