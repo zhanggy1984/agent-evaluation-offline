@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_normal_case, require_role
 from app.core.case_rules import recalc_annotation_status
 from app.core.db import get_db
 from app.core.errors import ApiError, E_NOT_FOUND, E_VALIDATION
@@ -123,6 +123,7 @@ async def add_annotation(case_id: int, body: AnnotationCreate, user: User = Staf
     logger.debug("add_annotation in: case_id=%s user=%s dim=%s", case_id, user.username,
                  body.dimension_code)
     case = await _get_case(db, case_id)
+    require_normal_case(case)  # §6.5：error case 一律 403（标注同样是判定素材的改写入口）
     suite = await db.get(TestSuite, case.suite_id)
     owner_id = await _owner_of_agent(db, suite.agent_id)
     # 留出集：owner 不可标自己不可见的 held-out case

@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_role
+from app.api.deps import (
+    get_current_user,
+    require_normal_case,
+    require_normal_suite,
+    require_role,
+)
 from app.core.case_rules import check_owner_denies_golden, is_agent_owner
 from app.core.db import get_db
 from app.core.errors import ApiError, E_CONFLICT, E_NOT_FOUND, E_VALIDATION
@@ -181,6 +186,7 @@ async def update_suite(suite_id: int, body: SuiteUpdate, _: User = Staff,
 async def delete_suite(suite_id: int, _: User = Admin, db: AsyncSession = Depends(get_db)):
     """物理删 suite；其下仍有用例（含作废）则 409。"""
     suite = await _get_suite(db, suite_id)
+    require_normal_suite(suite)  # §6.5：error suite 禁人工删除（先于 409 子用例检查）
     cnt = (await db.execute(select(func.count()).where(TestCase.suite_id == suite_id))).scalar_one()
     if cnt:
         raise ApiError(E_CONFLICT, "suite 下仍有用例，请先作废/删除用例", 409)
@@ -221,6 +227,8 @@ async def create_case(suite_id: int, body: CaseCreate, _: User = Staff,
     logger.debug("create_case in: suite_id=%s body=%s", suite_id,
                  {**body.model_dump(), "input": "<redacted>"})
     suite = await _get_suite(db, suite_id)
+    # §6.5：error suite 禁人工建 case —— 连 `is_gold`/`is_held_out` 一起挡住，故不再单判这两个入参
+    require_normal_suite(suite)
     iface = await db.get(AgentInterface, body.interface_id)
     if iface is None or iface.agent_id != suite.agent_id:
         raise ApiError(E_VALIDATION, "接口不存在或不属于该 agent", 400)
@@ -278,6 +286,7 @@ async def update_case(case_id: int, body: CaseUpdate, user: User = Staff,
                  {**body.model_dump(exclude_unset=True), "input": "<redacted>",
                   "expected": "<redacted>", "assertions": "<redacted>"})
     case = await _get_case(db, case_id)
+    require_normal_case(case)  # §6.5：error case 一律 403（挡在一切改写之前）
     suite = await _get_suite(db, case.suite_id)
     agent = await db.get(Agent, suite.agent_id)
     # 留出集：owner 改自己不可见的 case → 视为不存在
@@ -318,6 +327,7 @@ async def invalidate_case(case_id: int, _: User = Staff, db: AsyncSession = Depe
     """作废（软删）：status=invalidated，保留历史，可再次启用。"""
     logger.debug("invalidate_case in: id=%s", case_id)
     case = await _get_case(db, case_id)
+    require_normal_case(case)  # §6.5：error case 一律 403
     case.status = "invalidated"
     await db.commit()
     return ok({"id": case.id})

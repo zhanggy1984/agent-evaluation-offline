@@ -20,6 +20,12 @@
 > **顶上基线指纹未改**（本批只触及此一行、未重核全表）。落地时另查出原判词的**范围偏宽**：
 > 「重试」只存在于 push 路径，`pull_loop` 两处捕获本就无立即重试 —— 详见「三、已落地」的施行记录。
 >
+> **已知过期行（2026-09-15 第四批，O-F.4）**：`O-F.4` —— 本批落地其**「§6.5 写守卫 403」子项**，
+> 并**订正原行的一处事实错误**（`pinned` 恒真）。**该行仍留「部分落地」**：规格点名的
+> 「谓词常量三件套」经评估后**显式不做**（决策与代价见「三、已落地」的施行记录），
+> 与 `O-C.3` 因同一常量项留「部分落地」的处理**同惯例**。汇总数字**未动**（本批无条目跨节移动）。
+> **顶上基线指纹未改**（本批只触及此一行、未重核全表）。
+>
 > **取证纪律（读之前必看）**：本表由三个只读取证 agent 分路核对（O-A/B/C · O-D/E1-4 ·
 > O-E5-9/F/G），**只有 O-E.3 经过二次人工回查**——但那次回查**本身只覆盖了它的一个子项**，
 > 漏掉另外三项，2026-09-15 由批 C7 开工前的复查才补齐。这说明「经过人工回查」这个标记
@@ -145,7 +151,7 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 | O-D.5 | `tests/test_backflow_client.py:37-46` MockTransport 回放 + 请求形状断言 | 入站鉴权名与规格「pull_token」不符（实为 `evaluator_service_secret`，`config.py:38`）；无 happy-path 建 case 全链单测 |
 | O-E.2 | `runner/reconcile_loop.py` 差集对账主体（批 C5，探针 18/18）| backfill 清零对账子项 —— 已判**前提不可达**（见 `error-backflow-task.md` O-E.2 处置裁定注）|
 | O-E.8 | `_error_verdict` → `run_assertions` 判定链 + 空断言不判 pass | 运行期 na 兜底源 `missing_assertion`/`assertion_shape`（grep 零命中；现靠加载即剔除替代）|
-| O-F.4 | 数据面隔离（O-E.5）+ cleanup 豁免（`pinned` 恒真）| **§6.5 写守卫 403**（`cases.py:310-311` 通用 setattr、`:321` invalidate 无守卫）；谓词常量三件套；dashboard 排除 —— **部分落地（2026-09-15，P2-1）**：`/gate` 与 `/trend` 两条聚合已排 `error_regression`；其余 5 处 held_out-only 过滤（`/compare`、`_agent_dim_series`、`/perf`、`/cost`、`/baseline`）**经真机实证「无对象」故不改**（error run 的 `agent_score`/`ttft`/`e2e`/`score_per_dimension` 恒空、`total_cost` 全 NULL ⇒ 无可污染量）。**⚠️ 判据纠正**：旧登记把后果写成「聚合含 error run 行」，实测后果是**分母做大 + 幻影 version 桶**（门禁墙上 11 张有 version 的卡 → 排除后 6 张，那 5 张**纯由 error run 撑起**，如 agent 2816 桶内 `total_case=32` 全部来自 error run）——**不是**「均值被污染」（`agent_score` 恒 NULL 不进均值）。+ ~~active-count 排除~~（**批 C7 已落地**，见「三、已落地」的 O-E.3 施行记录 —— 本行原文把它挂在这里是 2026-09-14 的旧状态） |
+| O-F.4 | 数据面隔离（O-E.5）+ cleanup 豁免（~~`pinned` 恒真~~ **⚠️ 原判词事实错误，见本行末**）| ~~**§6.5 写守卫 403**（`cases.py:310-311` 通用 setattr、`:321` invalidate 无守卫）~~ **✅ 已落地（2026-09-15 第四批，批 5）**：六个写端点全部 403，见「三、已落地」O-F.4 施行记录；**谓词常量三件套 —— 经评估显式不做（决策非漏做）**；dashboard 排除 —— **部分落地（2026-09-15，P2-1）**：`/gate` 与 `/trend` 两条聚合已排 `error_regression`；其余 5 处 held_out-only 过滤（`/compare`、`_agent_dim_series`、`/perf`、`/cost`、`/baseline`）**经真机实证「无对象」故不改**（error run 的 `agent_score`/`ttft`/`e2e`/`score_per_dimension` 恒空、`total_cost` 全 NULL ⇒ 无可污染量）。**⚠️ 判据纠正**：旧登记把后果写成「聚合含 error run 行」，实测后果是**分母做大 + 幻影 version 桶**（门禁墙上 11 张有 version 的卡 → 排除后 6 张，那 5 张**纯由 error run 撑起**，如 agent 2816 桶内 `total_case=32` 全部来自 error run）——**不是**「均值被污染」（`agent_score` 恒 NULL 不进均值）。+ ~~active-count 排除~~（**批 C7 已落地**，见「三、已落地」的 O-E.3 施行记录 —— 本行原文把它挂在这里是 2026-09-14 的旧状态）。**⚠️ 末尾补注（2026-09-15 第四批）：「cleanup 豁免（`pinned` 恒真）」是原行的事实错误** —— `pinned` 是 `models/run.py` 的真实布尔列（`default=False`），`core/cleanup_rules.py` 读的是**实际值**，豁免靠建单时显式 `pinned=True`（`runner/orchestrator.py`）+ 一条专查它的前置校验。⇒ 属**「文档错、实现对」**，本批只订正措辞、**未改 `cleanup_rules.py`**（它本就工作正常）。 |
 | O-F.5 | `config.py:38-43` 三键走 env + `main.py:155/157` 启动挂接 + 门控在 loop 内 | `seed.py` 无任何 `backflow_*` 键；启动无迁移 fail-fast 检查；无 cap_gap probe task |
 | ~~**O-F.8**~~ **✅ 已落地（2026-09-15）⇒ 移入「三、已落地」** | 静态预共享 secret + Bearer + 不进日志（`test_backflow_client.py:95-112` 钉死）| ~~**secret 缺失/错误 → fail-fast**~~ 【原判词留存】：`push_results` 对 401 也抛 `BackflowClientError`，`_push_one` 对一切异常重试 3 次 ⇒ **401 被重试**而非快速失败 |
 | O-G.2 | `tests/integration/test_integration_scanner_error_run.py` 四条（scanner 租约/硬超时两入口 + 计划数>加载数 + 「已终值行不改写」独立断言），判别力经反向对照实测；**两条回收路径均断言「未完成 case 回填 na」**（#260 后租约路径的判据才成立）。另 `tests/test_error_regression_run.py::TestFinishErrorRegression` **7 条无 DB 单测**已覆盖收尾四态 + 回填 + 外部终态不覆盖 | **收尾语义已有覆盖，缺的是「入口调用方」**：`_run_error` 的两条早退（`:379-382` 前置校验不过 → `_mark_error_skipped`；`:384-386` 接管时已取消 → **直接 return、完全不调收尾 ⇒ link 挂到 scanner 回收**）均无测试；R-22 另两条路径（orchestrator cancel / run 级超时）**未逐字复刻**其入口 —— 三者是同一件事的三个面：**被调函数已验，调它的入口未被驱动** |
@@ -154,6 +160,29 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 ## 三、已落地（19）
 
 `O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· `O-F.9`（双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；*规格自陈「登记不修」，根因未动符合预期*）· **O-E.3**（§7.5 api 配套四项，*批 C7 落地项 2/3/4 + 批 C8 落地项 1*）· **O-E.7**（独立收尾 + R-22 回填 + **scanner 短路**，*短路子项 2026-09-15 落地*）· **O-E.9**（R-12 空答 FAIL，*2026-09-15 落地；G0 前置已于当日判过*）· **O-F.8**（出站**非可重试**失败不重试，*2026-09-15 落地*）
+
+**O-F.4 施行记录（2026-09-15 第四批 / 批 5）**——落地「§6.5 写守卫 403」，同时订正原行一处事实错误、
+显式砍掉一项规格子项：
+
+- **六个写守卫点全部落地**（`api/deps.py` 两个 helper `require_normal_case` / `require_normal_suite`，
+  落点 = `cases.py` 的 `update_case` / `invalidate_case` / `create_case` / `delete_suite`、
+  `annotations.py::add_annotation`、`scaffold.py::add_case_scenes`）。守卫位置**在取到对象之后、
+  其余校验之前**。**读面一律不动**（`GET /annotations/cases/{id}`、`GET /cases/{id}/scenes` 等）。
+- **规格的 B7（禁置 golden/held_out）由 `create_case` 的守卫吞掉**：error suite 上一切人工建 case
+  已整体 403 ⇒ 再单判 `is_gold`/`is_held_out` 是**不可达代码**。**B8**（`create_suite` 禁置
+  `is_error_suite`）**不做**：`SuiteCreate`/`SuiteUpdate` 都不含该字段，Pydantic 默认忽略多余字段
+  ⇒ 功能上已不可置位，加显式守卫**无可观测差异**（是「机制不同、已满足」，不是缺口）。
+- **`create_run`/`rerun_run` 的 400 不改 403**：`solution_detail.md` 明文要求 400，改了会打红既有测试。
+- **谓词常量三件套 = 经评估显式不做**（**决策，非漏做**）。规格给常量的用途是「防 api 挡了、loader
+  没挡」，但实测缺口是 **api 层一条都没挡** —— 共享常量只能防「写法不一致」，**救不了「根本没写」**；
+  且 20+ 字面量站点横跨 `case_loader`/`orchestrator`/`scanner`/`reconcile_loop`/`dashboard`/`pull_loop`，
+  是零行为收益的纯重构、回归面却铺满整条 runner 链。**代价（承认）**：日后若有人只加了 api 守卫而漏加
+  loader 守卫，本表**没有**任何机制拦住他。
+- **订正原行事实错误**：见上表 O-F.4 行末补注（`pinned` 恒真 → 真实布尔列 + 建单时显式置位）。
+- **辅助证据**：单测 `tests/test_case_write_guards.py` 12 条（6 正向 403 + 6 反向对照）；
+  反事实对照实测（两 helper 改空实现 ⇒ **恰好 6 条红、6 条绿**，红的是正向组）；全量回归
+  **957 passed / 100 skipped**（= 批 3 基线 945/100 + 本批 12 条，自洽）；ruff 逐规则对照 HEAD
+  四个改动文件**零新增**（新建测试文件 3 条已修至 0）。
 
 **O-F.8 施行记录（2026-09-15）**——原判词只说「401 被重试 3 次」，
 落地时发现**范围比判词窄**且**判据该按类别而非按 401**：

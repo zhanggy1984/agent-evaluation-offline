@@ -90,6 +90,26 @@ async def require_owner_or_qa(agent_owner_id: int | None, user: User) -> None:
         raise ApiError(E_NO_PERMISSION, "owner 不可标/改自己 agent 的 golden_answer/assertions", 403)
 
 
+def require_normal_case(case) -> None:
+    """error case（`case_type IS NOT NULL`）是平台内部面，人工写一律 403（详设 §6.5）。
+
+    为什么必须挡在**写**路径上：error case 由 `pull_loop` 直写 ORM 产生、其 `assertions` 由激活器
+    特权补写（§6.3 backfill 语义）。人工改一次 `assertions`/`expected` 就会让判定素材与 online
+    下发的载荷脱钩，而 error run 的失败结论又会回流 online —— 污染的是**对端**的状态。
+    """
+    if case.case_type is not None:
+        raise ApiError(E_NO_PERMISSION, "error case 为内部面，不支持人工写", 403)
+
+
+def require_normal_suite(suite) -> None:
+    """error suite（`is_error_suite=True`）禁人工增/改/删（详设 §6.5）。
+
+    `suite` 允许为 None（取不到时由调用方走各自的 404 分支）——本函数只负责 error suite 这一条。
+    """
+    if suite is not None and suite.is_error_suite:
+        raise ApiError(E_NO_PERMISSION, "error suite 为内部面，不支持人工写", 403)
+
+
 def sees_evidence_basic(user: User) -> bool:
     """D3 基础证据：answer（截断 500）+ 断言明细——所有登录用户（含 viewer）可见。
     「为什么扣分」的定位信息；run_results 内联 / result_evidence 裁剪用。"""

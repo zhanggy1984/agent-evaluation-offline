@@ -41,7 +41,7 @@
 | 编号 | 对象 | 来源 | 级别 | 当时状态（2026-09-15） |
 |---|---|---|---|---|
 | **P2-1** | `api/dashboard.py` 的 `/gate` + `/trend` 排除 `error_regression` | `O-F.4`（**部分**） | B（两行谓词） | **✅ 已完成（2026-09-15）**：口径/范围已拍（D3/D4），方案见 §5、验收结果见 §5.1。**提交与推送状态以 `git status --porcelain` / `git log @{u}..HEAD` 现跑为准**（本节不写待办态，见 §7 约定 2） |
-| **P2-2** | `O-F.4` **余项**：写守卫谓词单一来源 + `cleanup` 豁免核对 + 403 全清单核对 | offline `error-backflow-task.md` O-F.4 | B | **缺口确证**：三常量 `CASE_TYPE_IS_NULL` / `IS_ERROR_SUITE_FALSE` / `TRIGGER_NOT_ERROR_REGRESSION` 在 `backend/` **grep 零命中** |
+| **P2-2** | `O-F.4` **余项**：写守卫谓词单一来源 + `cleanup` 豁免核对 + 403 全清单核对 | offline `error-backflow-task.md` O-F.4 | B | **✅ 已完成（2026-09-15）**，详见 §5.4。**范围两项被摸排推翻/砍掉**：① `cleanup` 豁免原判「`pinned` 恒真」是**事实错误**（`pinned` 是真实布尔列）⇒ 改为**订正文档**，未改代码；② **谓词常量三件套经评估显式不做**（决策非漏做，理由见 §5.4）。**提交与推送状态以 `git log @{u}..HEAD` 现跑为准**（本节不写待办态，见 §7 约定 2） |
 
 ### P3 — 登记项（**不进排期**，登记不拍板）
 
@@ -71,7 +71,7 @@
 | **批 2** | P0-2 | **存量回归 + 注入对照**（共享算子，须防误伤 manual/held_out） | G0 ✅ **→ ✅ 已完成（2026-09-15）**，详见 §5.2 |
 | **批 3** | P1-1 | **出站异常分流**（可桩化到单测层） | ✅ **已完成（2026-09-15）**，详见 §5.3 |
 | **批 4** | P1-2 | **`core/http.py` 传输层**（必须真机：双 Host 头只有实发才现形） | — |
-| **批 5** | P2-2 | **写端点 403 全清单** | — |
+| **批 5** | P2-2 | **写端点 403 全清单** | ✅ **已完成（2026-09-15）**，详见 §5.4 |
 | **批 6** | P4-1 | **镜像重建后复验** | 需重建四镜像 |
 
 > **批 3 与批 4 同属出站却拆开**：一个验「分流逻辑」，一个验「传输层实际不再带双 Host」。**验证面不同**，能证明的东西不同，不能合并。
@@ -140,7 +140,7 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 ## 5. 批 1（P2-1）方案摘要
 
 - **改动**：`backend/app/api/dashboard.py` **两处**（`gate()` 与 `trend()` 两个端点各一处 SQL where），照邻行 `held_out` 既有写法加**字面量**谓词。（**不写行号**：本节第一版写的 `:43`/`:60` 被同批的插入动作当场挪走。）
-- **不建共享常量**：`held_out` 在本文件有 7 处字面量，是既有惯例；只给 `error_regression` 建常量会造成不对称。「谓词单一来源」属 **P2-2**，不在本批。
+- **不建共享常量**：`held_out` 在本文件有 7 处字面量，是既有惯例；只给 `error_regression` 建常量会造成不对称。「谓词单一来源」属 **P2-2**，不在本批。（*2026-09-15 补注：P2-2 已做完（§5.4），但该项**经评估显式不做** —— 故此处「属 P2-2」**不等于**「后来会建常量」。*）
 - **不动 `build_gate_cards`**：`held_out` 的排除**只在 SQL 层**（`dashboard_rules.py:27-28` 只过滤 status）⇒ 与 `held_out` 同型。
 - **验收**：A 真机探针（异步直调 `gate()`/`trend()`，断言 `total_case` **等于**「同 version 下 manual run 之和」——写成**等于谁**）；B **反事实对照**（去掉谓词必红）；C 全量单测；D ruff；E 文档回填。
 - **不做**：`/perf`、`/cost`、`/compare`、`_agent_dim_series`、纯函数层、共享谓词常量、error 通道 usage 采集。
@@ -242,6 +242,48 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 其「下轮重放会不会无限撞 401」不在观测面内；③ **不证明 secret 从不泄漏** —— 第 3.9 项只做**静态核对**
 （读代码），不等于运行时取证；④ **不证明 `408/429` 该归可重试**是实测结论 —— 那是按 HTTP 语义定的，
 **无真机证据**。
+
+### 5.4 验收结果（批 5 / P2-2 / O-F.4 余项，2026-09-15）
+
+**改动**：`api/deps.py`（+`require_normal_case` / `require_normal_suite`）、`api/cases.py`（四处落点）、
+`api/annotations.py`（`add_annotation`）、`api/scaffold.py`（`add_case_scenes`）、
+`tests/test_case_write_guards.py`（新建，12 条）。
+
+| 项 | 怎么验 | 结果 |
+|---|---|---|
+| 5.1 六个写端点各一条 403 判据 | 断言 `status_code == 403` **且** `code == E_NO_PERMISSION` | ✅ 6/6 |
+| 5.2 六条反向对照（普通 case/suite） | 同端点仍走各自原有分支（200 或既有 400） | ✅ 6/6（`add_annotation` 停在「维度未注册」400、`create_case` 停在「接口不存在」400 —— **正是分流而非打死**） |
+| 5.3 反事实对照 | 两 helper 临时改空实现 | ✅ **恰好 6 红 / 6 绿**（红的**全是**正向组）⇒ 有判别力；还原后复绿、`grep COUNTERFACTUAL` 零命中 |
+| 5.4 全量回归 | `cd backend && PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q` | ✅ **957 passed / 100 skipped / 14 subtests**（批 3 基线 945/100 + 本批 12 条，自洽） |
+| 5.5 ruff 逐规则对照 HEAD | 借 online venv + online `pyproject.toml`，按规则计数比对 | ✅ 四个**改动**文件零新增（E501/F401/I001/E712 条数与 HEAD 一致）；**新建**测试文件 3 条（2 E501 + 1 I001）已修至 0 |
+| 5.6「无内部调用方」核对 | 全仓 grep 四个写函数 | ⚠️ **仅静态**：除 integration 测试（且只对普通 case）外无非测试调用方 —— **不等于运行时取证** |
+
+**范围被推翻/砍掉的两项**（本批与原登记不同的原因）：
+
+1. **`cleanup` 豁免核对 ⇒ 查出原判是事实错误，改为订正文档**。status.md 原写「cleanup 豁免
+   （`pinned` 恒真）」—— 实测 `pinned` 是 `models/run.py` 的**真实布尔列**（`default=False`），
+   `core/cleanup_rules.py` 读的是**实际值**，豁免靠建单时显式 `pinned=True`（`runner/orchestrator.py`）
+   + 一条专查它的前置校验。⇒ **「文档错、实现对」**（code-doc-gap 第四型），**未改 `cleanup_rules.py`**。
+2. **谓词常量三件套 ⇒ 经评估显式不做**（**决策，非漏做**）。规格给常量的用途是「防 api 挡了、
+   loader 没挡」，但实测缺口是 **api 层一条都没挡** —— 共享常量只能防「写法不一致」，
+   **救不了「根本没写」**；且 20+ 字面量站点横跨 `case_loader`/`orchestrator`/`scanner`/
+   `reconcile_loop`/`dashboard`/`pull_loop`，是零行为收益的纯重构、回归面却铺满整条 runner 链。
+   **代价（承认）**：今后「只加 api 守卫、漏加 loader 守卫」**没有机制拦住**。
+
+**另两项显式不做**：① **B7**（禁置 `golden`/`held_out`）**由 `create_case` 守卫吞掉** —— error suite 上
+人工建 case 已整体 403，再单判是**不可达代码**；② **B8**（`create_suite` 禁置 `is_error_suite`）——
+`SuiteCreate`/`SuiteUpdate` **不含该字段**，Pydantic 默认忽略多余字段 ⇒ 功能上已不可置位，
+加显式守卫**无可观测差异**（「机制不同、已满足」，不是缺口）。③ **B10**（`list_suites` 透出
+`is_error_suite`）—— 规格标 D-15 但**无任何消费方**，按「答不出谁用就不做」否掉，登记为已知偏离。
+
+**这批的绿不能证明什么**：① **不证明前端收到 403 后表现正确** —— 本批只验后端返回值；
+② **不证明没有内部代码依赖这些写路径** —— 只做了静态 grep（见 5.6），**不等于运行时取证**；
+③ **不证明常量重构该砍** —— 那是**决策**（基于「常量救不了没写的站点」这一论证），不是本批能验的东西；
+④ **不证明 B8 的「天然屏蔽」在 OpenAPI 契约层也无泄漏** —— 只核了 Pydantic 模型定义。
+
+> **⚠️ 判词口径差异（有意，非漏做）**：`error-backflow-status.md` 的 O-F.4 行**仍留「部分落地」**
+> （因规格点名的常量项未做，与 `O-C.3` 同惯例），**汇总数字未动**；而本节按「批 5 已完成」记。
+> 两者口径不同源于**文件职责不同**（status 表判「规格条目是否全落地」，本文件判「排期批次是否做完」）。
 
 ---
 
