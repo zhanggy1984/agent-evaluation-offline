@@ -323,6 +323,148 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 入参组合不在观测面内；③ **不证明 online 侧视角正常** —— 只验了客户端不再抛错且对端有应答，
 **未核对端日志**；④ **不证明 `pool_error` 分类**（与本批无关，属批 3 面）。
 
+### 5.6 验收结果（6b-1 / ③环 online→offline 回流真机打通，2026-09-15）
+
+**性质**：本批**无代码改动** —— 闭环代码早已落地（批 A~C8），却**从未端到端真跑过**。
+本批的全部内容是**让已实现的链路在真机上跑通一次并取证**，不含新功能。
+
+**改动**：offline 仓根 `.env` 追加 `BACKFLOW_ENABLED=true`（第 31 行，注释标明「联调期临时」；
+备份 `.env.bak-b6b1`）+ `docker compose up -d backend` 重建容器。
+**回读的是容器进程内 env**（`os.environ.get('BACKFLOW_ENABLED')` ⇒ `true`），**不是「文件已写」**
+—— 按 [[config-source-priority-shadowing]]：优先级高的空值会静默打败优先级低的实值。
+
+**前置（6b-1a）**：造 `dev.obs.error_cluster` 一行（id=3856，status=open），
+等**运行中的** `assemble_job`（60s 周期）自行组装 —— **不手工建 link**。
+
+| 环 | 判据 | 怎么验 | 结果 |
+|---|---|---|---|
+| ② | J1 组装落记录 | `dev.obs.conversion_record` 新增行 | ✅ id=3221：cluster_id=3856 / link_id=2238 / action=assemble |
+| ② | J2 建 link | `dev.obs.error_case_link` 新增行 | ✅ id=2238：payload_id=`4b1801ce-…`、offline_status=`assembled` |
+| ③ | J4 inbox 收单并 ack | `ai_evaluation.error_backflow_inbox` 新增行 | ✅ id=7：payload_id 同 J2、status=**active** / ack_status=**acked** / last_error=NULL / received_at=**12:02:38** |
+| ③ | J5 建 error case | `ai_evaluation.test_case`（`case_type='regression_error'`） | ✅ id=4072：suite_id=2593、payload_id 同 J2、status=active、created_at=12:02:38 |
+| ③ | J6 online 侧迁移 | `dev.obs.error_case_link.offline_status` | ✅ `assembled` → **`active`**（终态、不可逆）；`verify_status` 仍 `pending`（④⑤⑥环未做，**符合预期**） |
+| ③ | J3 日志无 401 | 容器日志 | ⚠️ **判据本身写错，见下** |
+
+**payload_id 三处一致**（online link / offline inbox / offline test_case）= `4b1801ce-b887-4da7-a61e-94a02cca52c2`。
+
+> **⚠️ J3 判据订正 —— 是我的判据错，不是系统没跑**：原判据写「日志有 pull 轮次且无 401」，
+> 而真机日志**除启动行外一行皆无**。回查代码：`pull_loop.py` **成功路径零日志** ——
+> 只有 `:75` 启动、`:81` 锁被其他 worker 持有（debug）、`:111` 缺 payload_id（warning）。
+> ⇒ **「日志有 pull 轮次」这条判据在实现里根本不可满足**，无论跑不跑都必判 FAIL。
+> 真证据是**产物**：inbox 行 `received_at=12:02:38` 与 pull_loop 启动**同一秒** ⇒ 先 pull 再 sleep、首轮即拉到。
+> **教训**：判据必须落在**实现里存在的观测面**上 —— 我把「应该有日志」当成了不证自明的前提，
+> 没先回查日志到底打在哪。与 [[existence-is-not-reachability]] 反向同族（那条是「有分支≠会走到」，
+> 这条是「我以为的观测面≠实现里有这个观测面」）。
+
+> **⚠️ 标记串未按承诺（如实记）**：6b-1a 造 cluster 时用 MySQL `DATE_FORMAT(..., '%Y%m%d%H%M%S')` 生成标记，
+> 其中 **`%M` 是月份名、分钟应为 `%i`** ⇒ 实得 `b6b1-e2e-2026091511September01`，不是预期的纯数字串。
+> **决定不改**：该串已进 `input_hash` 与 `first_trace_id`，而 link 2238 已是快照，改会对不上。
+
+> **⚠️ secret 明文回显事故（如实记，已报告用户）**：为确认 `.env` 里某个键是否存在，
+> 我用模式 `^BACKFLOW_ENABLED|^EVALUATOR_SERVICE_SECRET` 去 grep —— **grep 输出的是整行**，
+> 后一个模式命中的那行（`EVALUATOR_SERVICE_SECRET=<明文>`）被完整打印进会话记录。
+> **用户裁决 = A（暂不轮换）**。根因与处置另记 memory `grep-env-line-leaks-secret`
+> （`grep 匹配行` ≠ 安全；查键名只 grep 那个键名）。
+
+**顺带查得（新登记，非订正）**：
+
+- `error_backflow_inbox` 实有 **7 行**（最大 id=7），**推翻此前「0 行」的记录**；
+  最近 5 行 = 1 行 `active`（本次）+ 4 行 `rejected`（`version_drift` ×1 / `offline_cap_gap` ×2 / `content_gap` ×1）。
+- `core/config.py::_validate_secrets`（`:62-72`）**只校验 `jwt_secret` / `fernet_keys` / `db_password`**，
+  **不校验 `evaluator_service_secret`** ⇒ 该 secret 缺失时**启动不报错**，问题推迟到首次入站/出站才暴露。
+  与 `pending-phases.md` §1 的 **P3-4** 不冲突 —— 那条记的是「配置项存在」（`config.py:38`），本条记的是「校验缺失」。
+- **回流词表出现短 ASCII token `ai`**（词条 `'ai 暂时不可用'`）—— 命中 `error_payload.py` 文件头
+  已登记的误命中风险（online `multi_match` 默认 OR 语义会把单字符 token 命中库内文本）。
+  属④环判定语义，**本批只登记不修**。
+
+**这批的绿不能证明什么**：
+
+① **不证明「闭环可用」** —— 只走通 ②③ 两环；④（error run 建单与判定）、⑤（结果回传 online）、
+⑥（online 收敛）**一环未跑**，`verify_status` 仍 `pending` 就是它的显式证据；
+② **不证明关闭态无副作用** —— 本批只验了开启态跑通，`BACKFLOW_ENABLED=false` 的回归面**未复验**；
+③ **不证明并发/多 worker 行为** —— 单实例单进程，`GET_LOCK` 单飞路径**未取争用证据**
+（见 [[concurrency-test-needs-contention-proof]]）；
+④ **不证明 online 侧除 link 状态外的行为** —— 只核了 link 行状态迁移，**online 日志未核对**。
+
+---
+
+### 5.7 验收结果（6b-2/3 / ④⑤⑥ 环真机，2026-09-15）
+
+**改动**：**无代码改动**。信号 run = **eval_run 3660**（agent 2300 / suite 2161 / version
+`b6b2-20260915` / manual / **全量 22 case**），经**真 HTTP API**（`POST /api/runs` 200）发起。
+
+> **认证方式（说清）**：用服务端自己的 `create_access_token(1, 'admin')` 造 token，
+> **跳过了 `/login` 端点**。token 本身等价（同 secret、同签发函数），但「登录链路」不在本次观测面内。
+
+| 环 | 判据 | 结果 |
+|---|---|---|
+| ④ | 信号 run 终态 → **自动**建 error run | ✅ **3661**：version `b6b2-20260915` / `trigger_signal_id=**3660**` / `suite_id=2593` / `pinned=1` / `total_case=3` |
+| ④ | `case_ids` 组成 | ⚠️ `[4072, 3619, 3618]` —— 取 **error suite 下全部 runnable case**，非仅本次回流的 4072（**符合设计**；3618/3619 是 9-14 探针产物） |
+| ⑤ | 出站回传 online | ✅ `verify_run_record` **824/823/822**（run_id=3661），载荷 10 字段结构正确 |
+| ⑤ | **`trigger_signal_id` 取值** | ✅ 载荷填 **cluster_id 3856**，**非** `eval_run.trigger_signal_id`（3660）—— O-F.7 警告的「同名非同物」**实现是对的** |
+| ⑥ | online 收敛记录 | ✅ link **2238** 与**连带**的 2222（cluster 3841）/ 2221（cluster 3840）均获 `verify_run_record` |
+| ⑥ | `verify_status` 迁移 | ⚠️ **未取证**：仍 `pending`。写侧在 `backflow/claim.py:84-93`（条件 `verify_status=='pending'`、由 claim 驱动），而 cluster 3856 仍 `open`。**「设计如此」与「⑥环没走完」两种解释表象相同，本表不下结论。** |
+
+**④环触发链（6b-2a 取证，全部来自代码，非推断）**：
+
+- 信号源**两条**：**主** = `orchestrator.py:775-788`（`_finish` 末尾；`trigger_type ∈ {manual, held_out}`
+  ∧ `version` 非空；`signal_run_id` = **信号 run 自己的 id**）；**辅** = `reconcile_loop.py:109`
+  （版本差集对账 worker，**受 `backflow_enabled` 门控**）。
+- ⇒ **主路径不受 `backflow_enabled` 门控**（代码里无该判定）⇒ ④环**不依赖**该开关。
+- 门禁五道，其中**两道正是 ③ 的产物**（error suite 存在、`_runnable_error_case_count > 0`），
+  余为 version 非空、`_decide_schedule` skip 表（新 version ⇒ `latest=None` ⇒ **建**）、
+  活跃闸 `ERROR_ACTIVE_QUOTA=1`。
+
+---
+
+> **🔴 阻断性发现（本批最重要的产物）：④⑤⑥ 环的判定结果全部失真**
+>
+> **症状**：run 3661 的三个 case `pass_fail` 全 `pass`，但 **`answer` 逐字相同** ——
+> 「我没有收到具体的问题内容（当前消息为空或**未替换的占位符**）」；agent 自己的 reasoning =
+> `The user message is literally "{case.input.content}" — a placeholder that wasn't filled in.`
+>
+> **根因（两侧已取证）**：`input` 形状不匹配。
+>
+> | case | `input` 实际存的内容 | 有 `content` 键？ |
+> |---|---|---|
+> | normal（suite 2161，人工填） | `{"content": "好的，谢谢你的解答！"}` | ✅ |
+> | error 3618/3619（9-14 探针建） | `"帮我看看这份合同的付款条款有没有风险？ #…"`（纯字符串） | ❌ |
+> | error 4072（本次） | `{"question": "b6b1 回流贯通联调探针 …"}` | ❌ |
+>
+> online `converter/envelope.py:29-41::parse_snapshot_input` 的契约是**忠实还原被测 agent 当时的
+> 原始 input**（dict/list 原样嵌、明文 str 原样嵌）；offline `runner/pull_loop.py:198-199` 把它
+> **原样**写入 `test_case.input` + `input_type='text'`。而执行侧按 `text` 只认 `{"content": …}`
+> （模板 `{case.input.content}`），取不到 ⇒ **原样发出模板串**。
+>
+> **定性 = 规格缺口，不是实现漏做**：`solution_detail.md:359` 明文要求 `input` = `evidence.input`
+> （「**纯装载不改写**」），`:276` 还要求「不得用普通 case input schema 驳回 error case」——
+> 实现**忠实执行了规格**。规格假设了 `evidence.input` 的形状 = 平台 case 期望的形状，而前者由
+> **被测 agent 接口**决定、后者是**平台自己的** ⇒ **两者之间缺一层映射，规格未定义**。
+>
+> **⚠️ 本定性的强度限定（不许读成「已取证」）**：我手上**没有任何一个真实线上采集的
+> `input_snapshot` 样本** —— 三个 case 的 `input`（3618/3619/4072）**全部是人造的**。
+> 严格地说，已证的是「**判定链在人造 input 下失效**」，**未证**「真实采集形状一定不匹配」。
+> 支持「确有问题」的**独立证据是契约层的**：`parse_snapshot_input` 的 docstring 明说形状
+> **随被测 agent 变**（「忠实还原 sample 形态」），而 `test_case.input` 的形状**平台固定** ——
+> 即便某个真实样本恰好匹配，那也是「**碰巧对上**」而非「契约保证」。
+> **⇒ 修法必须先取真实样本，不得据本表拍脑袋定映射规则。**
+>
+> **影响面**：error run 的判定语义（「是否仍复现错误话术」）**从未真正生效** —— agent 收到占位符、
+> 答非所问 ⇒ `keyword_not_contains` 必 PASS ⇒ **假绿**，且**已被写入 online**（3 条 `case_pass=1`）。
+> 3618/3619 同样错 ⇒ **自特性落地起即存在**。登记 = **R-27**（`task.md` 横切表）。
+>
+> **为什么此前从未暴露**：④环**从未真机跑过**。这正是 `status.md`「全表暂停」所立论点的
+> ——「推断出来的契约无法证明是对的」——**第一个实证**。
+
+**这批的绿不能证明什么**：
+
+① **不证明判定正确** —— 恰恰相反，本批**证伪**了判定有效性（见上）；
+② **不证明 ⑤ 环载荷取值全对** —— 只核了 `trigger_signal_id` 与结构；两水位字段
+（`agent_latest_version`=1.16.0 / `prev_terminal_version`=0.3.0）**未独立核对口径**；
+③ **不证明 ⑥ 环完成** —— `verify_status` 未迁移，两种解释未区分；
+④ **不证明幂等/重放** —— 单次跑，未做第二遍（[[probe-repeatability-and-unique-input]]）；
+⑤ **不证明真实载荷可用** —— cluster 3856 是手工造的，真实线上 `input_snapshot` 形状未见。
+
 ---
 
 ## 6. 现场状态（提交/推送 · 残留 · 待裁）

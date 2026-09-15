@@ -62,6 +62,32 @@
 - **O-D.4 ack 发送/对账 + R-8 节流 + requeue/manual_invalidate 竞态**：`send_ack`（active/invalidated，前置矩阵）；404 ERR_PULL_0003 → blocked + 人工核查（与 400 分开）；400 ERR_CLUSTER_0003 解析 offline_status/invalidate_reason → manual_invalidate 走 §5.9 竞态对账 / 否则有界重试落 blocked；对账扫描重放 NEEDS_ACK（幂等 200 即 acked）；**R-8 cap_gap 探测态节流**：rejected+offline_cap_gap 已 acked 行每小时本地重跑映射——补齐 → 建 case + 单次 ack active（契约 R2 `invalidated(offline_cap_gap)→active`）/仍缺 → 静默等轮，**不复位 ack_status、不重发 invalidated**（复位重处理仅限 ack_status ∈ {none,pending} 或收到 requeue/内容刷新）；online_content_gap 等 requeue 重拉覆盖；manual_invalidate 本地作废已建 case + inbox 落 rejected+manual_invalidate+acked（详设 §5.7/§5.8/§5.9）。**验证目标**：对账幂等不重发；R-8 探测态不风暴（节流计数断言，低频每小时）；requeue 后重扫自愈；manual_invalidate 本地作废。
 - **O-D.5 fake-online stub 基建（环 1，`backend/tests/`）**：fixture 回放 online pull/ack 响应 + **入站鉴权（pull_token）形状**（出站静态预共享 secret 形状归环 2 O-F.7/O-F.8）（R1~R3 + R-4~R-24 修订契约 shape），供 O-D.2~O-D.4 驱动（详设 §12.5 验证层级 + 批 1 §12.2 环 1：fixture + fake-online，无真实 online，C3 只入测试基建）。**验证目标**：stub 驱动收单/建 case/ack 全链路仓内全绿。
 
+  - **✅ 2026-09-15 真机施行记录（6b-1，③环首次端到端真跑）**：本批**无代码改动** —— O-D.1~O-D.4
+    早已落地，但**从未有真实数据端到端走过**（这正是 `error-backflow-status.md`「全表暂停」的立论依据）。
+    6b-1 让它真跑一次：造 1 行 `error_cluster`(open) → **运行中的** `assemble_job` 自行组装出
+    `error_case_link`(assembled) → 开 `BACKFLOW_ENABLED=true` 重建容器 → **运行中的** `pull_loop`
+    首轮即拉取、建 error case、ack，link 迁移 `assembled → active`（终态、不可逆）。
+    **四环产物 id 闭环**：cluster **3856** → link **2238** → inbox **7** → test_case **4072**，
+    `payload_id` 三处一致 = `4b1801ce-b887-4da7-a61e-94a02cca52c2`。
+    **完整验收表 / J3 判据订正 / 事故记录见 `error-backflow-pending-phases.md` §5.6。**
+    **本批取证边界**：只走通 ②③ 两环；④（error run 建单与判定）、⑤（结果回传 online）、
+    ⑥（online 收敛）**一环未跑**，online 侧 `verify_status` 仍 `pending` 即其显式证据。
+
+  - **✅ 2026-09-15 真机施行记录（6b-2/3，④⑤⑥ 环）**：**无代码改动**。信号 run = eval_run **3660**
+    （经**真 HTTP API** `POST /api/runs` 发起，agent 2300 / 全量 22 case），终态后**自动**建出 error run
+    **3661**（`trigger_signal_id=3660` / `suite_id=2593` / `case_ids=[4072,3619,3618]` / `pinned=1`）；
+    ⑤环出站回传落 online `verify_run_record` **824/823/822**（载荷 `trigger_signal_id` 填 **cluster_id
+    3856** 而非 `eval_run.trigger_signal_id` 3660 —— O-F.7 警告的「同名非同物」**实现是对的**）；
+    ⑥环 link **2238** 及**连带**的 2222/2221 均获记录。
+    **④环触发链取证（6b-2a）**：主轴 = `orchestrator.py:775-788`（`_finish` 末尾，`manual/held_out`
+    + version 非空，`signal_run_id` = 信号 run 自己的 id），**不受 `backflow_enabled` 门控**；
+    辅轴 = `reconcile_loop.py:109`（受门控）。
+    **⚠️ 但判定结果全部失真** —— `input` 装载缺「原始形状 → `{"content": …}`」映射（**R-27**）：
+    三个 case 的 `answer` **逐字相同** = 被测 agent 收到未渲染的模板串，`keyword_not_contains` 必 PASS
+    ⇒ **假绿**，且已写入 online。
+    **⇒ 本批验的是「管道通不通」，不是「判定对不对」**；完整验收表 + 根因两侧取证 +
+    「这批的绿不能证明什么」见 `error-backflow-pending-phases.md` **§5.7**。
+
 **阶段出口（G3）**：pull_loop 打通 → error suite/case + ack 闭环 + 详设 §12.6 X-1~X-7（环 1 集成异常/边界用例）全绿（详设 §1.3 G3）。
 
 ## 阶段 E｜G4：M4/M5/M6 逻辑层
@@ -202,6 +228,7 @@
 | R-22 | 收尾回填 na 统一 `scheduler_unexecuted` 单测护栏 | CI 护栏 | O-E.7 + O-G.2 | G4+G6 | 收尾逻辑 = 7 条无 DB 单测 + 4 条真库集成用例；~~⚠️ **缺口在入口**（`_run_error` 两条早退无测试）~~ **⚠️ 该判已失效（2026-09-15）**：`5b01de5` 已补这两条早退 + `TestMarkErrorSkipped`，**入口缺口已闭合**（依据见 O-G.2 条目下的 2026-09-15 补） |
 | R-25 | 出站载荷契约护栏（10 字段与取值域逐字符对齐 online `api/backflow.py` + 两水位字段取数口径不得按 trigger_type 收窄） | CI 护栏（**跨仓契约锁**） | O-G.4 | G6 | 字段名/类型/必填性/取值域断言；online 侧字段变更即红 |
 | R-26 | 出站基址「容器名」不可达（`core/http.py` 双 Host 头 ⇒ `LocalProtocolError`；**根因在共享客户端，影响面 = 一切容器名出站**） | offline core（**A 级**） | O-F.9 | **✅ 已修（2026-09-15 批 4）**：根因已修 + 绕过已撤除 | 护栏**已反转**为 `test_base_host_not_special_cased`（再塞白名单即红）；Host 去重判据在 `tests/test_security.py`（3 条）；**真机三判据**已取（解析 172.23.0.4 / `pull_payloads()` 200 / 旧形状 `LocalProtocolError`）；反事实恰好 2 红 |
+| **R-27** | **error case 的 `input` 装载缺「原始 input 形状 → 平台 case `{"content": …}` 形状」映射** ⇒ 模板 `{case.input.content}` 渲染取空、**原样发出模板字面量**，被测 agent 收到占位符、答非所问 ⇒ `keyword_not_contains` **必 PASS** ⇒ **假绿**（且已写入 online）。`solution_detail.md:359` 要求「**纯装载不改写**」⇒ **实现忠实执行了规格**，缺口在**规格未定义这层映射**（`evidence.input` = 被测 agent 的原始 input，形状由被测接口决定；`test_case.input` 形状是平台自己的，normal case 由人工按此填）。**实测**（2026-09-15 6b）：run 3661 三个 case 全 `pass` 且 `answer` **逐字相同**；3618/3619（9-14 探针建）**同样错** ⇒ **自特性落地起即存在**。 | offline 装载（**规格缺口**，非实现漏做） | O-D.3（`pull_loop.py:198-199`） | — | **待定** —— 需先定映射规则，且需先见真实线上 `input_snapshot` 形状；完整现场见 `error-backflow-pending-phases.md` §5.7 |
 
 ## 不做清单（归属明确，勿误入本 task 范围）
 
