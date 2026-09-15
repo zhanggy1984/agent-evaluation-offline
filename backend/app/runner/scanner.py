@@ -3,7 +3,8 @@
 - 心跳租约超时：pending/running 态 lease_until 过期 → 标 timeout（进程崩溃/假死/未接管的 run 兜底）
 - hard_deadline：running 态超过硬超时 → 标 timeout（不随心跳续期，兜底死循环/无限流式）
 - 回收时同步置 orchestrator 取消标志，防止已标 timeout 的 run 仍在执行用例
-- 回收后调 score_run_salvage：timeout/scoring_failed 的 run 也出分（7.5a，不丢已采集数据）
+- 回收后收尾分流（`_salvage_reaped_run`）：普通 run 调 score_run_salvage 出分（7.5a，不丢已采集
+  数据）；**error 回归 run 短路 salvage**、改走 orchestrator 的 error 收尾（§6.6，不产分）
 - ④（7.5e）：scoring 无活跃 judge 任务 → score_run 兜底收敛（worker 无任务早退不触发的最终评分）
 
 仅回收 pending/running：scoring 是「采集完成待评分」的终态，_finish 后心跳已停止（lease 不再刷新），
@@ -33,11 +34,32 @@ async def _now() -> datetime:
     return datetime.utcnow()
 
 
+async def _salvage_reaped_run(run_id: int, trigger_type: str | None) -> None:
+    """被回收 run 的收尾分流（7.5a）：error 回归 run **短路** salvage。
+
+    error run 不得走 salvage —— 它按普通 run 语义重算：改写已终值行的 `pass_fail`、
+    把未完成 case 回填成 `pass_fail='error'`（`scorer.py`）、落 `agent_score`。而 error run
+    的取值域是 {pass, fail, na}、**绝不落 'error'**（§3.3），且不得产分（§6.6）。
+
+    改为复用 orchestrator 的 error 收尾：run 已是被外部先置的 timeout 态 ⇒ 命中其
+    `external_terminal` 分支（只做对账、不覆盖终态），回填 na + `scheduler_unexecuted`、
+    置 `agent_score=None`/`error_case=0`，尾部 `fire_push` 顺带消解对端 link 静默挂死。
+
+    两处调用点（租约/硬超时、评分超时）共用本函数：规格要求加**同一个**守卫，
+    内联两遍等于日后改一处必漏一处。
+    """
+    if trigger_type == "error_regression":
+        await orchestrator._finish_error_regression(run_id)
+    else:
+        await score_run_salvage(run_id)
+
+
 async def _reap_one_pass() -> int:
     """一轮回收：返回标 timeout 的 run 数。"""
     now = await _now()
-    reaped: list[int] = []
-    scoring_failed: list[tuple[int, int]] = []  # (run_id, scoring_timeout)
+    reaped: list[tuple[int, str | None]] = []   # (run_id, trigger_type)
+    # (run_id, scoring_timeout, trigger_type)
+    scoring_failed: list[tuple[int, int, str | None]] = []
     async with SessionLocal() as db:
         # ① 心跳租约超时（pending/running：pending 未接管、running 崩溃/假死兜底；
         #    scoring 是终态，心跳已停，不参与租约回收）
@@ -63,7 +85,7 @@ async def _reap_one_pass() -> int:
                        EvalRun.status.in_(("pending", "running")))
                 .values(status="timeout", finished_at=now))
             if result.rowcount == 1:
-                reaped.append(run.id)
+                reaped.append((run.id, run.trigger_type))
         # ③ scoring 超时（scoring 是「采集完成待评分」终态，评分应在时限内完成；
         #    超时 = scorer 崩溃/未接管/卡死 → 标 scoring_failed，保留采集数据，不误标执行失败）
         #    7.5d：存在活跃 judge 任务（pending/processing）→ 慢 judge，不误杀；
@@ -89,12 +111,12 @@ async def _reap_one_pass() -> int:
                     .where(EvalRun.id == run.id, EvalRun.status == "scoring")
                     .values(status="scoring_failed", finished_at=now))
                 if result.rowcount == 1:
-                    scoring_failed.append((run.id, limit))
+                    scoring_failed.append((run.id, limit, run.trigger_type))
         # ④ scoring 无活跃 judge 任务 → score_run 兜底收敛
         #   worker _drain_once 在无任务可认领时早退不触发最终评分（worker.py）；此处兜底，
         #   防 run 永久卡 scoring。score_run 幂等（非 scoring 直接返回），安全。
         scoring_stuck: list[int] = []
-        failed_ids = {rid for rid, _ in scoring_failed}  # ③ 已标 scoring_failed 的跳过
+        failed_ids = {rid for rid, _, _ in scoring_failed}  # ③ 已标 scoring_failed 的跳过
         for run in scoring_rows:
             if run.id in failed_ids:
                 continue
@@ -106,13 +128,13 @@ async def _reap_one_pass() -> int:
                 scoring_stuck.append(run.id)
         if reaped or scoring_failed:
             await db.commit()
-    for run_id in reaped:
+    for run_id, trigger_type in reaped:
         orchestrator.cancel_run(run_id)  # 停掉还在跑的用例（尽力而为）
         logger.warning("scanner 回收 run %s → timeout（租约/硬超时过期）", run_id)
-        await score_run_salvage(run_id)  # 7.5a：超时 run 也出分（不丢已采集数据）
-    for run_id, limit in scoring_failed:
+        await _salvage_reaped_run(run_id, trigger_type)  # 7.5a：超时 run 也出分（error 侧短路）
+    for run_id, limit, trigger_type in scoring_failed:
         logger.warning("scanner 回收 run %s → scoring_failed（评分超时 %ss）", run_id, limit)
-        await score_run_salvage(run_id)
+        await _salvage_reaped_run(run_id, trigger_type)
     for run_id in scoring_stuck:
         logger.info("scanner 兜底：run %s scoring 无活跃 judge 任务 → score_run 收敛", run_id)
         await score_run(run_id)
