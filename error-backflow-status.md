@@ -42,6 +42,12 @@
 **35 条 = 已落地 17 / 部分落地 12 / 未落地 4 / 无法判定 2**，另 **前提不可达 1**（O-E.2 的
 backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不另计条目，五项相加为 36 是重复计数）
 
+> ⚠️ **本汇总与其下四节表格对不上账（2026-09-15 发现，**先于本次核对存在**，未擅自平账）**：
+> 逐条枚举四节实际行数 = 4 + 11 + 16 + 2 = **33**，而汇总写 35；且「部分落地」「已落地」
+> 两节的表头各自也比表内行数多 1（12 vs 11、17 vs 16）。全文出现的编号共 34 个，多出的那个是
+> `O-A.1`（R-20 pre-scan，判在「结构性问题 1」而不在四节内）。
+> **平账需先查清是哪 2 条未落进表格，本轮不做** —— 本次核对未改动任何条目归属。
+
 > 2026-09-15 批 C7 后（**当时状态**）：`O-E.3` 由「未落地」移入「部分落地」（§7.5 项 2/3/4 已落地，
 > 项 1 **当时**未落地 —— 同日批 C8 已补上，见下行）。
 > 2026-09-15 批 C8 后：`O-E.3` 由「部分落地」移入「已落地」（项 1 落地，**手段有意偏离规格字面**，
@@ -52,7 +58,18 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 > 2026-09-15（#260 尾项）后：`O-G.2` 缺口**再收窄一处** —— 曾登记的「`total_case=0` 场景下 na
 > 回填无断言」随该缺口修复而消失（用例② 改为断言回填），**run 级超时路径仍无测试**，状态仍为
 > 「部分落地」。
+> 2026-09-15（orchestrator 收尾批，**该批已撤除，见下**）：无条目状态变更。
 > 其余 32 条**状态未变**，判词仍以 2026-09-14 / `7691f72` 那次核对为准。
+>
+> ❌ **已撤除的工作（留痕，勿重复）**：曾据「`if not external_terminal:` 整块在 pytest 套件里
+> **零覆盖**」立项，新增 `tests/integration/test_integration_error_finish.py`（5 条真库用例）。
+> **该前提为假** —— 立项时只扫了 `tests/integration/`，未扫单测目录；实际
+> `tests/test_error_regression_run.py::TestFinishErrorRegression` 已有 **7 条无 DB 单测**覆盖同一批
+> 语义（completed / ≥1 na→partial_failed / cancelled 压过 na / 空集→cancelled / error_case 与
+> agent_score / 外部终态不覆盖 / 回填 na+scheduler_unexecuted）。新文件经验证后**整体撤除**
+> （不是因为它错，而是它只是把**单测级**覆盖换成**真库级**，答不上「不做会出什么具体故障」）。
+> **教训**（与「N/N 全绿只证明我写的断言成立」同族）：「某分支无覆盖」是可证伪的断言，
+> 下结论前必须先定死**扫过的测试面**，否则它会被当成立项理由。
 >
 > ✅ **同批暴露的独立缺口（不在本表 35 条内）已于 2026-09-15 修复（#260）**：`run.total_case`
 > 原只在 pending→running 的接管 UPDATE 里被赋值、**建单处不写** ⇒ 从未被接管的 pending error run
@@ -86,7 +103,7 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 | O-F.4 | 数据面隔离（O-E.5）+ cleanup 豁免（`pinned` 恒真）| **§6.5 写守卫 403**（`cases.py:310-311` 通用 setattr、`:321` invalidate 无守卫）；谓词常量三件套；dashboard 排除（`api/dashboard.py:43/60/85-87` 只排 held_out）+ ~~active-count 排除~~（**批 C7 已落地**，见「三、已落地」的 O-E.3 施行记录 —— 本行原文把它挂在这里是 2026-09-14 的旧状态） |
 | O-F.5 | `config.py:38-43` 三键走 env + `main.py:155/157` 启动挂接 + 门控在 loop 内 | `seed.py` 无任何 `backflow_*` 键；启动无迁移 fail-fast 检查；无 cap_gap probe task |
 | O-F.8 | 静态预共享 secret + Bearer + 不进日志（`test_backflow_client.py:95-112` 钉死）| **secret 缺失/错误 → fail-fast**：`push_results` 对 401 也抛 `BackflowClientError`，`_push_one` 对一切异常重试 3 次 ⇒ **401 被重试**而非快速失败 |
-| O-G.2 | `tests/integration/test_integration_scanner_error_run.py` 三条（scanner 租约/硬超时两入口 + 「已终值行不改写」独立断言），判别力经反向对照实测；**两条回收路径均断言「未完成 case 回填 na」**（#260 后租约路径的判据才成立）| **run 级超时路径**仍无测试（本批只覆盖 scanner 侧；该路径不属 O-E.7 短路范围）|
+| O-G.2 | `tests/integration/test_integration_scanner_error_run.py` 四条（scanner 租约/硬超时两入口 + 计划数>加载数 + 「已终值行不改写」独立断言），判别力经反向对照实测；**两条回收路径均断言「未完成 case 回填 na」**（#260 后租约路径的判据才成立）。另 `tests/test_error_regression_run.py::TestFinishErrorRegression` **7 条无 DB 单测**已覆盖收尾四态 + 回填 + 外部终态不覆盖 | **收尾语义已有覆盖，缺的是「入口调用方」**：`_run_error` 的两条早退（`:379-382` 前置校验不过 → `_mark_error_skipped`；`:384-386` 接管时已取消 → **直接 return、完全不调收尾 ⇒ link 挂到 scanner 回收**）均无测试；R-22 另两条路径（orchestrator cancel / run 级超时）**未逐字复刻**其入口 —— 三者是同一件事的三个面：**被调函数已验，调它的入口未被驱动** |
 | O-G.4 | 载荷序列化方向 + `schema_version` + self_check + 两水位口径 | `run_status` 四值 Literal、`cases[].pass_fail` 三值、字段长度上限 64/48、10 字段必填性枚举；「两水位不得按 trigger_type 收窄」的显式钉死 |
 
 ## 三、已落地（17）

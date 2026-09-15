@@ -108,6 +108,22 @@
 
 - **O-G.1 R-19 error_codes 一致性单测（护栏）**：`runner/error_codes.py` 字面量 + 分类表（§3.1 error_type 权威字面量域）**必须逐字符等于** executor.py 常量全集（详设 §2.4：executor 错误常量 L22-31 + `RETRYABLE_ERRORS` L38）；na 值域 ⊆ phase2 §6.4 na 分类矩阵值；单测钉死任一 key 漂移（拼写/长短名/大小写）→ 测试红（防 executor 加常量漏分类 → 未知 error_type 默认从严环境级 → 假 unclean_run 风暴复发）（详设 §3.1/§9.6 + 批 2 §6.4 R-19）。**验证目标**：§12.3 单测并入 CI，常量增改即红。
 - **O-G.2 R-22 收尾回填 error_type 单测护栏**：scanner 回收 / orchestrator cancel / run 级超时收尾三路径回填 `scheduler_unexecuted` 非空 + **已终值行不改写** + 回填只落实跑集无结果 case 断言（详设 §3.4 + §12.4 R-22）。**验证目标**：§12.4 单测并入 CI（复用 O-E.7 断言，抽为独立护栏文件）。
+  - ✅ **2026-09-15 落地**：`tests/integration/test_integration_scanner_error_run.py` 4 条
+    （scanner 租约/硬超时两入口 + 计划数>加载数 + 已终值行不改写），真库、判别力经反向对照实测。
+  - ✅ **收尾语义本身已有覆盖**：`tests/test_error_regression_run.py::TestFinishErrorRegression`
+    有 **7 条无 DB 单测**钉死 `external_terminal=False` 整块（completed / ≥1 na→partial_failed /
+    cancelled 压过 na / 空集→cancelled / `error_case` 与 `agent_score` / 外部终态不覆盖 /
+    回填 na + `scheduler_unexecuted`）。
+  - ❌ **缺口 = 「入口调用方」未被驱动，不是收尾逻辑**：`_run_error` 的两条早退均无测试 ——
+    `:379-382` 前置校验不过 → `_mark_error_skipped`；`:384-386` 接管时已取消 → **直接 return、
+    完全不调收尾**（run 停原状态、`fire_push` 不发 ⇒ link 挂到 scanner 回收）。
+    R-22 另两条路径（orchestrator cancel / run 级超时）亦属同一形态：**被调函数已验、调它的入口未验**。
+  - ⚠️ **已撤除的工作（留痕，勿重复立项）**：2026-09-15 曾据「`if not external_terminal:` 整块
+    零覆盖」新增 `tests/integration/test_integration_error_finish.py`（5 条真库用例，判别力对照
+    4 条变异各只打红一条，实测通过）。**该前提为假** —— 立项时只扫 `tests/integration/`、
+    未扫单测目录。该文件经验证后**整体撤除**（非因有错，而是它只把单测级覆盖换成真库级，
+    答不上「不做会出什么具体故障」）。**教训：「某分支无覆盖」是可证伪断言，下结论前必须先定死
+    扫过的测试面。**
 - **O-G.3 §12.1 测试矩阵全绿核对**：详设 §12.1 测试矩阵逐条通过（#1-17 + KeyedLimiter #23 + R-8/R-12 用例 §12.2 等行）登记到集成报告（详设 §12.1/§12.2）。**验证目标**：矩阵全绿 = G6 出口。
 - **O-G.4 R-25 出站载荷契约护栏（护栏）**：钉死推送载荷与 online 接收侧**逐字段一致** —— `schema_version`（必须 `'1.0'`）/ `run_status` Literal 四值（completed|partial_failed|timeout|cancelled）/ `cases[].pass_fail` 三值（pass|fail|na）/ 10 个字段名与必填性（**`prev_terminal_version` 必填但值可 null**）/ 字段长度上限（64/48）；**并锁两水位字段的取数口径** = agent 级**全部**终态 run（含 manual/held_out），**不得按 `trigger_type='error_regression'` 收窄**（误收窄 → 与 online「缺行中断」判据系统性错位 → 假中断）。**为什么必须常驻护栏**：v1.23 反转后 **offline 是发送方** —— online 增删改字段时 offline 不报错，只会**静默拒单或漏判**；与 R-19（executor 常量逐字符对齐）同类，但**跨仓、更脆、无编译期保护**。**验证目标**：字段名/类型/必填性/取值域逐条断言；online 侧字段增删改 → 本护栏红（字段清单以 online `api/backflow.py` 为唯一事实源，其变更须同步改本护栏）。
 
@@ -127,7 +143,7 @@
 | R-12 | text.py 空答 fail 修补 | offline code（G0 门禁先行） | O-A.1 → O-E.9 | G0→G4 | 空答 FAIL 单测 + 白名单豁免回归；§12.2 |
 | R-19 | error_type 字面量一致性单测护栏 | CI 护栏 | O-G.1 | G6 | §12.3 单测并入 CI，常量增改即红 |
 | R-20 | pre-scan 报告门禁（三问三答 + 处置登记） | 实施门禁（owner = offline 实施） | O-A.1 | G0 | 报告产出 = G0 出口 |
-| R-22 | 收尾回填 na 统一 `scheduler_unexecuted` 单测护栏 | CI 护栏 | O-E.7 + O-G.2 | G4+G6 | §12.4 三路径回填非空断言并入 CI |
+| R-22 | 收尾回填 na 统一 `scheduler_unexecuted` 单测护栏 | CI 护栏 | O-E.7 + O-G.2 | G4+G6 | 收尾逻辑 = 7 条无 DB 单测 + 4 条真库集成用例；⚠️ **缺口在入口**（`_run_error` 两条早退无测试），**非收尾逻辑** |
 | R-25 | 出站载荷契约护栏（10 字段与取值域逐字符对齐 online `api/backflow.py` + 两水位字段取数口径不得按 trigger_type 收窄） | CI 护栏（**跨仓契约锁**） | O-G.4 | G6 | 字段名/类型/必填性/取值域断言；online 侧字段变更即红 |
 | R-26 | 出站基址「容器名」不可达（`core/http.py` 双 Host 头 ⇒ `LocalProtocolError`；**根因在共享客户端，影响面 = 一切容器名出站**） | offline core（**A 级，本批只绕过不修**） | O-F.9 | 待议（另立批次） | 绕过护栏 `test_base_host_passed_to_allowlist` 已入单测即红；真机连通由批 B 端到端验收承担 |
 
