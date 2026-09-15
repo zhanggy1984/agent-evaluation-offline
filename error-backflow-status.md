@@ -7,8 +7,9 @@
 > **基线指纹**：核对于 **2026-09-14**，代码基线 = `dev` 的 `7691f72`（批 C6）。
 > 本表是**当时的**快照，此后任何一批落地都可能使某些行过期 —— 引用前先看指纹。
 >
-> **已知过期行（2026-09-15 订正）**：`O-E.3` —— 原文只列了 §7.5 **四项中的一项**，且批 C7
-> （`705e6a6`）已落地其中三项。以「二、部分落地」中的订正行为准。
+> **已知过期行（2026-09-15 订正，当日即结清）**：`O-E.3` —— 原文只列了 §7.5 **四项中的一项**，
+> 且批 C7（`705e6a6`）已落地其中三项、批 C8 落地第四项。该行现已移入「三、已落地」，
+> 本条留存仅为记录这次漏判。
 >
 > **取证纪律（读之前必看）**：本表由三个只读取证 agent 分路核对（O-A/B/C · O-D/E1-4 ·
 > O-E5-9/F/G），**只有 O-E.3 经过二次人工回查**——但那次回查**本身只覆盖了它的一个子项**，
@@ -26,10 +27,13 @@
 
 ## 汇总
 
-**35 条 = 已落地 15 / 部分落地 14 / 未落地 4 / 无法判定 2**，另 **前提不可达 1**（O-E.2 的
+**35 条 = 已落地 16 / 部分落地 13 / 未落地 4 / 无法判定 2**，另 **前提不可达 1**（O-E.2 的
 backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不另计条目，五项相加为 36 是重复计数）
 
-> 2026-09-15 批 C7 后：`O-E.3` 由「未落地」移入「部分落地」（§7.5 项 2/3/4 已落地，项 1 未落地）。
+> 2026-09-15 批 C7 后（**当时状态**）：`O-E.3` 由「未落地」移入「部分落地」（§7.5 项 2/3/4 已落地，
+> 项 1 **当时**未落地 —— 同日批 C8 已补上，见下行）。
+> 2026-09-15 批 C8 后：`O-E.3` 由「部分落地」移入「已落地」（项 1 落地，**手段有意偏离规格字面**，
+> 见「三、已落地」中该行的说明）。
 > 其余 34 条**状态未变**，判词仍以 2026-09-14 / `7691f72` 那次核对为准。
 
 ---
@@ -43,7 +47,7 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 | **O-G.1** | 无 `error_codes.py` 分类表，无 R-19 对齐单测 | `runner/executor.py:22-31` 有 `ERROR_*` 常量；全仓 grep `error_codes` 零命中 | 新增 `error_type` **漏分类不会红** —— 护栏缺失（不是功能缺失）|
 | **O-D.2** | per-agent 拉取游标从不传 | `runner/pull_loop.py:94`（调用不传游标）；`core/backflow_client.py:66-72` 有 `since_ts/next_token` 形参但 docstring 自陈「游标持久化属调用方职责」；`core/config.py` 无相关键 | 每轮重复拉全量。正确性由 inbox 幂等兜住，代价在**量级** ⇒ **容量型**，不是故障 |
 
-## 二、部分落地（14，缺的都是规格点名的子项）
+## 二、部分落地（13，缺的都是规格点名的子项）
 
 | 条 | 已落地部分 | 缺什么 |
 |---|---|---|
@@ -51,19 +55,33 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 | O-D.1 | `pull_loop.py:68/:79` GET_LOCK 单飞 + payload_id 幂等 + 一步炸不退出 | 规格「五步单轮」的 ①ack 对账 ②inbox 卡住重扫 ④低频自愈（**只落了 ③增量拉取**）|
 | O-D.4 | `pull_loop.py:163-179/:248-264` ack 双态 + pending 幂等重放 | R-8 cap_gap 每小时探测节流；`backflow_client.ack` 的 404/400 错误码分支（非 200 一律抛，无 blocked/manual_invalidate 分支）|
 | O-D.5 | `tests/test_backflow_client.py:37-46` MockTransport 回放 + 请求形状断言 | 入站鉴权名与规格「pull_token」不符（实为 `evaluator_service_secret`，`config.py:38`）；无 happy-path 建 case 全链单测 |
-| **O-E.3**（api 配套，§7.5 四项）| **项 2/3/4**（批 C7，`143e5fe` + 探针 `705e6a6` 13/13）：活跃计数排除 error run（`runs.py:265`/`:403` 两处 `.where(EvalRun.trigger_type != _ERROR_TRIGGER)`）、error suite 拒建 manual run、rerun 拒 error_regression（`runs.py:378`）| **项 1**：`version` 的 `_SEMVER` 强校验（`runs.py:42` 定义、`:236` 校验）未改为域校验。⚠️ 本行**原判「未落地」且只列了项 2** —— 那是 2026-09-14 那次人工回查的漏判，2026-09-15 复查才补齐四项 |
 | O-E.2 | `runner/reconcile_loop.py` 差集对账主体（批 C5，探针 18/18）| backfill 清零对账子项 —— 已判**前提不可达**（见 `error-backflow-task.md` O-E.2 处置裁定注）|
 | O-E.7 | `orchestrator.py:790-851` 独立收尾 + R-22 回填 | **scanner 短路**：`scanner.py:112/115` 两处 `score_run_salvage` 无 `trigger_type` 守卫（已登记，判据 §12.1 #16）|
 | O-E.8 | `_error_verdict` → `run_assertions` 判定链 + 空断言不判 pass | 运行期 na 兜底源 `missing_assertion`/`assertion_shape`（grep 零命中；现靠加载即剔除替代）|
-| O-F.4 | 数据面隔离（O-E.5）+ cleanup 豁免（`pinned` 恒真）| **§6.5 写守卫 403**（`cases.py:310-311` 通用 setattr、`:321` invalidate 无守卫）；谓词常量三件套；dashboard 排除（`api/dashboard.py:43/60/85-87` 只排 held_out）+ ~~active-count 排除~~（**批 C7 已落地**，见 O-E.3 行 —— 本行原文把它挂在这里是 2026-09-14 的旧状态） |
+| O-F.4 | 数据面隔离（O-E.5）+ cleanup 豁免（`pinned` 恒真）| **§6.5 写守卫 403**（`cases.py:310-311` 通用 setattr、`:321` invalidate 无守卫）；谓词常量三件套；dashboard 排除（`api/dashboard.py:43/60/85-87` 只排 held_out）+ ~~active-count 排除~~（**批 C7 已落地**，见「三、已落地」的 O-E.3 施行记录 —— 本行原文把它挂在这里是 2026-09-14 的旧状态） |
 | O-F.5 | `config.py:38-43` 三键走 env + `main.py:155/157` 启动挂接 + 门控在 loop 内 | `seed.py` 无任何 `backflow_*` 键；启动无迁移 fail-fast 检查；无 cap_gap probe task |
 | O-F.8 | 静态预共享 secret + Bearer + 不进日志（`test_backflow_client.py:95-112` 钉死）| **secret 缺失/错误 → fail-fast**：`push_results` 对 401 也抛 `BackflowClientError`，`_push_one` 对一切异常重试 3 次 ⇒ **401 被重试**而非快速失败 |
 | O-G.2 | orchestrator 收尾路径的 R-22 回填单测 | scanner 回收 / run 级超时两路径无测试（受 O-E.7 短路未落地阻塞）；未抽为独立护栏文件；「已终值行不改写」无独立断言 |
 | O-G.4 | 载荷序列化方向 + `schema_version` + self_check + 两水位口径 | `run_status` 四值 Literal、`cases[].pass_fail` 三值、字段长度上限 64/48、10 字段必填性枚举；「两水位不得按 trigger_type 收窄」的显式钉死 |
 
-## 三、已落地（15）
+## 三、已落地（16）
 
-`O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· `O-F.9`（双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；*规格自陈「登记不修」，根因未动符合预期*）
+`O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· `O-F.9`（双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；*规格自陈「登记不修」，根因未动符合预期*）· **O-E.3**（§7.5 api 配套四项，*批 C7 落地项 2/3/4 + 批 C8 落地项 1*）
+
+> **O-E.3 的两条偏离（施行记录，非口径变更）**：
+> 1. **项 1 未照规格字面实施**。规格（`solution_detail.md:524` + `:170`）写「→ 域校验（非空 ≤64
+>    无空白/控制字符）」；照抄会放行 `1.2.3<script>` 与 `<script>alert(1)</script>`（**两者都不含
+>    空白**），等于撤掉 P2-C4 用 `\Z` 修好的入库闸（原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>`
+>    入库后被 Dashboard tooltip 当 HTML 渲染成 XSS）。故改为**白名单字符集**
+>    `^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z`（`runs.py:42`，校验点 `:236`）：**放开版本形态、
+>    语义不变地保住「拒绝任何 HTML 注入形态」**。判别力经实测（换回规格字面版 ⇒ 断言变红）。
+>    *前提（已写进代码注释）：全前端零 `v-html`，唯一 HTML 注入点 `Dashboard.vue:843` 已做
+>    `esc()` 全量转义 —— 日后新增 v-html 渲染点，本层白名单是唯一回退。*
+> 2. **规格「rerun 同」不成立** —— `RerunBody` 只有 `case_ids`、**不含 version**，
+>    `rerun_run` 是 `version=src.version` 直接继承 ⇒ **rerun 从来没有过 semver 校验点**，
+>    本项无 rerun 侧可改。（属规格与实现不符，登记备查，不改规格原文。）
+
+
 
 ## 四、无法判定（2）—— 缺的是产物
 
@@ -93,6 +111,12 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
    > 三项同样是「规格点名 + 有具体故障」（项 3 建出 0-case 空转 run、项 4 能对 error run 发
    > rerun 再产一条），却因为**只回查了被点名的子项**而漏在表外。**「按条目回查」要连它点名
    > 的子项集一起核 —— 否则回查这个动作本身就会制造盲区。**
+   >
+   > ⚠️ 2026-09-15 再补：O-E.3 的**第四项**（version 校验）已由批 C8 落地，该条**已全部结清**；
+   > 此型现只剩 **O-F.8**。⚠️ 但批 C8 又添了一条**新形态**的登记项：**规格与实现不符**
+   > ——规格写「rerun 同（semver 校验）」，实际 `RerunBody` 无 version 入参（见 O-E.3 施行记录 2）。
+   > 它与本条讨论的「规格点名 + 代码没做」**不同**：**没有故障面**，只是规格描述与代码结构对不上，
+   > 处置也不同（登记备查，不产生开工项）。
 
 ## 维护约定
 
