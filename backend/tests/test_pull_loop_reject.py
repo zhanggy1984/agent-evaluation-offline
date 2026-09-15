@@ -268,5 +268,163 @@ class TestReplay(unittest.TestCase):
         self.assertEqual(replayed, [("p-9", 3618)])
 
 
+class _FakeSessionFull:
+    """本类专用：比 `_FakeSession` 多一个 `expunge`（激活路径 commit 后会调）。"""
+
+    async def execute(self, *_a, **_kw):
+        return _FakeResult(None)
+
+    async def commit(self):
+        return None
+
+    def expunge(self, _obj):
+        return None
+
+
+class _FakeScopedFull:
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return _FakeSessionFull()
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class TestInputWiringGate(unittest.TestCase):
+    """R-27 装载闸：`evidence.input` 形状与 agent adapter 模板不自洽 ⇒ 驳回，**不建单**。
+
+    背景（2026-09-15 真机实证）：渲染侧对不可达占位**静默原样保留**（`engine._sub`），
+    被测 agent 收到的是字面量 `{case.input.content}`，它回兜底话术 ⇒ `keyword_not_contains`
+    恒 pass ⇒ 假绿经 ⑤环写入 online。回归用例的输入不进请求时，判定与该输入无关。
+    故与 `REJECT_EMPTY_WORDS` 同型论证 fail-closed。
+
+    **模板取真实 agent 的实测形态**（真库读得，非构造）：
+      good-question / customer-service → `request.body` 的 `{case.input.content}`
+      smart-procurement                → `request.body` 的 `{case.input.question}`
+      contract-check                   → **`request` 无 body**，占位只在 prepare 的 upload
+                                         步骤 `{"files": {"file": "{case.input.file_path}"}}`
+    """
+
+    # ---- 纯函数层：判据与渲染同源（同一枚 _VAR 与同一个 _get_path） ----
+
+    def test_content_template_accepts_matching_object(self) -> None:
+        cfg = {"request": {"body": {"stream": True, "content": "{case.input.content}"}}}
+        self.assertEqual(pl.check_input_wiring(cfg, {"content": "你好"}), [])
+
+    def test_question_template_rejects_content_key(self) -> None:
+        """smart-procurement 形态：字段名是 `question`，硬编码 `.content` 对它**必然**失败。"""
+        cfg = {"request": {"body": {"question": "{case.input.question}"}}}
+        bad = pl.check_input_wiring(cfg, {"content": "你好"})
+        self.assertEqual(len(bad), 1)
+        self.assertIn("case.input.question", bad[0])
+
+    def test_bare_string_input_is_rejected(self) -> None:
+        """采集侧**显式支持** str input（online `consumer/state.py` 只判 `is not None`）
+        ⇒ 裸字符串是合法采集形态，不是不可能事件。"""
+        cfg = {"request": {"body": {"content": "{case.input.content}"}}}
+        self.assertTrue(pl.check_input_wiring(cfg, "你好"))
+
+    def test_prepare_step_placeholders_are_scanned(self) -> None:
+        """**不能只扫 `request.body`**：contract-check 的占位只在 prepare 的 upload 步骤里。
+
+        只扫 request.body 会把 contract-check 误判成「0 条路径」而驳回一个合法配置。
+        """
+        cfg = {
+            "request": {"path": "/api/tasks/{prepare.upload.task_id}/result", "method": "GET"},
+            "prepare": [{"name": "upload", "files": {"file": "{case.input.file_path}"}}],
+        }
+        self.assertEqual(pl.check_input_wiring(cfg, {"file_path": "/uploads/a.pdf"}), [])
+        self.assertTrue(pl.check_input_wiring(cfg, {"content": "你好"}))
+
+    def test_no_input_placeholder_at_all_is_rejected(self) -> None:
+        """0 条路径**也**驳回：输入压根不进请求 ⇒ 判定与输入无关（fail-closed）。"""
+        for cfg in ({}, None, {"request": {"path": "/healthz", "method": "GET"}}):
+            self.assertTrue(pl.check_input_wiring(cfg, {"content": "你好"}), cfg)
+
+    def test_whole_input_placeholder_always_passes(self) -> None:
+        """整串 `{case.input}` 恒通过——渲染侧对标量走 `str` 替换、对结构化值原样替换，
+        **两种都不落占位**，故不存在「输入没进去」的情形。"""
+        cfg = {"request": {"body": {"q": "{case.input}"}}}
+        self.assertEqual(pl.check_input_wiring(cfg, "裸串"), [])
+        self.assertEqual(pl.check_input_wiring(cfg, {"content": "你好"}), [])
+
+    def test_present_but_none_key_is_not_unreachable(self) -> None:
+        """键在而值为 `None` **不算**不可达——渲染出的是 `"None"` 字符串，不是占位符。
+
+        这是与「键缺/中途非 dict」的分界；判宽了会误驳合法载荷。
+        """
+        cfg = {"request": {"body": {"content": "{case.input.content}"}}}
+        self.assertEqual(pl.check_input_wiring(cfg, {"content": None}), [])
+
+    def test_input_turns_is_not_an_input_path(self) -> None:
+        """`{case.input_turns.*}` 不是 `case.input.*`——回流只产 `input`，不产 `turns`。"""
+        cfg = {"request": {"body": {"q": "{case.input_turns.0.content}"}}}
+        self.assertTrue(pl.check_input_wiring(cfg, {"content": "你好"}))
+
+    # ---- 集成层：驳回必须发生在建单之前（否则会留下孤儿 suite/case） ----
+
+    def _run(self, adapter_config, input_value):
+        env = {
+            "payload_id": "p-r27",
+            "source": {"agent": "good-question", "interface": "chat"},
+            "evidence": {"input": input_value},
+            "no_fallback_config": {"words": ["抱歉"]},
+        }
+        activated: list = []
+        rejected: list = []
+
+        async def _fake_reject(_db, _env, _pid, code, detail):
+            rejected.append((code, detail))
+            return "rejected"
+
+        async def _fake_activate(*a, **_kw):
+            activated.append(a)
+            return mock.Mock(id=4242)
+
+        agent = mock.Mock(adapter_config=adapter_config)
+        with mock.patch.object(pl, "SessionLocal", _FakeScopedFull()), \
+                mock.patch.object(pl, "validate_envelope", lambda _e: (True, [], "")), \
+                mock.patch.object(pl, "resolve_agent", lambda *_a: _async(agent)), \
+                mock.patch.object(pl, "resolve_interface", lambda *_a: _async(mock.Mock())), \
+                mock.patch.object(pl, "sanitize_words", lambda _w: ["抱歉"]), \
+                mock.patch.object(pl, "check_input_wiring", pl.check_input_wiring), \
+                mock.patch.object(pl, "_reject", _fake_reject), \
+                mock.patch.object(pl, "_activate", _fake_activate), \
+                mock.patch.object(pl, "_ack_active", lambda *_a, **_kw: _async(None)):
+            outcome = asyncio.run(pl._process_envelope(env))
+        return outcome, activated, rejected
+
+    def test_rejects_before_creating_case(self) -> None:
+        """不自洽 ⇒ 驳回，且 `_activate` **一次都没被调用**（不得留孤儿 suite/case）。"""
+        outcome, activated, rejected = self._run(
+            {"request": {"body": {"question": "{case.input.question}"}}}, {"content": "你好"}
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(activated, [])
+        self.assertEqual(rejected[0][0], pl.REJECT_CONTENT_GAP)
+        self.assertIn("case.input.question", rejected[0][1])
+
+    def test_activates_when_shape_matches(self) -> None:
+        """**反向对照（不可省）**：同结构、同输入，只因字段名对上 ⇒ 必须走激活。
+
+        无此对照，「驳回通过」可能只是闸门把一切都拒了——那样测试是假的。
+        """
+        outcome, activated, rejected = self._run(
+            {"request": {"body": {"content": "{case.input.content}"}}}, {"content": "你好"}
+        )
+        self.assertEqual(outcome, "activated")
+        self.assertEqual(rejected, [])
+        self.assertEqual(len(activated), 1)
+
+
+def _async(value):
+    """把值包成 awaitable（用于 patch 掉 async 依赖）。"""
+    async def _coro():
+        return value
+    return _coro()
+
+
 if __name__ == "__main__":
     unittest.main()

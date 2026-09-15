@@ -16,6 +16,7 @@ import logging
 
 from sqlalchemy import select, text
 
+from app.adapters.engine import check_input_wiring
 from app.core import backflow_client
 from app.core.db import SessionLocal
 from app.core.error_payload import (
@@ -150,6 +151,17 @@ async def _process_envelope(envelope: dict) -> str:
         if not words:
             # fail-closed：净化后为空 ⇒ 落一条空断言会恒 pass（兜底判定全进候选）
             return await _reject(db, envelope, payload_id, REJECT_EMPTY_WORDS, "净化后词表为空")
+
+        # R-27 装载闸：evidence.input 的形状必须能喂进该 agent 的 adapter 模板。不可达时
+        # 渲染侧会**静默**原样发出占位符（`render_template._sub`），被测 agent 回兜底话术 ⇒
+        # 断言恒 pass ⇒ 假绿写入 online。故在此 fail-closed 驳回，与「词表净化后为空」同型论证。
+        problems = check_input_wiring(
+            agent.adapter_config, (envelope.get("evidence") or {}).get("input")
+        )
+        if problems:
+            return await _reject(
+                db, envelope, payload_id, REJECT_CONTENT_GAP, "；".join(problems)
+            )
 
         case = await _activate(db, envelope, payload_id, agent, interface, words)
         await db.commit()

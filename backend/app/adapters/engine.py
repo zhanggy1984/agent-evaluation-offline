@@ -50,6 +50,55 @@ def _get_path(ctx: dict, path: str) -> Any:
     return cur
 
 
+def _walk_strings(value: Any):
+    """递归产出模板树里的所有字符串（dict/list 下钻，其余忽略）。"""
+    if isinstance(value, dict):
+        for v in value.values():
+            yield from _walk_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _walk_strings(v)
+    elif isinstance(value, str):
+        yield value
+
+
+def check_input_wiring(template: Any, input_value: Any) -> list[str]:
+    """`{case.input.*}` 占位对 input_value 是否自洽，返回问题描述列表（空 = 通过）。
+
+    **为什么需要**：`render_template` 对不可达占位**静默原样保留**（见 `_sub`），被测 agent
+    收到的是字面量 `{case.input.content}`，它回兜底话术 ⇒ `keyword_not_contains` 恒 pass
+    ⇒ 假绿回传 online。回归用例的输入不进请求时，判定与该输入无关，**无判别力**。
+
+    **语义与渲染严格同源**：复用同一枚 `_VAR` 与同一个 `_get_path`，故判据即渲染的真实行为
+    —— 键缺/中途非 dict 才算不可达；键在而值为 None **不算**（那时渲染出 `"None"`，不落占位）。
+    整串 `{case.input}` 恒通过（渲染侧对结构化值走原样替换、对标量走 str 替换，均不落占位）。
+
+    模板一条 `{case.input.*}` 都没有时**返回问题**（而非空列表）：输入压根不进请求，
+    与「词表净化后为空」同型 —— fail-closed，由调用方驳回。
+
+    模板来源是 **agent 级** `adapter_config`（含 `request.*` 与 `prepare[*].*` 各模板域：
+    contract-check 的文件路径占位只在 prepare 的 upload 步骤里）。
+    """
+    paths: set[str] = set()
+    for s in _walk_strings(template):
+        for m in _VAR.finditer(s):
+            name = m.group(1)
+            if name == "case.input" or name.startswith("case.input."):
+                paths.add(name)
+    if not paths:
+        return ["模板未引用 {case.input.*}：输入不会进入请求，判定与输入无关"]
+    ctx = {"case": {"input": input_value}}
+    bad: list[str] = []
+    for p in sorted(paths):
+        try:
+            _get_path(ctx, p)
+        except KeyError:
+            bad.append(p)
+    return [
+        f"{p} 在 evidence.input 中不可达（渲染时会原样发出占位符）" for p in bad
+    ]
+
+
 def _poll_hit(data: dict, until: dict) -> bool:
     """until 条件是否全部命中（值允许单值或 list，key 支持点号路径）。
 

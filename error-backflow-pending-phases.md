@@ -440,6 +440,8 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 > （「**纯装载不改写**」），`:276` 还要求「不得用普通 case input schema 驳回 error case」——
 > 实现**忠实执行了规格**。规格假设了 `evidence.input` 的形状 = 平台 case 期望的形状，而前者由
 > **被测 agent 接口**决定、后者是**平台自己的** ⇒ **两者之间缺一层映射，规格未定义**。
+> ⚠️ **2026-09-15 订正**：本句定性已被**推翻** —— 修法**不是**补映射（形状只能猜，本次事故
+> 恰恰就是猜形状的产物），而是**加闸门**。以本段末尾「🔧 修法落地」为准。
 >
 > **⚠️ 本定性的强度限定（不许读成「已取证」）**：三个 case 的 `input`（3618/3619/4072）
 > **全部是人造的** —— 严格地说，已证的是「**判定链在人造 input 下失效**」。
@@ -461,10 +463,14 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 >    `probe-unknown-agent` / `probe-c2-push`；`trigger_version` 16 行全同 ⇒ **16/16 全人造**。
 >    ⚠️ **不得用 `agent` 列判归属** —— 既有实测已证「探针/造数器**借用真实 agent 名**」
 >    ⇒ `agent` 名本身是**假证据**，判据只能取 `claimed_by` / `trace_id` 形态。
-> 3. **缺口在代码上的确切落点**：`pull_loop.py:198` 把 `input_type` **硬编码 `"text"`**，
->    而同代码库的 `build_case_skeleton`（`tests/test_skeleton.py:53-54`）是**按接口字段推导**的
->    （含 `content` ⇒ text、含 `file_path` ⇒ file）⇒ error case 这条路径**未走推导** ——
->    这正是上文「两者之间缺一层映射」在代码上的位置。
+> 3. **缺口在代码上的确切落点**：`pull_loop.py:199` 把 `evidence.input` **原样透传**，
+>    `:198` 再把 `input_type` **硬编码 `"text"`**。
+>    ⚠️ **本条此前写错过一处，2026-09-15 订正**：我原称「同代码库的 `build_case_skeleton`
+>    是**按接口字段推导**的，而 error case 未走推导」—— **不成立**。`core/skeleton.py:53-55`
+>    的 `_input_type` 是**按数据自身的键**推导（含 `file_path` ⇒ `file`，否则 `text`），
+>    **根本不看 interface**；且我引的 `tests/test_skeleton.py:53-54` 也不是该函数所在。
+>    订正后**结论不变**：两条路径**都没做**「与 agent 模板域自洽」这件事，只是「有正确做法可抄」
+>    这个论据**本来就不存在**。
 > 4. **失真现象的字面证据**（本轮补取）：agent 自己的 reasoning =
 >    `The user message is literally "{case.input.content}" — a placeholder that wasn't filled in.`
 >    ⇒ 「未渲染的模板串」的确切形态 = **模板占位符 `{case.input.content}` 原样发出**。
@@ -475,6 +481,25 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 > **影响面**：error run 的判定语义（「是否仍复现错误话术」）**从未真正生效** —— agent 收到占位符、
 > 答非所问 ⇒ `keyword_not_contains` 必 PASS ⇒ **假绿**，且**已被写入 online**（3 条 `case_pass=1`）。
 > 3618/3619 同样错 ⇒ **自特性落地起即存在**。登记 = **R-27**（`task.md` 横切表）。
+>
+> **🔧 2026-09-15 修法落地（R-27 已修）**：定性由「缺映射规则」**改为「形状不自洽时静默降级、
+> 无闸门」** —— **映射规则不做**：形状只能猜，而本次事故恰恰就是「照测试夹具猜形状」的产物
+> （4072 的 `{"question": …}` 抄自 `online tests/test_converter_envelope.py:40`）。
+>
+> 落点 = **装载闸**：新增纯函数 `check_input_wiring`（`adapters/engine.py`，与 `_VAR`/`_get_path`
+> **同处**，保证判据与渲染**同源**——两处分叉会得出「闸门放行而渲染仍落占位」），在
+> `_process_envelope` **建单之前**校验 `evidence.input` 对 **`agent.adapter_config`** 模板域的
+> `{case.input.*}` 路径可达性。
+>
+> - **0 条路径也驳回**（fail-closed，与 `REJECT_EMPTY_WORDS` 同型论证：输入不进请求 ⇒ 判定与输入无关）
+> - 复用既有 `REJECT_CONTENT_GAP`（语义「载荷字段缺/畸形，admin 补齐后 requeue 可愈」），**不立新码**
+> - 抽取范围 = **整个 `adapter_config`**，不止 `request.body`：contract-check 的占位只在 `prepare`
+>   的 upload 步骤（`{"files": {"file": "{case.input.file_path}"}}`，其 `request` 是 GET、**无 body**）
+>   —— 只扫 `request.body` 会把它误判成「0 条路径」
+> - 实测三个真 agent 的模板域：good-question / customer-service = `.content`、
+>   **smart-procurement = `.question`** ⇒ 硬编码 `.content` 对后者**必然**失败
+> - **已知后果（登记、本批不另解）**：contract-check 要的是 `file_path`（平台容器内样例文件路径），
+>   而捕获快照**永远不带**该字段 ⇒ **文件型接口的 error 回流将被系统性驳回**
 >
 > **为什么此前从未暴露**：④环**从未真机跑过**。这正是 `status.md`「全表暂停」所立论点的
 > ——「推断出来的契约无法证明是对的」——**第一个实证**。
