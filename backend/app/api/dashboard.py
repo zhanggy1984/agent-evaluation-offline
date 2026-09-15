@@ -39,8 +39,12 @@ async def gate(user: User = Depends(get_current_user), db: AsyncSession = Depend
     agents = (await db.execute(select(Agent).order_by(Agent.id))).scalars().all()
     # P2-D8：看板为常规评测视图，排除留出集复测 run（不展示其聚合结果，也防其污染
     #「最新版本门禁分」等常规指标；留出集结果走 /runs 列表 + 详情查看）
+    # 同理排除 error_regression：其 case 集是 error case，与该 agent 的常规/留出用例**不同源**
+    # ⇒ 混入会把 total_case 与 pass_rate 的**分母做大**（error run 的 agent_score 恒 NULL，
+    # 故只污染分母、不进均值）。实测 20+ 个 version 桶已混入，非潜在缺陷。
     runs = (await db.execute(select(EvalRun).where(
         EvalRun.trigger_type != "held_out",
+        EvalRun.trigger_type != "error_regression",
         EvalRun.status.in_(TERMINAL_STATUS),  # B7：终态过滤下推 SQL（build_gate_cards 本就在 Python 层过滤，纯性能）
     ))).scalars().all()
     suites = (await db.execute(select(TestSuite))).scalars().all()
@@ -58,6 +62,7 @@ async def trend(agent_id: int, user: User = Depends(get_current_user),
     logger.debug("trend in: agent_id=%s user=%s", agent_id, user.username)
     rows = (await db.execute(select(EvalRun).where(
         EvalRun.agent_id == agent_id, EvalRun.trigger_type != "held_out",  # P2-D8：排除留出集
+        EvalRun.trigger_type != "error_regression",  # error run 非评测成绩（口径同 /gate）
         EvalRun.status.in_(TERMINAL_STATUS),
     ).order_by(EvalRun.started_at))).scalars().all()
     out = [{

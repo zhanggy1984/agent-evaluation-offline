@@ -26,7 +26,7 @@
 
 | 编号 | 对象 | 来源 | 级别 | 当时状态（2026-09-15） |
 |---|---|---|---|---|
-| **P0-1** | `R-20` pre-scan 报告（G0 出口物） | offline `error-backflow-task.md` O-A.1 · `solution_detail.md` §9.4 | 交付物 | **已产出** = `error-backflow-pre-scan-report.md`（仓根，**未提交**） |
+| **P0-1** | `R-20` pre-scan 报告（G0 出口物） | offline `error-backflow-task.md` O-A.1 · `solution_detail.md` §9.4 | 交付物 | **已产出** = `error-backflow-pre-scan-report.md`（仓根；入库于 `0c34f19`，**提交状态以 `git log --oneline -- error-backflow-pre-scan-report.md` 现跑为准**） |
 | **P0-2** | `R-12`：`KeywordNotContainsOp` 空答语义 PASS→FAIL | offline `error-backflow-task.md` O-E.9 | **A**（`text.py` 为 manual/held_out 与 error_regression **共享算子**） | **G0 已解锁，待做**（任务 #258） |
 
 ### P1 — 出站与回收（**两条都跨仓**）
@@ -40,7 +40,7 @@
 
 | 编号 | 对象 | 来源 | 级别 | 当时状态（2026-09-15） |
 |---|---|---|---|---|
-| **P2-1** | `api/dashboard.py` 的 `/gate` + `/trend` 排除 `error_regression` | `O-F.4`（**部分**） | B（两行谓词） | **缺口确证**；口径/范围已拍（D3/D4）；**方案已出**（见 §5） |
+| **P2-1** | `api/dashboard.py` 的 `/gate` + `/trend` 排除 `error_regression` | `O-F.4`（**部分**） | B（两行谓词） | **✅ 已完成（2026-09-15）**：口径/范围已拍（D3/D4），方案见 §5、验收结果见 §5.1。**提交与推送状态以 `git status --porcelain` / `git log @{u}..HEAD` 现跑为准**（本节不写待办态，见 §7 约定 2） |
 | **P2-2** | `O-F.4` **余项**：写守卫谓词单一来源 + `cleanup` 豁免核对 + 403 全清单核对 | offline `error-backflow-task.md` O-F.4 | B | **缺口确证**：三常量 `CASE_TYPE_IS_NULL` / `IS_ERROR_SUITE_FALSE` / `TRIGGER_NOT_ERROR_REGRESSION` 在 `backend/` **grep 零命中** |
 
 ### P3 — 登记项（**不进排期**，登记不拍板）
@@ -139,15 +139,32 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 
 ## 5. 批 1（P2-1）方案摘要
 
-- **改动**：`backend/app/api/dashboard.py` **两处**（`:43` `/gate`、`:60` `/trend`），照邻行 `held_out` 既有写法加**字面量**谓词。
+- **改动**：`backend/app/api/dashboard.py` **两处**（`gate()` 与 `trend()` 两个端点各一处 SQL where），照邻行 `held_out` 既有写法加**字面量**谓词。（**不写行号**：本节第一版写的 `:43`/`:60` 被同批的插入动作当场挪走。）
 - **不建共享常量**：`held_out` 在本文件有 7 处字面量，是既有惯例；只给 `error_regression` 建常量会造成不对称。「谓词单一来源」属 **P2-2**，不在本批。
 - **不动 `build_gate_cards`**：`held_out` 的排除**只在 SQL 层**（`dashboard_rules.py:27-28` 只过滤 status）⇒ 与 `held_out` 同型。
 - **验收**：A 真机探针（异步直调 `gate()`/`trend()`，断言 `total_case` **等于**「同 version 下 manual run 之和」——写成**等于谁**）；B **反事实对照**（去掉谓词必红）；C 全量单测；D ruff；E 文档回填。
 - **不做**：`/perf`、`/cost`、`/compare`、`_agent_dim_series`、纯函数层、共享谓词常量、error 通道 usage 采集。
 
+### 5.1 验收结果（2026-09-15，全项已跑）
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| A 真机探针 | ✅ PASS | `backend/tests/integration/probe_dashboard_error_run_exclusion.py`，容器内跑；**连跑两遍输出逐字一致**。gate 59 张卡 / 6 张有 version / **3 张判别力生效**；trend **21/21 个 agent 判别力生效** |
+| B 反事实对照 | ✅ 红 | 摘掉两处谓词 ⇒ **37 条 FAIL**、探针退出码 1，gate 与 trend 两侧都咬；还原后复绿（`grep` 残留 0、`git diff` = 5 增 0 删） |
+| C 全量回归 | ✅ | `cd backend && PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q` ⇒ **937 passed / 100 skipped** |
+| D ruff | ✅ 零新增 | 借 online venv + online `pyproject.toml`（`E,W,F,I`，line-length 100）扫两文件；**HEAD 4 条 → 改后 4 条**，逐规则统计一致（E712×2 / E501×1 / I001×1，全在既有行）。**首跑 5 条，其中 F541 由本批新文件引入，已修** |
+| E 文档回填 | ✅ | `error-backflow-status.md` O-F.4 行 · `error-backflow-task.md` O-F.4 验证目标 |
+
+**两条副产品（比原判断更重，已回填 status.md）**：
+
+1. **幻影 version 桶**：门禁墙「有 version 的卡」**11 张 → 排除后 6 张** —— 那 5 张**纯由 error run 撑起**（agent 2816 桶内 `total_case=32` 全部来自 error run）。即：这些 agent 原本**拿 error run 当「最新版本成绩」在门禁墙上展示**。旧登记把后果写成「聚合含 error run 行」，实际是**分母做大 + 幻影桶**，**不是**「均值被污染」（`agent_score` 恒 NULL 不进均值）。
+2. **基线数字订正**：本文档原记的 `933 passed / 96 skipped` **是陈旧值**，实测 937/100。**与本批无关**：本批未动任何 `test_*.py`（`git status --porcelain -- 'backend/tests/**/test_*.py'` 为空），改动只在 `api/dashboard.py` 源码；`--collect-only` = 1037 = 937+100 自洽。**产出命令见上表 C 行**。
+
+**这批的绿不能证明什么**：① 不证明其余 5 个面**将来**不会出现 error run 的可污染量（本批只证明**当前**无对象）；② 不证明前端 `Dashboard.vue` 不画 error run —— 前端若另有取数路径，不在本批探针的观测面内；③ 不证明 online 侧 422 那条链被修（见 §1 的 P1/P3）。
+
 ---
 
-## 6. 现场状态（未提交 / 残留 / 待裁）
+## 6. 现场状态（提交/推送 · 残留 · 待裁）
 
 > 本节是「会丢的东西」的清单。**数字由 `git status --porcelain` 与 `ls` 当场产出**（2026-09-15），
 > 引用前请重跑，**不要凭印象**。
