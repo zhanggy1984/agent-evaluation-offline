@@ -358,7 +358,10 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 - offline `f138f2c..31dc4c4` —— **批 5（P2-2 / O-F.4 余项）**：`api/deps.py` 两 helper
   + 四处写端点守卫 + 新建 `tests/test_case_write_guards.py`（12 条）+ 三处台账回填
   （**8 文件 / 315 增 7 删**，含新文件 187 行）。
-- 四笔均**快进、非 force**。**此后新增提交是否已推送，一律以 `git log @{u}..HEAD` 现跑为准。**
+- offline `42655e2..15ed376` —— **批 4（P1-2 / R-26）**：`core/http.py::send()` 根因修复
+  + `core/backflow_client.py` 撤除 `extra_hosts` 绕过 + `tests/test_security.py`（+3 条 R-26 用例）
+  + `tests/test_backflow_client.py`（护栏方向反转）+ 三处台账回填（**7 文件 / 182 增 35 删**）。
+- 五笔均**快进、非 force**。**此后新增提交是否已推送，一律以 `git log @{u}..HEAD` 现跑为准。**
 
 > ⚠️ **本节不写「已/未推送」的裸标记，只记「已完成的推送范围 + 指向命令」**。
 > 理由（**实证，非预防性**）：本节**前后两版都栽在同一机制上**——第 1 版写「未提交 7 文件」，
