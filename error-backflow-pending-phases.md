@@ -152,22 +152,26 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 > 本节是「会丢的东西」的清单。**数字由 `git status --porcelain` 与 `ls` 当场产出**（2026-09-15），
 > 引用前请重跑，**不要凭印象**。
 
-### 6.1 未提交改动（**最易丢失**）
+### 6.1 提交状态（**2026-09-15 已提交，⚠️ 未推送**）
 
-**两仓均无未推送提交**（`git log @{u}..HEAD` 空）。未提交的**只是工作区**：
+本会话成果已分 **3 笔**提交（两仓工作区**已干净**，`git status --porcelain` 空）：
 
-| 仓 | 文件 | 状态 |
+| 仓 | 提交 | 内容 |
 |---|---|---|
-| offline | `error-backflow-status.md` | 已改（未提交） |
-| offline | `error-backflow-task.md` | 已改（未提交） |
-| offline | `error-backflow-pre-scan-report.md` | **新建**（未跟踪） |
-| offline | `error-backflow-pending-phases.md`（本文件） | **新建**（未跟踪） |
-| online | `docs/integration-report.md` | 已改（未提交） |
-| online | `revision-design-register.md` | 已改（未提交） |
-| online | `task.md` | 已改（未提交） |
+| offline | `1ab233f` | 台账对账订正（`error-backflow-status.md` + `error-backflow-task.md`，31 insertions） |
+| offline | `0c34f19` | 新增 `error-backflow-pre-scan-report.md` + `error-backflow-pending-phases.md`（本文件） |
+| online | `b66af1a` | 台账对账订正（`docs/integration-report.md` + `revision-design-register.md` + `task.md`） |
 
-**这些改动的内容** = 本会话的 **20 处 C 类台账对账订正**（online `task.md` 1 + `integration-report.md` 13 +
-`register` 1 + offline `status.md` 3 + offline `task.md` 2）+ **pre-scan 报告**。**未提交即可能丢失。**
+> 上述 3 笔的**内容** = 本会话的 **20 处 C 类台账对账订正**（online `task.md` 1 + `integration-report.md` 13 +
+> `register` 1 + offline `status.md` 3 + offline `task.md` 2）+ 两份新报告。
+> 另：**本节自身的自纠**（原写「未提交」，被上述提交当场证伪）**自成 1 笔**，哈希见 `git log -1`。
+
+**⚠️ 三笔均未推送**（`git log @{u}..HEAD` 实测 = offline **2 笔** / online **1 笔**；用户未授权 push）
+⇒ **「避免丢失」尚未完成**：本机仓库一旦丢失，这几笔随之丢失。**最后一步是 push。**
+
+> ⚠️ **两个仓的 pre-commit 都打印「检查通过」——但那是弱保证**：该 hook **不含 ruff**，
+> 且**覆盖率门禁段对 `backend/` 布局的仓是死代码**（零测试执行）。**不得读作 lint 通过**；
+> **offline 仓无任何 CI**，唯一 lint 门禁是手动借 online venv + online 配置扫改动文件。
 
 ### 6.2 现场残留（**等用户决定，本文件不处置**）
 
