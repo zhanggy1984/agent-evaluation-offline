@@ -37,9 +37,19 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 Admin = Depends(require_role("admin"))
 Staff = Depends(require_role("admin", "evaluator"))
 
-# P2-C4：必须锚定结尾——原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 能入库，
-# 其值会被 Dashboard 图表 tooltip 当 HTML 渲染成 XSS。\Z 拒绝尾部任何字符（含换行）。
-_SEMVER = re.compile(r"^\d+\.\d+\.\d+\Z")
+# §7.5 项 1 / §3.3:170：version 由 strict semver 放宽为「域校验」，接纳 v 前缀 / 日期式 /
+# 预发布后缀等真实版本形态（版本是 agent 侧标识，平台不该规定它长得像 semver）。
+#
+# **此处有意偏离规格字面**：规格写「非空 ≤64 无空白/控制字符」，但 `1.2.3<script>` 和
+# `<script>alert(1)</script>` 一个空白都没有、能整条通过 —— 照抄等于撤掉 P2-C4 修好的那道
+# 入库闸（原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 入库后被 Dashboard tooltip 当 HTML
+# 渲染成 XSS；当时的修法就是补 `\Z`）。故改为**白名单字符集**：既放开版本形态，又保持
+# P2-C4「拒绝任何 HTML 注入形态」的语义不变。
+#
+# 前提（别删这句）：全前端零 `v-html`，唯一把动态串拼进 HTML 的地方是 Dashboard 的 ECharts
+# tooltip formatter 且已做 `esc()` 全量转义。**日后若新增 v-html 渲染点，本层白名单是唯一回退。**
+# 首字符限字母/数字，故 `.`/`-`/`+` 开头（如 `.hidden`、`-x`）仍拒。
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 # #4 放开并发：互斥槽（执行中）与可取消槽拆开——scoring 是「采集完成待评分」终态，
 # 不占用 agent 执行能力，同 agent 可在判分期间开新 run；cancel 仍允许 scoring（判分期可放弃）。
 _ACTIVE_STATUS = ("pending", "running", "scoring")   # 可取消状态（cancel 判断，含 scoring）
@@ -233,8 +243,8 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
                  body.agent_id, body.suite_id, body.version, body.trigger_type)
     # 权限分级：manual（常规评测）与 held_out（留出集复测）均 admin/evaluator（Staff）。
     # evaluator 作为评测师可触发评测（阶段 4 走查决策 #9）。
-    if not _SEMVER.match(body.version):
-        raise ApiError(E_VALIDATION, "version 需符合 semver（如 1.2.3）", 400)
+    if not _VERSION_RE.match(body.version):
+        raise ApiError(E_VALIDATION, "version 仅允许字母/数字及 . _ + -，且不超过 64 字符", 400)
     agent = await db.get(Agent, body.agent_id)
     if agent is None or not agent.enabled:
         raise ApiError(E_NOT_FOUND, "agent 不存在或已禁用", 404)

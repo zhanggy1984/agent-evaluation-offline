@@ -209,24 +209,38 @@ def test_agent_client_extra_cidrs_widen_allowlist():
     assert widened._resolve("11.0.1.5", 80) == "11.0.1.5"
 
 
-# ---------------- P2-C4 version 严格 semver（防 tooltip XSS） ----------------
-from app.api.runs import _SEMVER
+# ---------------- P2-C4 version 白名单字符集（防 tooltip XSS） ----------------
+# §7.5 项 1 把 strict semver 放宽为「域校验」。**但没有照规格字面用「无空白/控制字符」**：
+# `1.2.3<script>` 与 `<script>alert(1)</script>` 都不含空白，那样放得进来 ⇒ 等于撤掉 P2-C4
+# 的入库闸。现规则 = 白名单字符集，**「拒绝任何 HTML 注入形态」的语义不变**，只是不再要求
+# 「必须是三段数字」。故用例分两组：放宽组（必须过）与注入组（必须拒）—— 缺任一组都证明不了本层。
+from app.api.runs import _VERSION_RE
 
 
-def test_run_version_full_semver_accepted():
-    # 合法 semver 通过
-    assert _SEMVER.match("1.2.3")
-    assert _SEMVER.match("10.20.300")
-    assert _SEMVER.match("0.0.1")
+def test_run_version_non_semver_now_accepted():
+    # §7.5 项 1 的放宽目标：版本是 agent 侧标识，平台不规定它长得像 semver。
+    # v 前缀 / 日期式 / 预发布 / build 元数据 / 非三段 —— 全部必须过。
+    for v in ("1.2.3", "10.20.300", "0.0.1", "v1.2.3", "1.2.3-beta.1", "1.2.3+build.5",
+              "2026.09.15", "1.2", "1.2.3.4", "1.2.3abc"):
+        assert _VERSION_RE.match(v), v
 
 
-def test_run_version_injection_suffix_rejected():
-    # 原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 等可入库 → Dashboard tooltip XSS；
-    # 必须拒绝任何后缀（含 HTML/空白/换行/额外字符）
-    assert not _SEMVER.match("1.2.3<script>")
-    assert not _SEMVER.match("1.2.3 <img src=x onerror=alert(1)>")
-    assert not _SEMVER.match("1.2.3abc")
-    assert not _SEMVER.match("1.2.3\n")
-    assert not _SEMVER.match("1.2.3/1")
-    assert not _SEMVER.match("1.2")  # 缺 patch
-    assert not _SEMVER.match("1.2.3.4")  # 超 3 段
+def test_run_version_injection_still_rejected():
+    # P2-C4 语义：任何能构成 HTML 注入的形态都必须拒 —— 这是本层存在的理由，放宽不得触及。
+    # 原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 入库后被 Dashboard tooltip 当 HTML 渲染。
+    for v in ("1.2.3<script>", "1.2.3 <img src=x onerror=alert(1)>",
+              "<script>alert(1)</script>", "1.2.3\n", "1.2.3\r\n", "1.2.3/1",
+              "1.2.3'", '1.2.3"', "1.2.3`", "1.2.3&x;"):
+        assert not _VERSION_RE.match(v), v
+
+
+def test_run_version_charset_and_length_boundaries():
+    assert _VERSION_RE.match("a" * 64)
+    assert not _VERSION_RE.match("a" * 65)
+    assert not _VERSION_RE.match("")
+    assert not _VERSION_RE.match(".hidden")      # 首字符不得为 `.`
+    assert not _VERSION_RE.match("-x")           # 首字符不得为 `-`
+    assert not _VERSION_RE.match("+x")           # 首字符不得为 `+`
+    assert not _VERSION_RE.match("1.2.3  ")      # 尾随空格
+    assert not _VERSION_RE.match("1.2.3\t")      # 制表符
+    assert not _VERSION_RE.match("版本1.2.3")     # 非 ASCII
