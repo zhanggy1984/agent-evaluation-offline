@@ -124,6 +124,12 @@
     `:379-382` 前置校验不过 → `_mark_error_skipped`；`:384-386` 接管时已取消 → **直接 return、
     完全不调收尾**（run 停原状态、`fire_push` 不发 ⇒ link 挂到 scanner 回收）。
     R-22 另两条路径（orchestrator cancel / run 级超时）亦属同一形态：**被调函数已验、调它的入口未验**。
+  - ✅ **2026-09-15 补（订正上行的 ❌ 判词）**：`dev` `5b01de5` **补的正是被点名的「两条早退路径」** ——
+    `backend/tests/test_error_regression_run.py:443` `test_cancelled_at_takeover_skips_execution_and_finish`
+    + `:457` `test_precheck_failure_marks_skipped_without_finish` + `:470` `class TestMarkErrorSkipped`（2 例）。
+    ⇒ 上行「`_run_error` 的两条早退均无测试」与「**被调函数已验、调它的入口未验**」**均已不成立**。
+    **核实命令**：`git show 5b01de5 --stat`。（同一失真亦登记于 `error-backflow-status.md` 顶部「已知失真 2」——
+    该表按自身「全表暂停、保留原判词」惯例**不改判词**，此处按本文件惯例**就地订正**。）
   - ⚠️ **已撤除的工作（留痕，勿重复立项）**：2026-09-15 曾据「`if not external_terminal:` 整块
     零覆盖」新增 `tests/integration/test_integration_error_finish.py`（5 条真库用例，判别力对照
     4 条变异各只打红一条，实测通过）。**该前提为假** —— 立项时只扫 `tests/integration/`、
@@ -149,7 +155,7 @@
 | R-12 | text.py 空答 fail 修补 | offline code（G0 门禁先行） | O-A.1 → O-E.9 | G0→G4 | 空答 FAIL 单测 + 白名单豁免回归；§12.2 |
 | R-19 | error_type 字面量一致性单测护栏 | CI 护栏 | O-G.1 | G6 | §12.3 单测并入 CI，常量增改即红 |
 | R-20 | pre-scan 报告门禁（三问三答 + 处置登记） | 实施门禁（owner = offline 实施） | O-A.1 | G0 | 报告产出 = G0 出口 |
-| R-22 | 收尾回填 na 统一 `scheduler_unexecuted` 单测护栏 | CI 护栏 | O-E.7 + O-G.2 | G4+G6 | 收尾逻辑 = 7 条无 DB 单测 + 4 条真库集成用例；⚠️ **缺口在入口**（`_run_error` 两条早退无测试），**非收尾逻辑** |
+| R-22 | 收尾回填 na 统一 `scheduler_unexecuted` 单测护栏 | CI 护栏 | O-E.7 + O-G.2 | G4+G6 | 收尾逻辑 = 7 条无 DB 单测 + 4 条真库集成用例；~~⚠️ **缺口在入口**（`_run_error` 两条早退无测试）~~ **⚠️ 该判已失效（2026-09-15）**：`5b01de5` 已补这两条早退 + `TestMarkErrorSkipped`，**入口缺口已闭合**（依据见 O-G.2 条目下的 2026-09-15 补） |
 | R-25 | 出站载荷契约护栏（10 字段与取值域逐字符对齐 online `api/backflow.py` + 两水位字段取数口径不得按 trigger_type 收窄） | CI 护栏（**跨仓契约锁**） | O-G.4 | G6 | 字段名/类型/必填性/取值域断言；online 侧字段变更即红 |
 | R-26 | 出站基址「容器名」不可达（`core/http.py` 双 Host 头 ⇒ `LocalProtocolError`；**根因在共享客户端，影响面 = 一切容器名出站**） | offline core（**A 级，本批只绕过不修**） | O-F.9 | 待议（另立批次） | 绕过护栏 `test_base_host_passed_to_allowlist` 已入单测即红；真机连通由批 B 端到端验收承担 |
 
