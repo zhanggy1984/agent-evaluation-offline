@@ -503,6 +503,30 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 >
 > **为什么此前从未暴露**：④环**从未真机跑过**。这正是 `status.md`「全表暂停」所立论点的
 > ——「推断出来的契约无法证明是对的」——**第一个实证**。
+>
+> **✅ 2026-09-15 真机复验（R-27 真机面结清）**：`/app` 是 `backend/` 的 **bind mount** ⇒ **无需重建镜像**，
+> 但**必须重启** —— 旧进程 12:02:44 UTC 启动、代码 12:38:26 UTC 写入；判据**不能只看文件内容**
+> （[[hot-mount-is-not-process-reload]]）。重启后**正反各跑两遍**，四条判据全中：
+>
+> | 轮次 | payload | offline `error_backflow_inbox` | offline 建单 | online `error_case_link` |
+> |---|---|---|---|---|
+> | 反例 1 / 2 | `887ac200` / `e307b628` | `rejected` · `online_content_gap` · `case_id=NULL` | **未建**（`test_case` max 仍 4072） | 2239 / 2240 `invalidated` + `invalidate_reason=online_content_gap` |
+> | 正例 1 / 2 | `e63bb7eb` / `4217d889` | `active` · `case_id=4073` / `4074` | 建单 4073 / 4074 | 2241 / 2242 `active` |
+>
+> `reject_detail` = `content_gap: case.input.content 在 evidence.input 中不可达（渲染时会原样发出占位符）`。
+> **正例是判别力的关键**：只跑反例排除不了「闸门把一切都拒了」。反例复用 `backflow_e2e_seed`
+> （裸串快照，**不改码**）；正例用一次性探针 `online tests/integration/r27_positive_seed.py`
+> （快照改 `{"content": …}` 对象文本，其余复用同套装置与 helper）。
+>
+> - **订正**：`inbox.reject_code` 存的是**对外收敛码** `online_content_gap`，offline 侧码 `content_gap`
+>   只在 `reject_detail` 前缀（三码折叠设计使然）—— 出方案时我写成前者，是实现对、我错。
+> - **修复只对新载荷生效**：存量 case 4072（6b 建）**不会被回溯驳回** —— 闸门在装载路径上，不回头扫历史。
+> - **仍未验**：② 响应侧兜底（`engine.py:140` 注释自陈的「由响应侧兜底或报错」，**至今无人验过**）；
+>   ④ 文件型接口（contract-check 的 `{case.input.file_path}`）。两条仍挂账。
+> - **⚠️ 本批复验测不出、但风险最高的一点**：线上**零真实采集样本**，正例的 `{"content": …}`
+>   **是我按 agent 模板反推的**，不是从真实采集里取的（[[synthetic-input-skips-field-extraction]]）。
+>   ⇒ 若线上真实采集存的也是裸串，**good-question 的真实回流将被本修复 100% 驳回**。这既说明修复
+>   在起作用（模板↔采集形态不一致被暴露），也意味着该 agent 的回流会被阻断 —— **待真实样本出现才可判**。
 
 **这批的绿不能证明什么**：
 

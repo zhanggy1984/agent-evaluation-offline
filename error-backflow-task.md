@@ -94,6 +94,11 @@
 `file_path` 键；此处引的行号也非该函数所在。订正后结论不变：两条路径都没做形状自洽这件事。）
     **⇒ 本批验的是「管道通不通」，不是「判定对不对」**；完整验收表 + 根因两侧取证 +
     「这批的绿不能证明什么」见 `error-backflow-pending-phases.md` **§5.7**。
+    **🔧 2026-09-15 修复 + 真机复验结清**：R-27 已由**装载闸** `check_input_wiring` 修复（同文件
+    §5.7「修法落地」），并已真机复验 —— 重启 offline 后（`/app` 是 bind mount，**无需重建镜像**，
+    但**必须重启**，见 [[hot-mount-is-not-process-reload]]）**正反各两遍全中**：裸串快照两遍皆
+    `rejected` / `online_content_gap` 且**不建单**；`{"content": …}` 两遍皆 `active` 并建单 4073/4074。
+    上述「判定结果全部失真」是**修复前**的存量实证，不再代表现状。
 
 **阶段出口（G3）**：pull_loop 打通 → error suite/case + ack 闭环 + 详设 §12.6 X-1~X-7（环 1 集成异常/边界用例）全绿（详设 §1.3 G3）。
 
@@ -235,7 +240,7 @@
 | R-22 | 收尾回填 na 统一 `scheduler_unexecuted` 单测护栏 | CI 护栏 | O-E.7 + O-G.2 | G4+G6 | 收尾逻辑 = 7 条无 DB 单测 + 4 条真库集成用例；~~⚠️ **缺口在入口**（`_run_error` 两条早退无测试）~~ **⚠️ 该判已失效（2026-09-15）**：`5b01de5` 已补这两条早退 + `TestMarkErrorSkipped`，**入口缺口已闭合**（依据见 O-G.2 条目下的 2026-09-15 补） |
 | R-25 | 出站载荷契约护栏（10 字段与取值域逐字符对齐 online `api/backflow.py` + 两水位字段取数口径不得按 trigger_type 收窄） | CI 护栏（**跨仓契约锁**） | O-G.4 | G6 | 字段名/类型/必填性/取值域断言；online 侧字段变更即红 |
 | R-26 | 出站基址「容器名」不可达（`core/http.py` 双 Host 头 ⇒ `LocalProtocolError`；**根因在共享客户端，影响面 = 一切容器名出站**） | offline core（**A 级**） | O-F.9 | **✅ 已修（2026-09-15 批 4）**：根因已修 + 绕过已撤除 | 护栏**已反转**为 `test_base_host_not_special_cased`（再塞白名单即红）；Host 去重判据在 `tests/test_security.py`（3 条）；**真机三判据**已取（解析 172.23.0.4 / `pull_payloads()` 200 / 旧形状 `LocalProtocolError`）；反事实恰好 2 红 |
-| **R-27** | **error case 的 `input` 装载缺「原始 input 形状 → 平台 case `{"content": …}` 形状」映射** ⇒ 模板 `{case.input.content}` 渲染取空、**原样发出模板字面量**，被测 agent 收到占位符、答非所问 ⇒ `keyword_not_contains` **必 PASS** ⇒ **假绿**（且已写入 online）。`solution_detail.md:359` 要求「**纯装载不改写**」⇒ **实现忠实执行了规格**，缺口在**规格未定义这层映射**（`evidence.input` = 被测 agent 的原始 input，形状由被测接口决定；`test_case.input` 形状是平台自己的，normal case 由人工按此填）。**实测**（2026-09-15 6b）：run 3661 三个 case 全 `pass` 且 `answer` **逐字相同**；3618/3619（9-14 探针建）**同样错** ⇒ **自特性落地起即存在**。 | offline 装载（**规格缺口**，非实现漏做） | O-D.3（`pull_loop.py:198-199`） | — | **已修（2026-09-15）** —— 定性由「缺映射规则」**改为「形状不自洽时静默降级、无闸门」**，**映射规则不做**（形状只能猜；本次事故恰是照测试夹具猜形状的产物：4072 的 `{"question": …}` 抄自 online `tests/test_converter_envelope.py:40`）。落点 = **装载闸** `check_input_wiring`（`adapters/engine.py`，与 `_VAR`/`_get_path` **同处**以保证判据与渲染同源），在 `_process_envelope` **建单前**校验 `evidence.input` 对 `agent.adapter_config` 模板域的 `{case.input.*}` 可达性；**0 条路径也驳回**（fail-closed）；复用 `REJECT_CONTENT_GAP`、**不立新码**；抽取范围 = **整个 `adapter_config`**（contract-check 的占位只在 `prepare`，其 `request` 是 GET 无 body）。线上**零**真实采集（`dev.obs.error_cluster` 16 行 `claimed_by` 全为 `clm-*` 探针标识；**不许用 `agent` 列判归属**，探针会借真名）。**已知后果（登记、本批不另解）**：contract-check 要 `file_path`（平台容器内样例文件路径，捕获快照**永不带**）⇒ **文件型接口的 error 回流将被系统性驳回**。完整现场 + 两处订正见 `error-backflow-pending-phases.md` §5.7 |
+| **R-27** | **error case 的 `input` 装载缺「原始 input 形状 → 平台 case `{"content": …}` 形状」映射** ⇒ 模板 `{case.input.content}` 渲染取空、**原样发出模板字面量**，被测 agent 收到占位符、答非所问 ⇒ `keyword_not_contains` **必 PASS** ⇒ **假绿**（且已写入 online）。`solution_detail.md:359` 要求「**纯装载不改写**」⇒ **实现忠实执行了规格**，缺口在**规格未定义这层映射**（`evidence.input` = 被测 agent 的原始 input，形状由被测接口决定；`test_case.input` 形状是平台自己的，normal case 由人工按此填）。**实测**（2026-09-15 6b）：run 3661 三个 case 全 `pass` 且 `answer` **逐字相同**；3618/3619（9-14 探针建）**同样错** ⇒ **自特性落地起即存在**。 | offline 装载（**规格缺口**，非实现漏做） | O-D.3（`pull_loop.py:198-199`） | — | **已修（2026-09-15）** —— 定性由「缺映射规则」**改为「形状不自洽时静默降级、无闸门」**，**映射规则不做**（形状只能猜；本次事故恰是照测试夹具猜形状的产物：4072 的 `{"question": …}` 抄自 online `tests/test_converter_envelope.py:40`）。落点 = **装载闸** `check_input_wiring`（`adapters/engine.py`，与 `_VAR`/`_get_path` **同处**以保证判据与渲染同源），在 `_process_envelope` **建单前**校验 `evidence.input` 对 `agent.adapter_config` 模板域的 `{case.input.*}` 可达性；**0 条路径也驳回**（fail-closed）；复用 `REJECT_CONTENT_GAP`、**不立新码**；抽取范围 = **整个 `adapter_config`**（contract-check 的占位只在 `prepare`，其 `request` 是 GET 无 body）。线上**零**真实采集（`dev.obs.error_cluster` 16 行 `claimed_by` 全为 `clm-*` 探针标识；**不许用 `agent` 列判归属**，探针会借真名）。**已知后果（登记、本批不另解）**：contract-check 要 `file_path`（平台容器内样例文件路径，捕获快照**永不带**）⇒ **文件型接口的 error 回流将被系统性驳回**。完整现场 + 两处订正 + **真机复验（2026-09-15，正反各两遍全中）**见 `error-backflow-pending-phases.md` §5.7 |
 
 ## 不做清单（归属明确，勿误入本 task 范围）
 
