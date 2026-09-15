@@ -27,7 +27,7 @@
 | 编号 | 对象 | 来源 | 级别 | 当时状态（2026-09-15） |
 |---|---|---|---|---|
 | **P0-1** | `R-20` pre-scan 报告（G0 出口物） | offline `error-backflow-task.md` O-A.1 · `solution_detail.md` §9.4 | 交付物 | **已产出** = `error-backflow-pre-scan-report.md`（仓根；入库于 `0c34f19`，**提交状态以 `git log --oneline -- error-backflow-pre-scan-report.md` 现跑为准**） |
-| **P0-2** | `R-12`：`KeywordNotContainsOp` 空答语义 PASS→FAIL | offline `error-backflow-task.md` O-E.9 | **A**（`text.py` 为 manual/held_out 与 error_regression **共享算子**） | **G0 已解锁，待做**（任务 #258） |
+| **P0-2** | `R-12`：`KeywordNotContainsOp` 空答语义 PASS→FAIL | offline `error-backflow-task.md` O-E.9 | **A**（`text.py` 为 manual/held_out 与 error_regression **共享算子**） | ✅ **已落地（2026-09-15，批 2）** —— 见 §5.2。（原记「G0 已解锁，待做」；G0 于当日判过，见 `error-backflow-pre-scan-report.md` §5.1） |
 
 ### P1 — 出站与回收（**两条都跨仓**）
 
@@ -68,7 +68,7 @@
 | 批 | 含明细项 | 验证面 | 前置 |
 |---|---|---|---|
 | **批 1** | P2-1 | **真库 + 反事实对照**（改的是 SQL 谓词，纯函数单测覆盖不到） | 无（**方案已出**） |
-| **批 2** | P0-2 | **存量回归 + 注入对照**（共享算子，须防误伤 manual/held_out） | G0 ✅ |
+| **批 2** | P0-2 | **存量回归 + 注入对照**（共享算子，须防误伤 manual/held_out） | G0 ✅ **→ ✅ 已完成（2026-09-15）**，详见 §5.2 |
 | **批 3** | P1-1 | **出站异常分流**（可桩化到单测层） | — |
 | **批 4** | P1-2 | **`core/http.py` 传输层**（必须真机：双 Host 头只有实发才现形） | — |
 | **批 5** | P2-2 | **写端点 403 全清单** | — |
@@ -164,6 +164,57 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 
 ---
 
+### 5.2 验收结果（批 2 / P0-2 / R-12，2026-09-15）
+
+**明细项**（本节即用户要求的「明细任务」载体，**不依赖任务清单**）：
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| 2.1 | `text.py` 空/纯空白守卫（`KeywordNotContainsOp.run()`，5 增 0 删） | ✅ |
+| 2.2 | 单测两条：空答三形态 FAIL + **非空不命中仍 PASS**（防误伤正面判据） | ✅ |
+| 2.3 | **判别力反事实对照**（摘守卫 ⇒ 必红） | ✅ |
+| 2.4 | 存量回归真库探针（**固化**，只读） | ✅ |
+| 2.5 | 全量回归 | ✅ |
+| 2.6 | ruff 逐规则对照 HEAD | ✅ |
+| 2.7 | 文档回填（status / task / 本文件） | ✅ |
+| 2.8 | 连带订正：pre-scan 报告判别力基数 | ✅ |
+| 2.9 | 提交 + 推送 | ⏳ **待授权** |
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| A 单测 | ✅ 80 passed / 3 subtests | `pytest tests/test_assertions.py -q` |
+| B 反事实对照 | ✅ 红 | 摘掉守卫 ⇒ `-k "blank or nonempty"` = **3 failed / 7 passed / 73 deselected**，红在 `AssertionError: True is not false`（= 改前 PASS 的原形）；**同时「非空不命中仍 PASS」那条依然绿** ⇒ 两条判据互相独立，不是同一条断言的两种写法。还原后残留 0 |
+| C1 存量回归探针 | ✅ PASS（**连跑三遍一致**） | `tests/integration/r12_empty_answer_probe.py`。带该断言的结果行 = **108**；判据①「空 `answer` 且带该断言」= **0**；判据② 对照 = **108**（非空，判别力成立）。**口径 = 被翻转的量 `answer`，不是 `actual`**（`scorer._unified` 的 `r.answer or ""` 会把 NULL 喂成空串） |
+| C2 全量回归 | ✅ | **939 passed / 100 skipped / 14 subtests passed** = 批 1 同期基线 **937/100 + 本批 2 条**，自洽 |
+| D ruff | ✅ 零新增 | 借 online venv + online `pyproject.toml`。`text.py` **0→0**；`test_assertions.py` **HEAD `1 E501 + 1 I001` → 改后同**（逐规则一致）。**首跑多出 1 条 E501，由本批新建的探针文件引入，已修** |
+| E 文档回填 | ✅ | `status.md`（O-E.9 移入「已落地」+ 头部「已知过期行」+ 结构性 1 标已消解）· `task.md`（O-E.9 施行记录 + 横切表 R-12 行）· `pre-scan-report.md`（判别力基数订正）· 本文件 §1/§2/§5.2 |
+
+**⚠️ 本批查出的两条「比原判断更重」的东西（均已回填，勿当已完成）**：
+
+1. **判别力基数错了，且结论部分反转**。pre-scan 报告写「28 条 keyword 断言是 fail 的 ⇒ 断言有判别力」——
+   逐条回查 `actual` 后，其中 **16 条是 `actual='<断言算子未注册: keyword_not_contains>'`**（O-C.5
+   登记该算子之前的**历史行**，`pass=False` 来自「算子不存在」而非「判定命中」）。真判定失败只有
+   **12 条，且全是 `keyword_contains`**。⇒ **对 `keyword_not_contains` 本身，存量提供不了判别力证据**
+   （它跑过 92 次、**真判负 0 次**）。这**不削弱** Q①「受影响面 = 0」（那是「没出现过」的观测），
+   但原报告那句「「空答 0」不是「断言从不判负」造成的」在该算子上**恰好落空**。**判别力改由本批的
+   注入式反事实对照提供**（= 原报告 §4 第 3 条自陈欠的那一块）。
+2. **R-12 的目标受益面在生产库中零样本（新缺口，本批只登记、不改码）**。探针按 `trigger_type`
+   拆分显示：那 108 条**全部来自 `manual`，`error_regression` 零条** —— 因为
+   `eval_result.assertion_results` 在 error 路径 **84/84 全 NULL**。根因是**代码设计**：
+   `runner/orchestrator.py:582` 只落 `verdict_fn(...)` 的**终值字符串**，而 `_error_verdict`
+   （同文件 `:136-144`）内部 `run_assertions` 算出的**逐条 `results` 被丢弃**。
+   ⇒ **R-12 修正的那条路径，在落库面上本来就没有可视化证据**（`actual` 串不落任何列）；
+   「空话术证据」目前**无处可读**。**是否补「error 路径逐条断言证据落库」需另立条目裁**
+   （按「批内不掺下一批」，本批不动）。
+
+**这批的绿不能证明什么**：① **不证明纯空白 answer 在真实 pipeline 里会出现** —— 本批只证明算子层
+**判得对**；存量 108 条**全部非空** ⇒ 该分支在存量上**一次都没被走到**（这正是「受影响面 = 0」的含义）；
+② **不证明 R-12 在 error 链上真的生效过** —— 见上述第 2 条，那条链**零落库样本**，本批的绿来自单测与
+反事实，不来自 error 路径的实跑；③ 不证明 `KeywordContainsOp` 也需收紧（它空答已天然 FAIL，本批未动未验）；
+④ 不证明白名单豁免机制有用武之地（Q② 判空集，该分支**保留为机制、当前无输入**）。
+
+---
+
 ## 6. 现场状态（提交/推送 · 残留 · 待裁）
 
 > 本节是「会丢的东西」的清单。**数字由 `git status --porcelain` 与 `ls` 当场产出**（2026-09-15），
@@ -210,8 +261,10 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 | # | 待裁 | 出处 |
 |---|---|---|
 | C-1 | `T-3.17` 三条：① 何时重建四仓镜像 ② 重建后**是否重跑** `integration-report.md` §2 序号 10 ③ 是否加**部署后置检查** | online `task.md` T-3.17 |
-| C-2 | `R-20` G0 的 **选项 A / 选项 B**（接受 81/85 已观测面放行 vs 先补跑 4 个未跑 case） | `error-backflow-pre-scan-report.md` §5 |
+| ~~C-2~~ | ~~`R-20` G0 的 **选项 A / 选项 B**~~ **✅ 已裁（2026-09-15）= A**：G0 判过、`R-12` 解锁。裁决时查得**订正三条**（4 个未跑 case 里 2 个是 error suite、不属问题域；真未观测的只有 suite 2733 的 2 个普通 case；B 的代价被低估）—— 见 `error-backflow-pre-scan-report.md` **§5.1**；严格表述由「81/85」订正为「**81/83 问题域相关面**」 | 同上 §5.1 |
 | C-3 | **lint 门禁缺口**：ruff 本机不可用（三处 venv 均无）；**offline 仓无任何 CI** ⇒ 唯一门禁是**手动**借 online venv + online 配置扫改动文件 | 长期未验收项 |
+| **C-4** | **error 路径的逐条断言证据不落库**（批 2 探针连带查出）：`eval_result.assertion_results` 在 `error_regression` 上 **84/84 全 NULL**，因 `orchestrator.py:582` 只落终值字符串、`_error_verdict` 的逐条 `results` 被丢弃。⇒ R-12 修正的**目标路径在落库面上零证据**，「空话术证据」无处可读。**待裁 = 补落库 / 判「设计如此、不需落库」** | 本文件 §5.2 · `task.md` O-E.9 施行记录 |
+| **C-5** | **规格引 <code>assertions/ops/text.py</code> 行号已漂 + `_ASSERTION_OPS`/`ASSERTION_OP_CLASS` 声明过时**（§9.3 写 `L33-62`，现类在 `L61-95`；§3 称算子常量缺 `keyword_not_contains`，而 `core/constants.py` 实已包含）—— **文档旧、实现对**，判 P3 登记项、**只登记不改** | 批 2 勘察 |
 
 ---
 

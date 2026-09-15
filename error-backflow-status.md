@@ -11,6 +11,10 @@
 > 且批 C7（`705e6a6`）已落地其中三项、批 C8 落地第四项。该行现已移入「三、已落地」，
 > 本条留存仅为记录这次漏判。
 >
+> **已知过期行（2026-09-15 第二批，O-E.9）**：`O-E.9`（R-12）—— 原判「未落地 + 未过 G0」，
+> 两半**均已失效**：G0 于 2026-09-15 判「过」（选项 A，`error-backflow-pre-scan-report.md` §5.1），
+> R-12 随之落地。该行已移入「三、已落地」。**顶上基线指纹未改**（本批只触及此一行、未重核全表）。
+>
 > **取证纪律（读之前必看）**：本表由三个只读取证 agent 分路核对（O-A/B/C · O-D/E1-4 ·
 > O-E5-9/F/G），**只有 O-E.3 经过二次人工回查**——但那次回查**本身只覆盖了它的一个子项**，
 > 漏掉另外三项，2026-09-15 由批 C7 开工前的复查才补齐。这说明「经过人工回查」这个标记
@@ -50,7 +54,7 @@
 
 ## 汇总
 
-**35 条 = 已落地 17 / 部分落地 12 / 未落地 4 / 无法判定 2**，另 **前提不可达 1**（O-E.2 的
+**35 条 = 已落地 18 / 部分落地 12 / 未落地 3 / 无法判定 2**（*2026-09-15 第二批：O-E.9 由「未落地」移入「已落地」，只动这两个数；下方那条对不上账的告警**未被本次平账**，勿读作已平*），另 **前提不可达 1**（O-E.2 的
 backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不另计条目，五项相加为 36 是重复计数）
 
 > ⚠️ **本汇总与其下四节表格对不上账（2026-09-15 发现，**先于本次核对存在**，未擅自平账）**：
@@ -115,11 +119,11 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 
 ---
 
-## 一、未落地（4）
+## 一、未落地（3）
 
 | 条 | 缺什么 | 证据 | 后果 / 性质 |
 |---|---|---|---|
-| **O-E.9**（R-12）| 空/纯空白 answer 未改为 FAIL | `assertions/ops/text.py:83-89`（只有 `isinstance` 判断，**无 `not text.strip()`**）| 空答仍 PASS（leakage 空话术复发看不出来）。**且它 `未过 G0`** —— 见下「结构性问题 1」 |
+| ~~**O-E.9**（R-12）~~ **✅ 已落地（2026-09-15）⇒ 移入「三、已落地」** | ~~空/纯空白 answer 未改为 FAIL~~ 【原判词留存】`assertions/ops/text.py:83-89`（只有 `isinstance` 判断，**无 `not text.strip()`**）| ~~空答仍 PASS~~ 【原后果留存】(leakage 空话术复发看不出来)；~~且它 `未过 G0`~~（G0 已于 2026-09-15 判过，见报告 §5.1）|
 | **O-B.5** | 写校验收口函数 `assert_normal_case_golden_fields` 全仓无定义 | `core/case_rules.py` 只有 4 个函数；`api/cases.py:229-235` 用 `body.expected or {}` 兜底、`:310-311` 通用 setattr | 普通 case 的 golden 三列可缺、不报错（`error 分支只允许 null` 的守卫无载体）|
 | **O-G.1** | 无 `error_codes.py` 分类表，无 R-19 对齐单测 | `runner/executor.py:22-31` 有 `ERROR_*` 常量；全仓 grep `error_codes` 零命中 | 新增 `error_type` **漏分类不会红** —— 护栏缺失（不是功能缺失）|
 | **O-D.2** | per-agent 拉取游标从不传 | `runner/pull_loop.py:94`（调用不传游标）；`core/backflow_client.py:66-72` 有 `since_ts/next_token` 形参但 docstring 自陈「游标持久化属调用方职责」；`core/config.py` 无相关键 | 每轮重复拉全量。正确性由 inbox 幂等兜住，代价在**量级** ⇒ **容量型**，不是故障 |
@@ -140,9 +144,23 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 | O-G.2 | `tests/integration/test_integration_scanner_error_run.py` 四条（scanner 租约/硬超时两入口 + 计划数>加载数 + 「已终值行不改写」独立断言），判别力经反向对照实测；**两条回收路径均断言「未完成 case 回填 na」**（#260 后租约路径的判据才成立）。另 `tests/test_error_regression_run.py::TestFinishErrorRegression` **7 条无 DB 单测**已覆盖收尾四态 + 回填 + 外部终态不覆盖 | **收尾语义已有覆盖，缺的是「入口调用方」**：`_run_error` 的两条早退（`:379-382` 前置校验不过 → `_mark_error_skipped`；`:384-386` 接管时已取消 → **直接 return、完全不调收尾 ⇒ link 挂到 scanner 回收**）均无测试；R-22 另两条路径（orchestrator cancel / run 级超时）**未逐字复刻**其入口 —— 三者是同一件事的三个面：**被调函数已验，调它的入口未被驱动** |
 | O-G.4 | 载荷序列化方向 + `schema_version` + self_check + 两水位口径 | `run_status` 四值 Literal、`cases[].pass_fail` 三值、字段长度上限 64/48、10 字段必填性枚举；「两水位不得按 trigger_type 收窄」的显式钉死 |
 
-## 三、已落地（17）
+## 三、已落地（18）
 
-`O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· `O-F.9`（双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；*规格自陈「登记不修」，根因未动符合预期*）· **O-E.3**（§7.5 api 配套四项，*批 C7 落地项 2/3/4 + 批 C8 落地项 1*）· **O-E.7**（独立收尾 + R-22 回填 + **scanner 短路**，*短路子项 2026-09-15 落地*）
+`O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· `O-F.9`（双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；*规格自陈「登记不修」，根因未动符合预期*）· **O-E.3**（§7.5 api 配套四项，*批 C7 落地项 2/3/4 + 批 C8 落地项 1*）· **O-E.7**（独立收尾 + R-22 回填 + **scanner 短路**，*短路子项 2026-09-15 落地*）· **O-E.9**（R-12 空答 FAIL，*2026-09-15 落地；G0 前置已于当日判过*）
+
+> **O-E.9（R-12）的落地证据与两条连带**（2026-09-15）：
+> - **改动点**：`assertions/ops/text.py` 的 `KeywordNotContainsOp.run()` 内、`isinstance` 分支**之后**插入
+>   空/纯空白守卫（`git diff --stat` = **5 增 0 删**，既有行未动）。**规格伪码与真实签名不符**：
+>   §9.3 写 `return OpResult(False, ...)`，真实基类返回 `tuple[bool, Any]` ⇒ 按真实签名落地。
+> - **验证**：单测两条（空答三形态 FAIL + 非空不命中仍 PASS）；**判别力对照实测**（摘掉守卫 ⇒ 用例红在
+>   「期望 False 实得 True」）；存量回归探针 `tests/integration/r12_empty_answer_probe.py`（连跑三遍
+>   一致：判据① 空 `answer` 且带该断言 = **0**；判据② 对照 = **108** 全部非空）；全量回归 **939 passed /
+>   100 skipped**（= 批 1 基线 937/100 + 本批新增 2 条，自洽）。
+> - **⚠️ 连带发现（新，未修，属下一批的候选）**：探针按 `trigger_type` 拆分显示那 108 条**全部来自
+>   `manual`**，`error_regression` **零条** —— 因 `eval_result.assertion_results` 在 error 路径
+>   **84/84 全 NULL**。根因是**代码设计**：`orchestrator.py:582` 只落 `verdict_fn(...)` 的**终值字符串**，
+>   `_error_verdict`（`:136-144`）内部算出的逐条 `results` **被丢弃**。⇒ R-12 的**目标受益面在生产库中零样本**，
+>   且「空话术证据」（`actual` 串）**在任何落库面上都不可见**。**本批不修**（批内不掺下一批），只登记。
 
 > **O-E.3 的两条偏离（施行记录，非口径变更）**：
 > 1. **项 1 未照规格字面实施**。规格（`solution_detail.md:524` + `:170`）写「→ 域校验（非空 ≤64
@@ -173,6 +191,9 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 1. **G0 卡成死环**。`O-A.1` 的 R-20 pre-scan 报告不存在（全仓 `*pre-scan*` 零命中）⇒ **G0 未过**；
    而 O-E.9（R-12）的开工前提正是 G0 的结论。好消息：O-E.9 确判「未落地」，**没有违反「未过 G0
    不开工」**；坏消息：这条链上谁都动不了。
+   > ✅ **本条已消解（2026-09-15）**，原判词留存以记录当时的卡点：`error-backflow-pre-scan-report.md`
+   > 已产出（R-20 出口物），G0 于当日判「过」（选项 A，报告 §5.1），`O-A.1` 结清、`O-E.9`（R-12）
+   > 随本批落地。**该环是靠「补齐产物」解开的，不是靠放宽门禁** —— 判据本身未动。
 2. **「写守卫」是一族缺口，不是一条**。§6.5 的 403、谓词常量三件套、dashboard 排除、active-count
    排除 —— 四处同一语义（error run/case 不得混进人工面色），规格本就要求「集中定义防漂移」，
    现在**四处各缺各的**。其中 **active-count 那条会咬人**（409 误挡 manual run）——**该条已由

@@ -82,6 +82,11 @@ class KeywordNotContainsOp(AssertionOp):
             return False, f"<未取到 {path}>"
         if not isinstance(val, str):
             return False, f"<非文本: {type(val).__name__}>"
+        # R-12：空/纯空白应答 = leakage「空话术」复发证据 ⇒ FAIL（**不是 na**：na = 复现没跑到，
+        # fail = 跑到且答空，两条路径不可混）。空串天然不含任何 keyword，不显式判空就会被下面
+        # 的 `not hits` 判成 PASS ⇒ 该抓的没抓到。纯空白必须一并判（只写 `== ""` 会漏 "   "）。
+        if not val.strip():
+            return False, "<空/纯空白应答 → 复现空答（leakage 空话术证据）>"
         hits = _keyword_hits(keywords, val)
         want_all = args.get("match", "all") == "all"
         # match="all"（默认）：所有关键词都不出现才通过；任一出现即 fail

@@ -220,6 +220,25 @@ class TestKeywordNotContains(unittest.TestCase):
         ok, _ = self.op.run(UNIFIED, {"keywords": ["DSML", "tool_calls"]})
         self.assertTrue(ok)
 
+    def test_blank_answer_fails(self):
+        """R-12：空/纯空白应答 = leakage 空话术复发证据 ⇒ FAIL（**不是 na**）。
+
+        空串天然不含任何 keyword，改动前会被 `not hits` 判成 PASS ⇒ 该抓的没抓到。
+        纯空白必须单列：只写 `== ""` 的实现会在纯空白形态上漏判。
+        """
+        for blank in ("", "   ", "   \n\t "):
+            with self.subTest(blank=repr(blank)):
+                ok, actual = self.op.run({"answer": blank}, {"keywords": ["DSML", "tool_calls"]})
+                self.assertFalse(ok)
+                self.assertIn("空/纯空白", str(actual))
+
+    def test_nonempty_answer_without_keyword_still_passes(self):
+        """防误伤正面判据：非空且不命中 ⇒ 仍 PASS（否则「一刀切 return False」也会全绿）。"""
+        ok, _ = self.op.run(
+            {"answer": "根据制度，年休假按连续工作年限划分。"},
+            {"keywords": ["DSML", "tool_calls"]})
+        self.assertTrue(ok)
+
     def test_dsml_markup_fails(self):
         ok, _ = self.op.run(
             {"answer": "我再查一下<DSML><DSML>tool_calls"}, {"keywords": ["DSML", "tool_calls"]})
