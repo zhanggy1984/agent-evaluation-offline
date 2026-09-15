@@ -24,6 +24,7 @@ from app.runner.executor import CaseOutcome
 from app.runner.orchestrator import (
     ERROR_CASE_TIMEOUT_S,
     ERROR_CIRCUIT_DOMAIN,
+    ERROR_SKIP_REASON,
     CANCELLED,
     COMPLETED,
     PARTIAL_FAILED,
@@ -389,7 +390,14 @@ class TestRunErrorWiring:
         async def __aexit__(self, *exc):
             return False
 
-    async def _run(self, monkeypatch, run_config) -> dict:
+    async def _run(self, monkeypatch, run_config, *, cancelled=False, precheck_ok=True) -> dict:
+        """走 `_run_error` 一遍，捕获三件事：`args`(已构造执行任务) / `finished`(已调收尾)
+        / `skipped`(已调 `_mark_error_skipped`)。
+
+        `cancelled` **置真标志**驱动真 `_is_cancelled`（而非把它替换成 lambda True）——
+        后者会把「标志读写」这一步也桩掉，`_cancel` 字典的清理语义就无处可验。
+        `precheck_ok=False` 走 `pinned=False` 触发 D8 三条里的第一条。
+        """
         calls: dict = {}
         monkeypatch.setattr(orch_mod, "SessionLocal",
                             lambda: _FakeSessionCtx(self._CfgDB()))
@@ -404,9 +412,16 @@ class TestRunErrorWiring:
         async def fake_finish(rid):
             calls["finished"] = rid
 
+        async def fake_skipped(rid, reason):
+            calls["skipped"] = (rid, reason)
+
         monkeypatch.setattr(orch, "_run_one_error", fake_one)
         monkeypatch.setattr(orch, "_finish_error_regression", fake_finish)
-        run = SimpleNamespace(suite_id=1, pinned=True, case_ids=[1], run_config=run_config)
+        monkeypatch.setattr(orch, "_mark_error_skipped", fake_skipped)
+        run = SimpleNamespace(suite_id=1, pinned=precheck_ok, case_ids=[1],
+                              run_config=run_config)
+        if cancelled:
+            orch._cancel[7] = True
         await orch._run_error(7, run, _Agent(), [SimpleNamespace(id=11)], run_config)
         return calls
 
@@ -421,6 +436,78 @@ class TestRunErrorWiring:
     async def test_defaults_timeout_when_absent(self, monkeypatch):
         calls = await self._run(monkeypatch, {})
         assert calls["args"][6] == ERROR_CASE_TIMEOUT_S
+
+    # ---- 两条早退（此前**只测了 happy path**，早退路径零驱动）----
+
+    @pytest.mark.asyncio
+    async def test_cancelled_at_takeover_skips_execution_and_finish(self, monkeypatch):
+        """接管时已取消 → **不执行、不调收尾**，run 交 scanner 兜底回收。
+
+        这不是缺陷而是契约：:384 的 return 发生在心跳任务建立（:399）与 `try` 之前，
+        故此处**没有任何需要清理的残留**；run 停在 pending/running、由 scanner 的租约/
+        硬超时回收走真收尾（该侧行为见 `test_integration_scanner_error_run.py` 用例①）。
+        本用例钉住这个契约 —— 若日后有人在 return 前补上收尾，此处即红（重复收尾会二次推 link）。
+        """
+        calls = await self._run(monkeypatch, {}, cancelled=True)
+        assert "args" not in calls, "接管即取消，却仍构造了执行任务"
+        assert "finished" not in calls, "接管即取消，却仍调了收尾（应留给 scanner 回收路径）"
+        assert "skipped" not in calls, "取消不是前置校验失败，不得走 _mark_error_skipped"
+
+    @pytest.mark.asyncio
+    async def test_precheck_failure_marks_skipped_without_finish(self, monkeypatch):
+        """D8 前置校验不过 → `_mark_error_skipped`（**不是**收尾），且不构造执行任务。
+
+        两条早退走的是**不同**分支：取消是「静默交还」，前置不过要落 partial_failed +
+        fail_reason 供 online 读。混用会给出错误结论（取消也被报成 precheck_failed）。
+        """
+        calls = await self._run(monkeypatch, {}, precheck_ok=False)
+        assert "args" not in calls, "前置校验不过，却仍构造了执行任务"
+        assert "finished" not in calls, "前置校验不过，却仍调了收尾（应收敛在 _mark_error_skipped）"
+        assert calls["skipped"][0] == 7
+        assert "pinned" in calls["skipped"][1], "未把 D8 的具体原因透出"
+
+
+class TestMarkErrorSkipped:
+    """`_mark_error_skipped` 的**效果**（无 DB）。
+
+    `_error_precheck_failures`（判据）早已有测试，但判据触发的**落库效果**零覆盖 ——
+    判据说「不过」，效果决定 online 看到什么。二者任一改坏都得红。
+    """
+
+    async def _skip(self, monkeypatch, run, reason="pinned=False"):
+        db = _FinishDB(run, [])
+        monkeypatch.setattr(orch_mod, "SessionLocal", lambda: _FakeSessionCtx(db))
+        await RunOrchestrator()._mark_error_skipped(7, reason)
+        return db
+
+    @pytest.mark.asyncio
+    async def test_partial_failed_with_reason_and_zero_total(self, monkeypatch):
+        run = _run_obj(status="running", total_case=3)
+        run.run_config = {"case_timeout": 120}
+        db = await self._skip(monkeypatch, run, reason="pinned=False")
+
+        assert run.status == PARTIAL_FAILED          # 不是 completed、更不是 cancelled
+        assert run.total_case == 0                   # ★ 清算：一条都没跑，分母必须归零
+        assert run.finished_at is not None
+        assert run.run_config["fail_reason"] == ERROR_SKIP_REASON
+        assert run.run_config["error_precheck"] == "pinned=False"   # 具体原因可读
+        assert run.run_config["case_timeout"] == 120  # 原键不被抹掉
+        assert db.committed
+
+    @pytest.mark.asyncio
+    async def test_does_not_overwrite_terminal_run(self, monkeypatch):
+        """已终态（如 scanner 已标 timeout）→ **原样返回**，不覆盖、不提交。
+
+        `:470` 的状态前置判断与 `_finish_error_regression` 的 `external_terminal` 同源约定：
+        外部先置的终态是权威，后来者只许补统计、不许改判。
+        """
+        run = _run_obj(status="timeout", total_case=3)
+        db = await self._skip(monkeypatch, run)
+
+        assert run.status == "timeout"
+        assert run.total_case == 3                   # 未被清零
+        assert run.run_config == {}                  # 未写入 fail_reason
+        assert not db.committed, "已终态仍提交了事务"
 
 
 class TestErrorCircuitDomainWiring:

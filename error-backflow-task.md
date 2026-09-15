@@ -106,6 +106,12 @@
 
 > 护栏 = 防系统性误伤的**行为锁**（非一次性核对），随对应代码落地即写、并入 CI。
 
+> ⏸ **O-G.1 / O-G.3 / O-G.4 三项暂停（2026-09-15 拍板）**：不撤回、不继续。
+> 理由 = 三者都是**对着 online 源码/规格推断**契约（字段清单、分类表、矩阵登记），
+> 而真实数据一条都没走过 —— 推断出的契约对错无法证伪。**改为先追通一条真实数据，
+> 再按真实载荷倒推该写什么断言**。恢复时机 = 第一条数据打通后由用户拍板。
+> 详见 `error-backflow-status.md` 顶部「全表暂停」注。
+
 - **O-G.1 R-19 error_codes 一致性单测（护栏）**：`runner/error_codes.py` 字面量 + 分类表（§3.1 error_type 权威字面量域）**必须逐字符等于** executor.py 常量全集（详设 §2.4：executor 错误常量 L22-31 + `RETRYABLE_ERRORS` L38）；na 值域 ⊆ phase2 §6.4 na 分类矩阵值；单测钉死任一 key 漂移（拼写/长短名/大小写）→ 测试红（防 executor 加常量漏分类 → 未知 error_type 默认从严环境级 → 假 unclean_run 风暴复发）（详设 §3.1/§9.6 + 批 2 §6.4 R-19）。**验证目标**：§12.3 单测并入 CI，常量增改即红。
 - **O-G.2 R-22 收尾回填 error_type 单测护栏**：scanner 回收 / orchestrator cancel / run 级超时收尾三路径回填 `scheduler_unexecuted` 非空 + **已终值行不改写** + 回填只落实跑集无结果 case 断言（详设 §3.4 + §12.4 R-22）。**验证目标**：§12.4 单测并入 CI（复用 O-E.7 断言，抽为独立护栏文件）。
   - ✅ **2026-09-15 落地**：`tests/integration/test_integration_scanner_error_run.py` 4 条
