@@ -921,6 +921,15 @@ async def _create_error_regression_run_locked(db, *, agent_id: int, suite_id: in
         pinned=True,                                    # §7.4：关键版本不被清理
         run_config=cfg,
         case_ids=[c.id for c in selected],
+        # #260：scanner 租约回收的收尾对账分母（§6.6「未完成 case 回填 na」）。
+        # 本 run 若**从未被接管**（进程崩溃/假死），收尾只由 scanner 触发，那时 `total_case`
+        # 唯一可能的值就是此处 —— 不写则恒为模型默认 0，`len(results) < run.total_case`
+        # 恒假 ⇒ 回填整条不发生（实测）。
+        # ⚠️ 取的是**过滤前计划数** —— `_is_error_case` 形态过滤与 `is_held_out` 都在
+        # `_load_run_cases` 加载时才做，故此处**故意可能大于**接管处写入的 `len(cases)`。
+        # 这不产生多余结果行：对账的补行循环遍历的是**加载集**（已过滤），判据只拿它决定
+        # 「要不要对账」、不决定「给谁补行」。语义分三阶段：建单计划数 → 接管加载数 → 收尾结果数。
+        total_case=len(selected),
         excluded_case_ids=overflow or None,
         trigger_signal_id=signal_run_id,
         # 7.5a pending 回收兜底：创建即写初始租约（orchestrator 未接管时由 scanner 回收）

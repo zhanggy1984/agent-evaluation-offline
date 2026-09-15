@@ -49,13 +49,18 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 > 2026-09-15（scanner 短路批）后：**`O-E.7` 由「部分落地」移入「已落地」**（唯一的子项 scanner
 > 短路已落地，含偏离登记）；**`O-G.2` 仍留「部分落地」但缺口收窄** —— scanner 侧两入口护栏与
 > 「已终值行不改写」独立断言已补，**run 级超时路径仍无测试**。
+> 2026-09-15（#260 尾项）后：`O-G.2` 缺口**再收窄一处** —— 曾登记的「`total_case=0` 场景下 na
+> 回填无断言」随该缺口修复而消失（用例② 改为断言回填），**run 级超时路径仍无测试**，状态仍为
+> 「部分落地」。
 > 其余 32 条**状态未变**，判词仍以 2026-09-14 / `7691f72` 那次核对为准。
 >
-> ⚠️ **同批暴露出一个独立缺口（不在本表 35 条内，登记备查）**：`run.total_case` 只在
-> pending→running 的接管 UPDATE 里被赋值、**建单处不写** ⇒ 从未被接管的 pending error run
+> ✅ **同批暴露的独立缺口（不在本表 35 条内）已于 2026-09-15 修复（#260）**：`run.total_case`
+> 原只在 pending→running 的接管 UPDATE 里被赋值、**建单处不写** ⇒ 从未被接管的 pending error run
 > 的 `total_case` 恒为 0，`_finish_error_regression` 的 `len(results) < run.total_case` 判据为假
-> ⇒ **§6.6 的「未完成 case 回填 na」在租约路径下不发生**（硬超时路径正常）。修它要动已验收
-> 函数或建单处补列，属**另一验证面**，未掺入本批。
+> ⇒ **§6.6 的「未完成 case 回填 na」在租约路径下不发生**（硬超时路径正常）。修法 = 在建单处
+> `_create_error_regression_run_locked` 补写 `total_case=len(selected)`（**过滤前计划数**，故意可能
+> 大于接管处写入的加载数；判据只决定「要不要对账」、补行循环仍遍历已过滤加载集 ⇒ 不产多余结果行）。
+> 判别力对照实测：去掉该行 ⇒ 用例② 的 na 回填断言红。
 
 ---
 
@@ -81,7 +86,7 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 | O-F.4 | 数据面隔离（O-E.5）+ cleanup 豁免（`pinned` 恒真）| **§6.5 写守卫 403**（`cases.py:310-311` 通用 setattr、`:321` invalidate 无守卫）；谓词常量三件套；dashboard 排除（`api/dashboard.py:43/60/85-87` 只排 held_out）+ ~~active-count 排除~~（**批 C7 已落地**，见「三、已落地」的 O-E.3 施行记录 —— 本行原文把它挂在这里是 2026-09-14 的旧状态） |
 | O-F.5 | `config.py:38-43` 三键走 env + `main.py:155/157` 启动挂接 + 门控在 loop 内 | `seed.py` 无任何 `backflow_*` 键；启动无迁移 fail-fast 检查；无 cap_gap probe task |
 | O-F.8 | 静态预共享 secret + Bearer + 不进日志（`test_backflow_client.py:95-112` 钉死）| **secret 缺失/错误 → fail-fast**：`push_results` 对 401 也抛 `BackflowClientError`，`_push_one` 对一切异常重试 3 次 ⇒ **401 被重试**而非快速失败 |
-| O-G.2 | `tests/integration/test_integration_scanner_error_run.py` 三条（scanner 租约/硬超时两入口 + 「已终值行不改写」独立断言），判别力经反向对照实测 | **run 级超时路径**仍无测试（本批只覆盖 scanner 侧；该路径不属 O-E.7 短路范围）；`total_case=0` 场景下的 na 回填无断言（见 O-E.7 栏的独立缺口登记）|
+| O-G.2 | `tests/integration/test_integration_scanner_error_run.py` 三条（scanner 租约/硬超时两入口 + 「已终值行不改写」独立断言），判别力经反向对照实测；**两条回收路径均断言「未完成 case 回填 na」**（#260 后租约路径的判据才成立）| **run 级超时路径**仍无测试（本批只覆盖 scanner 侧；该路径不属 O-E.7 短路范围）|
 | O-G.4 | 载荷序列化方向 + `schema_version` + self_check + 两水位口径 | `run_status` 四值 Literal、`cases[].pass_fail` 三值、字段长度上限 64/48、10 字段必填性枚举；「两水位不得按 trigger_type 收窄」的显式钉死 |
 
 ## 三、已落地（17）
