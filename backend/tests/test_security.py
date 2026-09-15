@@ -3,6 +3,9 @@
 JWT(HS256 硬编码) / MultiFernet / bcrypt。宿主跑依赖 conftest 兜底注入
 JWT_SECRET / FERNET_KEYS / DB_PASSWORD（Settings #31 强校验，见 conftest.py）。
 """
+import asyncio
+
+import httpx
 import jwt as pyjwt
 import pytest
 
@@ -93,9 +96,9 @@ def test_random_ids():
 
 
 # ---------------- SSRF（7.6 A4：build_networks 拒全放行 / 169.254 移出白名单） ----------------
-from app.core.http import (DEFAULT_AGENT_CIDRS, JUDGE_DENY_CIDRS,
-                           AllowlistAsyncClient, build_agent_client,
-                           build_networks, validate_base_url)
+from app.core.http import (DEFAULT_AGENT_CIDRS, DEFAULT_AGENT_HOSTS,
+                           JUDGE_DENY_CIDRS, AllowlistAsyncClient,
+                           build_agent_client, build_networks, validate_base_url)
 
 
 def test_build_networks_rejects_any_any():
@@ -207,6 +210,71 @@ def test_agent_client_extra_cidrs_widen_allowlist():
         build_agent_client()._resolve("11.0.1.5", 80)
     widened = build_agent_client(extra_cidrs=["11.0.0.0/8"])
     assert widened._resolve("11.0.1.5", 80) == "11.0.1.5"
+
+
+# ---------------- R-26：send() 重写路径的 Host 去重（2026-09-15 批 4） ----------------
+# 缺陷形态（实测，非读码推断）：旧写法 `dict(request.headers)` 的键已小写为 'host'，随后
+# `new_headers["Host"] = host` 又加一个大写 H 的键 —— 两键在 dict 里并存、进 httpx.Headers 后
+# 归一为同名 ⇒ 实发**两个** Host，h11 抛 `LocalProtocolError: Found multiple Host: headers`，
+# 请求根本发不出去（容器名出站整体不可用；回流集成当年靠把 hostname 塞进 allow_hosts 绕过）。
+# 判据写成「**等于谁**」而不只是「不为 2」：Host 值本身也必须对（旧写法丢端口，见用例 1）。
+_FAKE_HOST = "agent-x.internal"   # 可解析但不在 allow_hosts ⇒ 必走重写路径
+
+
+def _client_with_capture(*, allow_hosts=None, fake_ip="127.0.0.1"):
+    """返回 (client, captured)。captured 在请求发到「传输层」时被填 —— 即**重写之后**的形状。"""
+    captured: dict = {}
+    real = socket.getaddrinfo
+
+    def fake_gai(host, port, **kw):
+        if host == _FAKE_HOST:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (fake_ip, port))]
+        return real(host, port, **kw)
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        captured["headers"] = list(request.headers.multi_items())
+        return httpx.Response(200, text="ok")
+
+    client = AllowlistAsyncClient(
+        allow_hosts=allow_hosts if allow_hosts is not None else DEFAULT_AGENT_HOSTS,
+        allow_cidrs=DEFAULT_AGENT_CIDRS,
+        transport=httpx.MockTransport(handler),
+    )
+    return client, captured, fake_gai
+
+
+def _send_rewritten(monkeypatch, **kwargs):
+    client, captured, fake_gai = _client_with_capture(**kwargs)
+    monkeypatch.setattr(socket, "getaddrinfo", fake_gai)
+    asyncio.run(client.get(f"http://{_FAKE_HOST}:8080/ping"))
+    return captured
+
+
+def test_send_rewrite_emits_exactly_one_host_header(monkeypatch):
+    """重写路径下 Host **恰好一条**，且值 = 原 authority（**含端口**）。"""
+    captured = _send_rewritten(monkeypatch)
+    assert captured["url"] == "http://127.0.0.1:8080/ping"   # 证明确实走了重写（换成解析后的 IP）
+    hosts = [v for k, v in captured["headers"] if k.lower() == "host"]
+    assert hosts == ["agent-x.internal:8080"]
+
+
+def test_send_rewrite_preserves_duplicate_headers(monkeypatch):
+    """同名多值头不得被折叠 —— `dict(Headers)` 会把两条 Cookie 并成 "a=1, b=2"（实测）。"""
+    client, captured, fake_gai = _client_with_capture()
+    monkeypatch.setattr(socket, "getaddrinfo", fake_gai)
+    asyncio.run(client.get(f"http://{_FAKE_HOST}:8080/ping",
+                           headers=[("Cookie", "a=1"), ("Cookie", "b=2")]))
+    cookies = [v for k, v in captured["headers"] if k.lower() == "cookie"]
+    assert cookies == ["a=1", "b=2"]
+
+
+def test_send_no_rewrite_when_host_allowlisted(monkeypatch):
+    """正向对照：白名单内 host 不走重写 —— 证明上面两条验的是**重写分支**，非「全改坏」。"""
+    captured = _send_rewritten(monkeypatch, allow_hosts=[*DEFAULT_AGENT_HOSTS, _FAKE_HOST])
+    assert captured["url"] == f"http://{_FAKE_HOST}:8080/ping"   # URL 未被换成 IP ⇒ 未重写
+    hosts = [v for k, v in captured["headers"] if k.lower() == "host"]
+    assert hosts == ["agent-x.internal:8080"]
 
 
 # ---------------- P2-C4 version 白名单字符集（防 tooltip XSS） ----------------

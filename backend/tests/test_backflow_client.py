@@ -5,10 +5,13 @@
 
 1. `case_id` 传 int → online `PullAckRequest.case_id: str | None` 判 **422**（与批 C 已预警的
    `run_id` 同型陷阱）。→ `test_ack_case_id_serialized_as_str`
-2. `build_agent_client()` **只给 CIDR 不给 allow_hosts** 时，容器名基址会被
+2. ~~`build_agent_client()` **只给 CIDR 不给 allow_hosts** 时，容器名基址会被
    `AllowlistAsyncClient.send` 走「换成解析 IP + 补 Host」的重写路径，产出两个大小写不同的
-   Host 头 → h11 `LocalProtocolError`，**请求根本发不出去**。
-   → `test_base_host_passed_to_allowlist`
+   Host 头 → h11 `LocalProtocolError`，**请求根本发不出去**。~~
+   **✅ 根因已于 2026-09-15 批 4 修复**（`core/http.py` 的 `send()` 改为摘掉原 Host 项再加，
+   而非叠加），当时的绕过手段（把 hostname 塞进 `allow_hosts`）**已撤除**。
+   → 护栏改为 `test_base_host_not_special_cased`（**方向反转**：再塞白名单即变红）；
+   Host 去重本身的判据在 `tests/test_security.py`。**R-26 / O-F.9**。
 
 用 `MockTransport` 而不是真出站：这两条断言的是**请求形状**（载荷字段类型 / 白名单入参），
 不是连通性；连通性由批 B 的真 online 端到端验收负责（两者不可互相替代）。
@@ -111,10 +114,17 @@ class TestBackflowClient(_Base):
                 self.assertRaises(bc.BackflowClientError):
             asyncio.run(bc.pull_payloads())
 
-    def test_base_host_passed_to_allowlist(self) -> None:
-        """基址 host 必须入 allow_hosts（走不重写那条分支）——否则请求发不出去。
+    def test_base_host_not_special_cased(self) -> None:
+        """基址 host **不得**再被塞进 allow_hosts —— 护栏方向已随 R-26 修复反转。
 
-        回归护栏：若有人把 `extra_hosts` 去掉、只留 CIDR，本断言立即变红。
+        原护栏（`test_base_host_passed_to_allowlist`）护的是「把 hostname 入白名单就能发出去」，
+        那是**绕开** `core/http.py` 双 Host 头缺陷的手段，代价 = 跳过 IP 解析校验。
+        根因已修（2026-09-15 批 4：`send()` 摘掉重复 Host 项而非叠加），故绕过撤除 ——
+        本集成恢复完整的「解析全部 IP 并校验在内网段内」。
+
+        回归护栏（新方向）：若有人重新引入 `extra_hosts=[hostname]`（无论出于何种理由），
+        本断言立即变红 —— 那会静默撤掉本集成的 SSRF 解析校验这一层。
+        容器名基址「发得出去」这一属性，现由 `tests/test_security.py` 的 Host 去重用例保证。
         """
         captured: dict = {}
 
@@ -124,7 +134,7 @@ class TestBackflowClient(_Base):
 
         with mock.patch.object(bc, "build_agent_client", _fake_build):
             bc._client()
-        self.assertEqual(captured["hosts"], ["obs-backend"])
+        self.assertEqual(captured["hosts"], [])
 
     def test_trailing_slash_does_not_double(self) -> None:
         """基址带尾斜杠时不得拼出 `//api/v1/...`。"""

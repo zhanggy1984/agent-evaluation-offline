@@ -142,6 +142,8 @@
 
 - **O-F.9 R-26 出站基址「容器名」不可达（`core/http.py` 既有缺陷；批 B 实测揭出，**登记不修**）**：`AllowlistAsyncClient.send`（`core/http.py:106-118`）对**不在 `allow_hosts` 但可解析**的主机名走「URL host 换成解析后 IP + 补回原始 Host」的重写路径，而补回写法是 `dict(request.headers)`（键已被 httpx 小写为 `host`）再赋 `["Host"]` ⇒ 出站请求携带**两个大小写不同的 Host 头**，raw 实测 `[(b'host', b'obs-backend:8000'), (b'Host', b'obs-backend')]` ⇒ h11 抛 `LocalProtocolError: Found multiple Host: headers`，**请求根本发不出去**。实测对照（同一 client、同一进程）：`host.docker.internal`（在 `DEFAULT_AGENT_HOSTS` 内，走 `http.py:85-86` 直接 return、**不重写**）→ 200；`obs-backend`（容器名，不在白名单）→ 必失败。**影响面不止本特性**：凡「按容器名调另一个容器」的出站在本客户端下**整体不可用**，根因在共享核心客户端，与 error-backflow 无耦合。**本批处置 = 绕过**：`core/backflow_client._client()` 按配置基址的 hostname 显式塞进 `extra_hosts`，走不重写那条分支；**代价（承认）** = 该分支**跳过 IP 解析校验**（`http.py:85-86` 只做 denied 检查），基址为运维配置固定值故可接受，但这是妥协不是修好。**正确修法**（未做，属 A 级核心改动）= 让 `send` 复用/替换原 Host 项而非新加大小写不同的第二个键。**验证目标**：回读 `_client()` 传给 `build_agent_client` 的 `extra_hosts`（回归护栏 `test_base_host_passed_to_allowlist`，去掉即红）；真机连通由批 B 端到端验收承担。
 
+  **✅ 施行记录（2026-09-15 批 4）——根因已修、绕过已撤除**（本条的「登记不修」处置**已被推翻**）：`send()` 改为**摘掉原 Host 项再加**（旧写法 `dict(request.headers)` 的键已小写为 `host`，再赋 `["Host"]` ⇒ dict 内并存两键、进 `Headers` 归一为同名 ⇒ 实发**两个** Host）、复用**原 Host 项**（**含端口**，旧写法丢端口）、改 `multi_items()`（`dict(Headers)` 会把同名多值头折叠成 `"a, b"`）。`_client()` 的 `extra_hosts` 绕过**撤除** ⇒ 本条写明的代价「跳过 IP 解析校验」**已不成立**，恢复完整的「解析全部 IP 并校验在内网段内」。护栏**方向反转**：`test_base_host_passed_to_allowlist`（护着绕过本身）→ `test_base_host_not_special_cased`（**再塞白名单即变红**），Host 去重判据移入 `tests/test_security.py`。**真机三判据**（容器内）：`obs-backend` 解析 `172.23.0.4` / 新码 `pull_payloads()` **200** / 旧形状 `LocalProtocolError`（**与登记症状逐字吻合**）。**登记不修**：HTTPS 的 SNI（`copy_with(host=IP)` 后按 IP 校验证书，**同源不同层**，无已知故障面）。完整验收表见 `error-backflow-pending-phases.md` §5.5。
+
 **阶段出口（G5）**：环 2 走查全绿 + 详设 §12.6 X-8~X-11（环 2 双端异常/**推送载荷对拍**用例）全绿（详设 §1.3 G5）。
 
 ## 阶段 G｜G6：M9 护栏并入 CI
@@ -199,7 +201,7 @@
 | R-20 | pre-scan 报告门禁（三问三答 + 处置登记） | 实施门禁（owner = offline 实施） | O-A.1 | G0 | 报告产出 = G0 出口 |
 | R-22 | 收尾回填 na 统一 `scheduler_unexecuted` 单测护栏 | CI 护栏 | O-E.7 + O-G.2 | G4+G6 | 收尾逻辑 = 7 条无 DB 单测 + 4 条真库集成用例；~~⚠️ **缺口在入口**（`_run_error` 两条早退无测试）~~ **⚠️ 该判已失效（2026-09-15）**：`5b01de5` 已补这两条早退 + `TestMarkErrorSkipped`，**入口缺口已闭合**（依据见 O-G.2 条目下的 2026-09-15 补） |
 | R-25 | 出站载荷契约护栏（10 字段与取值域逐字符对齐 online `api/backflow.py` + 两水位字段取数口径不得按 trigger_type 收窄） | CI 护栏（**跨仓契约锁**） | O-G.4 | G6 | 字段名/类型/必填性/取值域断言；online 侧字段变更即红 |
-| R-26 | 出站基址「容器名」不可达（`core/http.py` 双 Host 头 ⇒ `LocalProtocolError`；**根因在共享客户端，影响面 = 一切容器名出站**） | offline core（**A 级，本批只绕过不修**） | O-F.9 | 待议（另立批次） | 绕过护栏 `test_base_host_passed_to_allowlist` 已入单测即红；真机连通由批 B 端到端验收承担 |
+| R-26 | 出站基址「容器名」不可达（`core/http.py` 双 Host 头 ⇒ `LocalProtocolError`；**根因在共享客户端，影响面 = 一切容器名出站**） | offline core（**A 级**） | O-F.9 | **✅ 已修（2026-09-15 批 4）**：根因已修 + 绕过已撤除 | 护栏**已反转**为 `test_base_host_not_special_cased`（再塞白名单即红）；Host 去重判据在 `tests/test_security.py`（3 条）；**真机三判据**已取（解析 172.23.0.4 / `pull_payloads()` 200 / 旧形状 `LocalProtocolError`）；反事实恰好 2 红 |
 
 ## 不做清单（归属明确，勿误入本 task 范围）
 

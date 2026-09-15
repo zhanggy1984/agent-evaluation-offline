@@ -13,8 +13,6 @@ fail-closed，**不接平台 JWT**。错 secret 得 401，而症状看起来像�
 """
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
 import httpx
 
 from app.core.config import settings
@@ -53,24 +51,15 @@ def _base() -> str:
 
 
 def _client():
-    """出站客户端。**必须把目标主机塞进 allow_hosts**，不能只靠 CIDR。
+    """出站客户端。基址是**容器名**（如 `obs-backend`）时走「解析→校验→IP 直连+透传 Host」。
 
-    原因（实测，`core/http.py:106-118` 的既有行为）：`AllowlistAsyncClient.send` 对
-    **不在 `allow_hosts` 但可解析**的主机名走「把 URL host 换成解析后的 IP + 补回原始
-    Host」的路径；而补回写法是 `dict(request.headers)`（键已小写为 `host`）再赋
-    `["Host"]` ⇒ 请求带上**两个大小写不同的 Host 头** ⇒ h11 抛
-    `LocalProtocolError: Found multiple Host: headers`，请求根本发不出去。
-    实测对照：`host.docker.internal`（在白名单内，走 `http.py:85-86` 直接返回、不重写）
-    返回 200；`obs-backend`（不在白名单）必失败。而本集成的基址正是**容器名**。
-
-    故这里按配置基址的 hostname 显式入白名单，走不重写的那条分支。
-    代价（承认）：该分支**跳过 IP 解析校验**（`http.py:85-86` 只做 denied 检查）。
-    基址是运维配置的固定值、非用户输入，可接受；但**根因在 `core/http.py`**，
-    正确修法是让 send 复用原 Host 项而不是新加一个，属 A 级改动，未在本批动。
-    登记见 `error-backflow-task.md` **O-F.9 / R-26**（影响面 = 一切容器名出站，不限本特性）。
+    R-26（2026-09-15 批 4 已修）：此前这里按基址 hostname 显式塞进 `allow_hosts`，只为绕开
+    `core/http.py` 双 Host 头缺陷（该分支不重写 URL，故不触发）。**绕过的代价是跳过 IP 解析
+    校验**（`http.py` 的白名单 host 分支只做 deny 检查，而 agent 客户端的 deny 集为空）。
+    根因已修（原 Host 项复用 + 摘掉重复项），故**绕过一并撤除** —— 本集成恢复完整的
+    「解析全部 IP 并校验在内网段内」这一层。
     """
-    host = urlparse(_base()).hostname
-    return build_agent_client(extra_hosts=[host] if host else ())
+    return build_agent_client()
 
 
 async def pull_payloads(

@@ -109,8 +109,18 @@ class AllowlistAsyncClient(httpx.AsyncClient):
         resolved = self._resolve(host, port)
         if resolved != host:
             new_url = request.url.copy_with(host=resolved)
-            new_headers = dict(request.headers)
-            new_headers["Host"] = host  # 透传原始 Host，业务侧无感
+            # R-26（2026-09-15 修）：**必须摘掉原 Host 项再加，不能直接赋值**。
+            # 旧写法 `dict(request.headers)` 的键已小写为 'host'，随后 `["Host"] = host` 又加了
+            # 一个大写 H 的键 —— 两键在 dict 里并存、进 Headers 后归一为同名 ⇒ 实发**两个** Host，
+            # h11 抛 `LocalProtocolError: Found multiple Host: headers`，请求根本发不出去
+            # （容器名出站整体不可用）。实测：multi_items() 返回两条 host。
+            # 另两处顺带修正：① 取**原 Host 项**（含端口）而非新造的裸 host——旧写法丢端口；
+            # ② 用 multi_items() 而非 dict()——dict(Headers) 会把同名多值头折叠成 "a, b"。
+            # 透传原始 Host 项（含端口），业务侧无感
+            original = request.headers.get("host") or request.url.netloc
+            new_headers = [(k, v) for k, v in request.headers.multi_items()
+                           if k.lower() != "host"]
+            new_headers.append(("host", original))
             request = httpx.Request(
                 request.method, new_url, headers=new_headers,
                 content=request.content, extensions=request.extensions,

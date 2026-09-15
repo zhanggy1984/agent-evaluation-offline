@@ -34,7 +34,7 @@
 | 编号 | 对象 | 来源 | 级别 | 当时状态（2026-09-15） |
 |---|---|---|---|---|
 | **P1-1** | 出站 **401 不重试**（`O-F.8` 判据「secret 缺失/错误 → 出站被拒**且不重试**」） | offline `error-backflow-task.md` O-F.8 | **A**（要动 `BackflowClientError` 形态 = 跨模块签名） | ✅ **已落地（2026-09-15，批 3）** —— 见 §5.3。（原缺口确证：异常只带 message、**不携带状态码** ⇒ 调用方无法按码分流 ⇒ 401 照样重试 3 次后放弃。**⚠️ 该缺口描述的适用范围偏宽**：重试只存在于 push 路径，`pull_loop` 两处捕获本就无立即重试） |
-| **P1-2** | `R-26` / `O-F.9` 双 `Host` 头（容器名出站整体不可用） | offline `error-backflow-task.md` O-F.9 | **A**（根因在 `core/http.py` 共享客户端，**影响面不限本特性**） | **缺口确证**：现为**绕过**（`backflow_client._client()` 显式入白名单），根因未修；代价 = 该分支**跳过 IP 解析校验** |
+| **P1-2** | `R-26` / `O-F.9` 双 `Host` 头（容器名出站整体不可用） | offline `error-backflow-task.md` O-F.9 | **A**（根因在 `core/http.py` 共享客户端，**影响面不限本特性**） | **✅ 已完成（2026-09-15）**，详见 §5.5：**根因已修**（`send()` 摘掉原 Host 项再加），**绕过已撤除**（`_client()` 不再显式入白名单）⇒ 恢复完整的「解析全部 IP 并校验在内网段内」。**提交与推送状态以 `git log @{u}..HEAD` 现跑为准** |
 
 ### P2 — 看板取数面（**两条不同链**）
 
@@ -70,7 +70,7 @@
 | **批 1** | P2-1 | **真库 + 反事实对照**（改的是 SQL 谓词，纯函数单测覆盖不到） | 无（**方案已出**） |
 | **批 2** | P0-2 | **存量回归 + 注入对照**（共享算子，须防误伤 manual/held_out） | G0 ✅ **→ ✅ 已完成（2026-09-15）**，详见 §5.2 |
 | **批 3** | P1-1 | **出站异常分流**（可桩化到单测层） | ✅ **已完成（2026-09-15）**，详见 §5.3 |
-| **批 4** | P1-2 | **`core/http.py` 传输层**（必须真机：双 Host 头只有实发才现形） | — |
+| **批 4** | P1-2 | **`core/http.py` 传输层**（必须真机：双 Host 头只有实发才现形） | ✅ **已完成（2026-09-15）**，详见 §5.5 |
 | **批 5** | P2-2 | **写端点 403 全清单** | ✅ **已完成（2026-09-15）**，详见 §5.4 |
 | **批 6** | P4-1 | **镜像重建后复验** | 需重建四镜像 |
 
@@ -284,6 +284,44 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 > **⚠️ 判词口径差异（有意，非漏做）**：`error-backflow-status.md` 的 O-F.4 行**仍留「部分落地」**
 > （因规格点名的常量项未做，与 `O-C.3` 同惯例），**汇总数字未动**；而本节按「批 5 已完成」记。
 > 两者口径不同源于**文件职责不同**（status 表判「规格条目是否全落地」，本文件判「排期批次是否做完」）。
+
+### 5.5 验收结果（批 4 / P1-2 / R-26，2026-09-15）
+
+**改动**：`core/http.py::AllowlistAsyncClient.send()`（摘掉原 Host 项再加、`multi_items()` 取代
+`dict()`、复用**原 Host 项**保住端口）、`core/backflow_client.py::_client()`（撤除 `extra_hosts`
+绕过 + 删 `urlparse` 死导入）、`tests/test_security.py`（+3 条 R-26 用例）、
+`tests/test_backflow_client.py`（护栏**方向反转**：`test_base_host_passed_to_allowlist`
+→ `test_base_host_not_special_cased`）。
+
+**根因（实测，非读码推断）**：旧写法 `dict(request.headers)` 的键已被 httpx **小写**为 `host`，
+随后 `["Host"] = host` 又加了**一个大写 H** 的键 —— 两键在 dict 里并存、进 `httpx.Headers` 后
+归一为同名 ⇒ 实发**两个** Host。另两处同源缺陷：新造的 Host 是**裸 host（丢端口）**、
+`dict(Headers)` 会把同名多值头**折叠**成 `"a, b"`。
+
+| 项 | 怎么验 | 结果 |
+|---|---|---|
+| 5.1 单测（请求形状） | `pytest tests/test_security.py tests/test_backflow_client.py -q` | ✅ 39 passed |
+| 5.2 反事实对照 | `send()` 还原为 `dict()` 写法 | ✅ **恰好 2 红**（Host 去重 + Cookie 保留）、37 绿 ⇒ 有判别力；还原后复绿、残留 0 |
+| 5.3 全量回归 | `cd backend && PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest -q` | ✅ **960 passed / 100 skipped**（批 5 基线 957/100 + 本批 3 条，自洽） |
+| 5.4 ruff 逐规则对照 HEAD | 借 online venv + online `pyproject.toml` | ✅ 四个文件**逐规则计数与 HEAD 完全一致**（首轮**非零新增**：`http.py` +1 E501、`test_security.py` +4 E402 / +1 E501 / **+3 F811** / +8 I001 —— 全是我引入的重复 import 与超长行，已修） |
+| 5.5 真机判据①（DNS） | `ai-eval-backend` 内 `getaddrinfo("obs-backend", 8000)` | ✅ `172.23.0.4` ⇒ **排除「解析不出」这一误判源** |
+| 5.6 真机判据②（新码） | 同上，走**真实客户端**打 `obs-backend` | ✅ `/openapi.json` 200、`/docs` 200、真实端点 `/api/v1/pull/payloads` 405、**`backflow_client.pull_payloads()` 返回 200** |
+| 5.7 真机判据③（旧形对照） | 同一真实传输层发**两条 Host** 的请求 | ✅ `LocalProtocolError: Found multiple Host: headers` —— 与 O-F.9 登记症状**逐字吻合**，因果链闭环 |
+| 5.8 影响面 | 全仓查 `build_agent_client` 调用点 | 7 处（`adapters/engine` ×2、`api/agents`、`api/scaffold`、`core/backflow_client`、`runner/orchestrator` ×2）+ `judge/client.py` 直接构造 —— 单个 `send()` 覆写是**收敛点** |
+
+> **⚠️ 判据②的首轮预期值是我自己定错的，不是修复失效**：方案写的是「摘后 HTTP 200」，真机拿到的
+> 却是 **404** —— 根路径 `/` 在 online 服务上**没有路由**。404 同样证明「请求发出去了、拿到了
+> HTTP 响应」（对照判据③是**发不出去**），但**预期值本身定错**，故补打真实业务路径
+> （`/openapi.json`、`/docs`、真实端点、真实 `pull_payloads()`）后才算验收。
+
+> **摘绕过使回流出站从「永不失败」变成「依赖一次真实 DNS 解析」** —— 故判据①必须与判据②**同批打**：
+> 否则「DNS 解析不出」与「修复失效」**表象相同**（都是 `SSRF: 无法解析`），必误判成「批 4 改坏了」。
+
+**这批的绿不能证明什么**：① **不证明 HTTPS 的 SNI 正确** —— `copy_with(host=IP)` 后 TLS SNI 变 IP、
+按 IP 校验证书，与本缺陷**同源但不同层**，当前无已知故障面，**登记不修**；② **不证明各调用点自己的
+base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真机各打一处即覆盖该层），但各调用点的
+入参组合不在观测面内；③ **不证明 online 侧视角正常** —— 只验了客户端不再抛错且对端有应答，
+**未核对端日志**；④ **不证明 `pool_error` 分类**（与本批无关，属批 3 面）。
 
 ---
 

@@ -26,6 +26,15 @@
 > 与 `O-C.3` 因同一常量项留「部分落地」的处理**同惯例**。汇总数字**未动**（本批无条目跨节移动）。
 > **顶上基线指纹未改**（本批只触及此一行、未重核全表）。
 >
+> **已知过期行（2026-09-15 第五批，O-F.9）**：`O-F.9`（双 Host 头 ⇒ 容器名出站**整体不可用**）——
+> 原判词记的是「**extra_hosts 绕过 + 回归护栏**；规格自陈『登记不修』，根因未动符合预期」。
+> 本批**把根因修了**：`core/http.py::send()` 改为**摘掉原 Host 项再加**（而非叠加大小写不同的
+> 第二个键），`core/backflow_client._client()` 的**绕过随之撤除**。该行**仍留在「三、已落地」**
+> （它本就是「绕过已落地」的判词，不是缺口行），但**判词内写明的一处代价已不成立** ——
+> 「绕过跳过 IP 解析校验」现**已恢复**。**汇总数字未动**（本批无条目跨节移动）。
+> **顶上基线指纹未改**（本批只触及此一行、未重核全表）。**真机三判据见**
+> `error-backflow-pending-phases.md` §5.5。
+>
 > **取证纪律（读之前必看）**：本表由三个只读取证 agent 分路核对（O-A/B/C · O-D/E1-4 ·
 > O-E5-9/F/G），**只有 O-E.3 经过二次人工回查**——但那次回查**本身只覆盖了它的一个子项**，
 > 漏掉另外三项，2026-09-15 由批 C7 开工前的复查才补齐。这说明「经过人工回查」这个标记
@@ -159,7 +168,7 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 
 ## 三、已落地（19）
 
-`O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· `O-F.9`（双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；*规格自陈「登记不修」，根因未动符合预期*）· **O-E.3**（§7.5 api 配套四项，*批 C7 落地项 2/3/4 + 批 C8 落地项 1*）· **O-E.7**（独立收尾 + R-22 回填 + **scanner 短路**，*短路子项 2026-09-15 落地*）· **O-E.9**（R-12 空答 FAIL，*2026-09-15 落地；G0 前置已于当日判过*）· **O-F.8**（出站**非可重试**失败不重试，*2026-09-15 落地*）
+`O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· **`O-F.9`**（~~双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；规格自陈「登记不修」，根因未动符合预期~~ —— **✅ 根因已修、绕过已撤除（2026-09-15 第五批，批 4）**，见下方施行记录）· **O-E.3**（§7.5 api 配套四项，*批 C7 落地项 2/3/4 + 批 C8 落地项 1*）· **O-E.7**（独立收尾 + R-22 回填 + **scanner 短路**，*短路子项 2026-09-15 落地*）· **O-E.9**（R-12 空答 FAIL，*2026-09-15 落地；G0 前置已于当日判过*）· **O-F.8**（出站**非可重试**失败不重试，*2026-09-15 落地*）
 
 **O-F.4 施行记录（2026-09-15 第四批 / 批 5）**——落地「§6.5 写守卫 403」，同时订正原行一处事实错误、
 显式砍掉一项规格子项：
@@ -199,6 +208,27 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
   新用例红、而 5xx/网络/429 那几条正向对照仍绿 ⇒ 判据有判别力，不是整片红。
 - **判据另一半（secret 不进日志/异常消息）为静态核对**：6 处 raise 只带 `type(exc).__name__`
   与状态码、`_headers()` 的 secret 只进 Authorization 头、全仓无 logger 触碰该字段。**不等于运行时取证**。
+
+**O-F.9 施行记录（2026-09-15 第五批 / 批 4）**——**根因已修、绕过已撤除**（原判词记的是
+「绕过 + 护栏」，本批把根因修了）：
+
+- **根因（实测，非读码推断）**：`AllowlistAsyncClient.send()` 旧写法 `dict(request.headers)` 的键已被
+  httpx **小写**为 `host`，随后 `["Host"] = host` 又加了**一个大写 H** 的键 —— 两键在 dict 里并存、
+  进 `httpx.Headers` 后归一为同名 ⇒ 实发**两个** Host，h11 抛 `LocalProtocolError`。另两处**同源**
+  缺陷：新造的 Host 是**裸 host（丢端口）**、`dict(Headers)` 把同名多值头**折叠**成 `"a, b"`。
+  修法 = 摘掉原 Host 项再加 + 复用**原 Host 项**（含端口）+ 改 `multi_items()`。
+- **绕过撤除**：`core/backflow_client._client()` 不再把基址 hostname 塞进 `extra_hosts` ⇒
+  本集成恢复完整的「**解析全部 IP 并校验在内网段内**」这一层 —— 原判词写明的代价
+  「该分支**跳过 IP 解析校验**」**已不成立**。
+- **护栏方向反转**：`test_base_host_passed_to_allowlist`（**护着绕过本身**）→
+  `test_base_host_not_special_cased`（**再塞白名单即变红**）。「容器名发得出去」这一属性改由
+  `tests/test_security.py` 的 Host 去重用例保证（**判据写成「等于谁」**：Host 值也须含端口）。
+- **真机三判据**（`ai-eval-backend` 容器内）：① `obs-backend` 解析 → `172.23.0.4`（**排除
+  「解析不出」这一误判源**）；② 新码真实 `backflow_client.pull_payloads()` **返回 200**；
+  ③ 旧形状（两条 Host）走同一真实传输层 → `LocalProtocolError`，与登记症状**逐字吻合**。
+  完整验收表见 `error-backflow-pending-phases.md` §5.5。
+- **登记不修项**：HTTPS 的 SNI（`copy_with(host=IP)` 后 TLS SNI 变 IP、按 IP 校验证书）与本缺陷
+  **同源但不同层**，当前**无已知故障面**，**不改**。
 
 > **O-E.9（R-12）的落地证据与两条连带**（2026-09-15）：
 > - **改动点**：`assertions/ops/text.py` 的 `KeywordNotContainsOp.run()` 内、`isinstance` 分支**之后**插入
