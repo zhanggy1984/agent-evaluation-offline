@@ -441,13 +441,36 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 > 实现**忠实执行了规格**。规格假设了 `evidence.input` 的形状 = 平台 case 期望的形状，而前者由
 > **被测 agent 接口**决定、后者是**平台自己的** ⇒ **两者之间缺一层映射，规格未定义**。
 >
-> **⚠️ 本定性的强度限定（不许读成「已取证」）**：我手上**没有任何一个真实线上采集的
-> `input_snapshot` 样本** —— 三个 case 的 `input`（3618/3619/4072）**全部是人造的**。
-> 严格地说，已证的是「**判定链在人造 input 下失效**」，**未证**「真实采集形状一定不匹配」。
+> **⚠️ 本定性的强度限定（不许读成「已取证」）**：三个 case 的 `input`（3618/3619/4072）
+> **全部是人造的** —— 严格地说，已证的是「**判定链在人造 input 下失效**」。
+> **⚠️ 本条已于 2026-09-15 同日收敛**（原文写「未证真实采集形状一定不匹配」）：
+> 收敛**不是**因为取到了库样本，而是实测确认**线上根本没有真实样本可查**（见下方第 2 条）
+> ⇒ 该问**无法由库样本回答**，改由**被测接口契约**回答（见下方第 1 条）。
 > 支持「确有问题」的**独立证据是契约层的**：`parse_snapshot_input` 的 docstring 明说形状
 > **随被测 agent 变**（「忠实还原 sample 形态」），而 `test_case.input` 的形状**平台固定** ——
 > 即便某个真实样本恰好匹配，那也是「**碰巧对上**」而非「契约保证」。
 > **⇒ 修法必须先取真实样本，不得据本表拍脑袋定映射规则。**
+>
+> **🔁 2026-09-15 补（同日实测四条 —— 全部是加强，不改变上述定性）**：
+> 1. **「碰巧对上」由推测转为实证**：good-question `backend/api/chat.py:21`
+>    `ChatRequest.content: str`（`:44` 路由 `POST /chat/{session_id}`）⇒ 真实采集的
+>    `input_snapshot` **就是** `{"content": …}` ⇒ 当前这个被测 agent 的链路**恰好匹配**。
+> 2. **「无真实样本」由「我没取到」升级为「实测不存在」**：`dev.obs.error_cluster` 共 **16 行**，
+>    **判据取 `claimed_by`（不是 `agent`）** —— 16 行全为 `clm-*` 探针 claim 标识
+>    （`clm-good-quest` / `clm-probe-c2-p` / `clm-probe-unkn`），其中两行 `agent` 直接叫
+>    `probe-unknown-agent` / `probe-c2-push`；`trigger_version` 16 行全同 ⇒ **16/16 全人造**。
+>    ⚠️ **不得用 `agent` 列判归属** —— 既有实测已证「探针/造数器**借用真实 agent 名**」
+>    ⇒ `agent` 名本身是**假证据**，判据只能取 `claimed_by` / `trace_id` 形态。
+> 3. **缺口在代码上的确切落点**：`pull_loop.py:198` 把 `input_type` **硬编码 `"text"`**，
+>    而同代码库的 `build_case_skeleton`（`tests/test_skeleton.py:53-54`）是**按接口字段推导**的
+>    （含 `content` ⇒ text、含 `file_path` ⇒ file）⇒ error case 这条路径**未走推导** ——
+>    这正是上文「两者之间缺一层映射」在代码上的位置。
+> 4. **失真现象的字面证据**（本轮补取）：agent 自己的 reasoning =
+>    `The user message is literally "{case.input.content}" — a placeholder that wasn't filled in.`
+>    ⇒ 「未渲染的模板串」的确切形态 = **模板占位符 `{case.input.content}` 原样发出**。
+>
+> **⇒ 修法仍须先取真实样本**：现**已**确认真实形状 = `{"content": …}`（≠ 上文「未证」），
+> 但**不得**据本表三行人造数据反推映射规则。
 >
 > **影响面**：error run 的判定语义（「是否仍复现错误话术」）**从未真正生效** —— agent 收到占位符、
 > 答非所问 ⇒ `keyword_not_contains` 必 PASS ⇒ **假绿**，且**已被写入 online**（3 条 `case_pass=1`）。

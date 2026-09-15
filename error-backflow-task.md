@@ -83,8 +83,13 @@
     + version 非空，`signal_run_id` = 信号 run 自己的 id），**不受 `backflow_enabled` 门控**；
     辅轴 = `reconcile_loop.py:109`（受门控）。
     **⚠️ 但判定结果全部失真** —— `input` 装载缺「原始形状 → `{"content": …}`」映射（**R-27**）：
-    三个 case 的 `answer` **逐字相同** = 被测 agent 收到未渲染的模板串，`keyword_not_contains` 必 PASS
-    ⇒ **假绿**，且已写入 online。
+    三个 case 的 `answer` **逐字相同**，agent reasoning = `The user message is literally
+    "{case.input.content}" — a placeholder that wasn't filled in.` ⇒ 「未渲染的模板串」的
+    确切形态 = **占位符原样发出**，`keyword_not_contains` 必 PASS ⇒ **假绿**，且已写入 online。
+    **2026-09-15 同日实测补充（加强，不改定性）**：真实形状已确证 = good-question 的
+    `ChatRequest.content`（`{"content": …}`）⇒ 该链路**恰好匹配**；`dev.obs.error_cluster`
+    16 行**全人造**（`agent` 列含 `probe-*`）⇒ 线上零真实采集；`pull_loop.py:198`
+    `input_type` **硬编码 `"text"`**、未走接口字段推导 ⇒ 即「缺一层映射」的代码落点。
     **⇒ 本批验的是「管道通不通」，不是「判定对不对」**；完整验收表 + 根因两侧取证 +
     「这批的绿不能证明什么」见 `error-backflow-pending-phases.md` **§5.7**。
 
@@ -228,7 +233,7 @@
 | R-22 | 收尾回填 na 统一 `scheduler_unexecuted` 单测护栏 | CI 护栏 | O-E.7 + O-G.2 | G4+G6 | 收尾逻辑 = 7 条无 DB 单测 + 4 条真库集成用例；~~⚠️ **缺口在入口**（`_run_error` 两条早退无测试）~~ **⚠️ 该判已失效（2026-09-15）**：`5b01de5` 已补这两条早退 + `TestMarkErrorSkipped`，**入口缺口已闭合**（依据见 O-G.2 条目下的 2026-09-15 补） |
 | R-25 | 出站载荷契约护栏（10 字段与取值域逐字符对齐 online `api/backflow.py` + 两水位字段取数口径不得按 trigger_type 收窄） | CI 护栏（**跨仓契约锁**） | O-G.4 | G6 | 字段名/类型/必填性/取值域断言；online 侧字段变更即红 |
 | R-26 | 出站基址「容器名」不可达（`core/http.py` 双 Host 头 ⇒ `LocalProtocolError`；**根因在共享客户端，影响面 = 一切容器名出站**） | offline core（**A 级**） | O-F.9 | **✅ 已修（2026-09-15 批 4）**：根因已修 + 绕过已撤除 | 护栏**已反转**为 `test_base_host_not_special_cased`（再塞白名单即红）；Host 去重判据在 `tests/test_security.py`（3 条）；**真机三判据**已取（解析 172.23.0.4 / `pull_payloads()` 200 / 旧形状 `LocalProtocolError`）；反事实恰好 2 红 |
-| **R-27** | **error case 的 `input` 装载缺「原始 input 形状 → 平台 case `{"content": …}` 形状」映射** ⇒ 模板 `{case.input.content}` 渲染取空、**原样发出模板字面量**，被测 agent 收到占位符、答非所问 ⇒ `keyword_not_contains` **必 PASS** ⇒ **假绿**（且已写入 online）。`solution_detail.md:359` 要求「**纯装载不改写**」⇒ **实现忠实执行了规格**，缺口在**规格未定义这层映射**（`evidence.input` = 被测 agent 的原始 input，形状由被测接口决定；`test_case.input` 形状是平台自己的，normal case 由人工按此填）。**实测**（2026-09-15 6b）：run 3661 三个 case 全 `pass` 且 `answer` **逐字相同**；3618/3619（9-14 探针建）**同样错** ⇒ **自特性落地起即存在**。 | offline 装载（**规格缺口**，非实现漏做） | O-D.3（`pull_loop.py:198-199`） | — | **待定** —— 需先定映射规则，且需先见真实线上 `input_snapshot` 形状；完整现场见 `error-backflow-pending-phases.md` §5.7 |
+| **R-27** | **error case 的 `input` 装载缺「原始 input 形状 → 平台 case `{"content": …}` 形状」映射** ⇒ 模板 `{case.input.content}` 渲染取空、**原样发出模板字面量**，被测 agent 收到占位符、答非所问 ⇒ `keyword_not_contains` **必 PASS** ⇒ **假绿**（且已写入 online）。`solution_detail.md:359` 要求「**纯装载不改写**」⇒ **实现忠实执行了规格**，缺口在**规格未定义这层映射**（`evidence.input` = 被测 agent 的原始 input，形状由被测接口决定；`test_case.input` 形状是平台自己的，normal case 由人工按此填）。**实测**（2026-09-15 6b）：run 3661 三个 case 全 `pass` 且 `answer` **逐字相同**；3618/3619（9-14 探针建）**同样错** ⇒ **自特性落地起即存在**。 | offline 装载（**规格缺口**，非实现漏做） | O-D.3（`pull_loop.py:198-199`） | — | **待定** —— 需先定映射规则。**2026-09-15 同日实测**：真实形状**已确证** = good-question `ChatRequest.content` = `{"content": …}`（取自**接口契约**，非库样本）；线上**零**真实采集（`dev.obs.error_cluster` 16 行 `claimed_by` 全为 `clm-*` 探针标识；**不许用 `agent` 列判归属**，探针会借真名）⇒ 规则**可据接口契约定**、**不得**据探针数据反推。另一落点：`pull_loop.py:198` 的 `input_type` **硬编码 `"text"`**、未走接口字段推导。完整现场见 `error-backflow-pending-phases.md` §5.7 |
 
 ## 不做清单（归属明确，勿误入本 task 范围）
 
