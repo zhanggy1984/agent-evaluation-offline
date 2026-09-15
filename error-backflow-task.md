@@ -102,6 +102,26 @@
 - **O-F.7 结果推送出站客户端（M7，新 `core/backflow_client.py`；v1.23 新增，取代 O-F.1/O-F.2）**：error_regression run **终态 commit 之后**（**不在收尾事务内**）异步 fire-and-forget 发起 `POST /backflow/regression-results`（详设 §10.1 + 批 2 §9.3）：载荷 = `schema_version`/`agent`/`agent_version`/`run_id`/`run_status`/**`agent_latest_version`**/**`prev_terminal_version`**（必填但**值可为 null** = 该 agent 此前无任何终态 run）/`trigger_signal_id`/`finished_ts`/`cases[]`（10 字段，逐字段锚 online `api/backflow.py`；**接收方权威口径 = online `solution_detail.md` §8.7 载荷字段表**，**无 `case_truncated`/溢出列表**）；**两水位字段口径硬约束 = agent 级全部终态 run**（manual/held_out 的版本亦计入），**不得按 `trigger_type='error_regression'` 收窄**（误收窄 → 与 online「缺行中断」判据系统性错位 → 假中断），**且两字段须与 `prev_terminal_version` 同一次查询产出**；**出站前自检三条（否则整单被拒）** = `case_id` 在 `cases[]` 内唯一（重复 → online 整单拒 `ERR_PULL_0002`）/ `finished_ts` 合法 ISO8601 / `schema_version='1.0'`；**另加取值来源自检一条（不拒单、静默失败类）** = `trigger_signal_id` 取值来源 = `backflow_envelope['source']['cluster_id']`（online cluster id），不得填 `eval_run.trigger_signal_id` —— 同名非同物，填错不报错：撞上 pending link → 推进错簇，撞不上 → orphan 且 online 仍回 200 → 结果永久丢失；失败语义 = 超时 5s、重试 3 次（退避 1s/2s/4s），全败记 error 后放弃、**不阻塞 run 收尾**；幂等键 `uk_verify_run(link_id, run_id)`（重放 → 200 `duplicated:true`）；响应处理 = `links_advanced` 为真正发生终态迁移的 link，**`cases_dropped` 幂等重放不归零**（不得据此判断「没丢数据」，须看首次响应或 `duplicated`）。**验证目标**：载荷 10 字段逐字段断言（含两水位字段口径 + `prev_terminal_version` 首次 null 分支）；`case_id` 重复 / 非法 `finished_ts` / `schema_version` 不符在**出站前**被拦（不出网）；三次全败不抛不阻塞收尾；重放响应 `duplicated` 正确处理。**载荷契约常驻护栏 = R-25 / O-G.4**。
 - **O-F.8 出站鉴权 + secret 配置项（M7，`core/config.py`；v1.23 新增，取代 O-F.3）**：三出站端点共用**静态预共享 secret**（`Authorization: Bearer <secret>`），**无 scope 分置、无 JWT、无 `type=service`、无签发/轮换链**；`BACKFLOW_INBOUND_SECRET` 整条作废、`create_service_token`/`verify_service_token` 不落地（详设 §10.2/§10.3）；secret 经 `system_config` / `core/config.py` 注入（key 见 O-F.5），**不入库明文、不进日志**；manual 人工面现有认证不动。**验证目标**：secret 缺失/错误 → 出站被拒且不重试；secret 实际值不出现在日志、异常消息与响应体。
 
+  - **✅ 施行记录（2026-09-15，第三批）**——原判「部分落地：401 被重试 3 次」，落地时订正了**两处**：
+    1. **范围比判词窄**：判词暗示 pull/ack 也在重试，但 `pull_loop.py:174/:257` 两处捕获**本就只是
+       「记日志 + 留 pending + 下轮幂等重放」，无任何立即重试循环** ⇒「重试」只存在于 push 路径
+       （`error_push._push_one`）。本批**未动 pull/ack**（动了反而改变「留 pending 下轮重放」语义）。
+    2. **判据按码的类别，不写 401 特判**：`BackflowClientError` 增 `status_code: int | None`
+       （网络层 = `None`），`error_push._is_retryable` = 「`None` 或 ≥500 或 ∈{408,429} ⇒ 可重试」，
+       其余 4xx ⇒ **一次即止、不退避**。这样**不必先取证「online 对错误 secret 回 401 还是 403」**
+       —— 该跨仓未知不落在本批正确性路径上。**代价（承认）**：`408/429` 归可重试是**按 HTTP 语义
+       定的，无真机证据**；且 online 侧对错误 secret 的实际响应码本批**未取证**。
+    3. **`status_code` 必须是可选参数**：`tests/test_pull_loop_reject.py:172` 以
+       `BackflowClientError("400")` **单参位置**构造 ⇒ 设成必填会当场打红既有测试（已核，现仍绿）。
+    4. **观测量取调用次数，不取日志文案**：反事实对照（`_is_retryable` 临时恒 `True`）下**恰好 3 条**
+       新用例红（全部是「不重试」判据），而 5xx/网络/408/429 那几条**正向对照仍绿** ⇒ 有判别力，
+       不是整片红；还原后复绿、全量 945 passed / 100 skipped（批 2 基线 939/100 + 本批新增 6 条，自洽）。
+    5. **判据第二条（secret 不进日志/异常消息）为静态核对、非运行时取证**：6 处 raise 只带
+       `type(exc).__name__`（异常**类名**，非 `str(exc)`，故不带 URL）与状态码；secret 唯一去向是
+       `_headers()` 的 Authorization 头（`backflow_client.py:48`），**全仓 logger 不触碰该字段**。
+    **显式不做的**：未加「secret 缺失」的本地守卫 —— 判据已由「非可重试 4xx 不重试」覆盖，
+    本地守卫只把日志措辞从 401 换成「你没配 secret」，属可诊断性改善而非故障修复。
+
 - **O-F.9 R-26 出站基址「容器名」不可达（`core/http.py` 既有缺陷；批 B 实测揭出，**登记不修**）**：`AllowlistAsyncClient.send`（`core/http.py:106-118`）对**不在 `allow_hosts` 但可解析**的主机名走「URL host 换成解析后 IP + 补回原始 Host」的重写路径，而补回写法是 `dict(request.headers)`（键已被 httpx 小写为 `host`）再赋 `["Host"]` ⇒ 出站请求携带**两个大小写不同的 Host 头**，raw 实测 `[(b'host', b'obs-backend:8000'), (b'Host', b'obs-backend')]` ⇒ h11 抛 `LocalProtocolError: Found multiple Host: headers`，**请求根本发不出去**。实测对照（同一 client、同一进程）：`host.docker.internal`（在 `DEFAULT_AGENT_HOSTS` 内，走 `http.py:85-86` 直接 return、**不重写**）→ 200；`obs-backend`（容器名，不在白名单）→ 必失败。**影响面不止本特性**：凡「按容器名调另一个容器」的出站在本客户端下**整体不可用**，根因在共享核心客户端，与 error-backflow 无耦合。**本批处置 = 绕过**：`core/backflow_client._client()` 按配置基址的 hostname 显式塞进 `extra_hosts`，走不重写那条分支；**代价（承认）** = 该分支**跳过 IP 解析校验**（`http.py:85-86` 只做 denied 检查），基址为运维配置固定值故可接受，但这是妥协不是修好。**正确修法**（未做，属 A 级核心改动）= 让 `send` 复用/替换原 Host 项而非新加大小写不同的第二个键。**验证目标**：回读 `_client()` 传给 `build_agent_client` 的 `extra_hosts`（回归护栏 `test_base_host_passed_to_allowlist`，去掉即红）；真机连通由批 B 端到端验收承担。
 
 **阶段出口（G5）**：环 2 走查全绿 + 详设 §12.6 X-8~X-11（环 2 双端异常/**推送载荷对拍**用例）全绿（详设 §1.3 G5）。

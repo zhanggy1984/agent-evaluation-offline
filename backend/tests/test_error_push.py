@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.backflow_client import BackflowClientError
 from app.runner import error_push as ep
 
 
@@ -174,3 +175,56 @@ class TestPushOneRetry:
     async def test_recovers_on_second_attempt(self, monkeypatch):
         resp, calls = await self._push(monkeypatch, [Exception("boom"), {"accepted": True}])
         assert resp == {"accepted": True} and len(calls) == 2
+
+    # ---- 可重试性分流（O-F.8：secret 缺失/错误 ⇒ 被拒且**不重试**）----
+    # 判据一律用**调用次数**（乘法性观测量），不断言日志文案——文案断言无判别力。
+
+    @pytest.mark.asyncio
+    async def test_auth_rejection_sends_once(self, monkeypatch):
+        """401 = 确定性拒绝 ⇒ 只发一次，不退避。"""
+        err = BackflowClientError("结果推送返回 401", 401)
+        resp, calls = await self._push(monkeypatch, [err] * 4)
+        assert resp is None and len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_other_4xx_also_sends_once(self, monkeypatch):
+        """403/400/422 同属确定性拒绝——判据是**码的类别**，不是 401 特判。"""
+        for code in (403, 400, 422):
+            err = BackflowClientError(f"结果推送返回 {code}", code)
+            resp, calls = await self._push(monkeypatch, [err] * 4)
+            assert resp is None and len(calls) == 1, f"code={code} 不该重试"
+
+    @pytest.mark.asyncio
+    async def test_5xx_still_retries(self, monkeypatch):
+        err = BackflowClientError("结果推送返回 503", 503)
+        resp, calls = await self._push(monkeypatch, [err] * 4)
+        assert resp is None and len(calls) == 4
+
+    @pytest.mark.asyncio
+    async def test_throttle_and_timeout_still_retry(self, monkeypatch):
+        for code in (408, 429):
+            err = BackflowClientError(f"结果推送返回 {code}", code)
+            _, calls = await self._push(monkeypatch, [err] * 4)
+            assert len(calls) == 4, f"code={code} 应可重试"
+
+    @pytest.mark.asyncio
+    async def test_network_error_without_status_still_retries(self, monkeypatch):
+        """`status_code` 缺省（含既有单参构造）⇒ 视作网络层，维持「重试 3 次」原语义。"""
+        resp, calls = await self._push(monkeypatch, [BackflowClientError("连接失败")] * 4)
+        assert resp is None and len(calls) == 4
+
+    @pytest.mark.asyncio
+    async def test_one_shot_rejection_does_not_delay_finish(self, monkeypatch):
+        """不可重试时**不得**进入退避（否则收尾仍被拖住 ~7s）。计数 sleep 调用。"""
+        sleeps = []
+
+        async def spy_sleep(s):
+            sleeps.append(s)
+
+        async def fake_push(body):
+            raise BackflowClientError("结果推送返回 401", 401)
+
+        monkeypatch.setattr(ep.backflow_client, "push_results", fake_push)
+        monkeypatch.setattr(ep.asyncio, "sleep", spy_sleep)
+        await ep._push_one({"run_id": "1", "trigger_signal_id": 9})
+        assert sleeps == []

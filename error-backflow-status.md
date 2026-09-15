@@ -15,6 +15,11 @@
 > 两半**均已失效**：G0 于 2026-09-15 判「过」（选项 A，`error-backflow-pre-scan-report.md` §5.1），
 > R-12 随之落地。该行已移入「三、已落地」。**顶上基线指纹未改**（本批只触及此一行、未重核全表）。
 >
+> **已知过期行（2026-09-15 第三批，O-F.8）**：`O-F.8`（出站非可重试失败不重试）—— 原判
+> 「部分落地」，缺的**唯一子项**已落地。该行已移入「三、已落地」，汇总行同步（19/11/3/2）。
+> **顶上基线指纹未改**（本批只触及此一行、未重核全表）。落地时另查出原判词的**范围偏宽**：
+> 「重试」只存在于 push 路径，`pull_loop` 两处捕获本就无立即重试 —— 详见「三、已落地」的施行记录。
+>
 > **取证纪律（读之前必看）**：本表由三个只读取证 agent 分路核对（O-A/B/C · O-D/E1-4 ·
 > O-E5-9/F/G），**只有 O-E.3 经过二次人工回查**——但那次回查**本身只覆盖了它的一个子项**，
 > 漏掉另外三项，2026-09-15 由批 C7 开工前的复查才补齐。这说明「经过人工回查」这个标记
@@ -54,7 +59,7 @@
 
 ## 汇总
 
-**35 条 = 已落地 18 / 部分落地 12 / 未落地 3 / 无法判定 2**（*2026-09-15 第二批：O-E.9 由「未落地」移入「已落地」，只动这两个数；下方那条对不上账的告警**未被本次平账**，勿读作已平*），另 **前提不可达 1**（O-E.2 的
+**35 条 = 已落地 19 / 部分落地 11 / 未落地 3 / 无法判定 2**（*2026-09-15 第二批：O-E.9 由「未落地」移入「已落地」；第三批：O-F.8 由「部分落地」移入「已落地」。**两次都只动这几个数**；下方那条对不上账的告警**未被任何一次平账**，勿读作已平*），另 **前提不可达 1**（O-E.2 的
 backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不另计条目，五项相加为 36 是重复计数）
 
 > ⚠️ **本汇总与其下四节表格对不上账（2026-09-15 发现，**先于本次核对存在**，未擅自平账）**：
@@ -62,6 +67,8 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 > 两节的表头各自也比表内行数多 1（12 vs 11、17 vs 16）。全文出现的编号共 34 个，多出的那个是
 > `O-A.1`（R-20 pre-scan，判在「结构性问题 1」而不在四节内）。
 > **平账需先查清是哪 2 条未落进表格，本轮不做** —— 本次核对未改动任何条目归属。
+> ⚠️ 上段枚举的 `4 + 11 + 16` 是**写下这段时的**行数快照，此后 O-E.9（未落地→已落地）、
+> O-F.8（部分落地→已落地）两次移动**均未同步它** —— 现在再照抄这三个数也是错的，**要自己重数**。
 
 > ⚠️ **已知失真 2：`O-G.2` 的判词已被后续提交证伪（2026-09-15 登记）**——按本表 :55 的
 > 「**保留原判词、不更新归属**」惯例，**其判词一字未改**，失实仅在**此处**登记：
@@ -128,7 +135,7 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 | **O-G.1** | 无 `error_codes.py` 分类表，无 R-19 对齐单测 | `runner/executor.py:22-31` 有 `ERROR_*` 常量；全仓 grep `error_codes` 零命中 | 新增 `error_type` **漏分类不会红** —— 护栏缺失（不是功能缺失）|
 | **O-D.2** | per-agent 拉取游标从不传 | `runner/pull_loop.py:94`（调用不传游标）；`core/backflow_client.py:66-72` 有 `since_ts/next_token` 形参但 docstring 自陈「游标持久化属调用方职责」；`core/config.py` 无相关键 | 每轮重复拉全量。正确性由 inbox 幂等兜住，代价在**量级** ⇒ **容量型**，不是故障 |
 
-## 二、部分落地（12，缺的都是规格点名的子项）
+## 二、部分落地（11，缺的都是规格点名的子项）
 
 | 条 | 已落地部分 | 缺什么 |
 |---|---|---|
@@ -140,13 +147,29 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 | O-E.8 | `_error_verdict` → `run_assertions` 判定链 + 空断言不判 pass | 运行期 na 兜底源 `missing_assertion`/`assertion_shape`（grep 零命中；现靠加载即剔除替代）|
 | O-F.4 | 数据面隔离（O-E.5）+ cleanup 豁免（`pinned` 恒真）| **§6.5 写守卫 403**（`cases.py:310-311` 通用 setattr、`:321` invalidate 无守卫）；谓词常量三件套；dashboard 排除 —— **部分落地（2026-09-15，P2-1）**：`/gate` 与 `/trend` 两条聚合已排 `error_regression`；其余 5 处 held_out-only 过滤（`/compare`、`_agent_dim_series`、`/perf`、`/cost`、`/baseline`）**经真机实证「无对象」故不改**（error run 的 `agent_score`/`ttft`/`e2e`/`score_per_dimension` 恒空、`total_cost` 全 NULL ⇒ 无可污染量）。**⚠️ 判据纠正**：旧登记把后果写成「聚合含 error run 行」，实测后果是**分母做大 + 幻影 version 桶**（门禁墙上 11 张有 version 的卡 → 排除后 6 张，那 5 张**纯由 error run 撑起**，如 agent 2816 桶内 `total_case=32` 全部来自 error run）——**不是**「均值被污染」（`agent_score` 恒 NULL 不进均值）。+ ~~active-count 排除~~（**批 C7 已落地**，见「三、已落地」的 O-E.3 施行记录 —— 本行原文把它挂在这里是 2026-09-14 的旧状态） |
 | O-F.5 | `config.py:38-43` 三键走 env + `main.py:155/157` 启动挂接 + 门控在 loop 内 | `seed.py` 无任何 `backflow_*` 键；启动无迁移 fail-fast 检查；无 cap_gap probe task |
-| O-F.8 | 静态预共享 secret + Bearer + 不进日志（`test_backflow_client.py:95-112` 钉死）| **secret 缺失/错误 → fail-fast**：`push_results` 对 401 也抛 `BackflowClientError`，`_push_one` 对一切异常重试 3 次 ⇒ **401 被重试**而非快速失败 |
+| ~~**O-F.8**~~ **✅ 已落地（2026-09-15）⇒ 移入「三、已落地」** | 静态预共享 secret + Bearer + 不进日志（`test_backflow_client.py:95-112` 钉死）| ~~**secret 缺失/错误 → fail-fast**~~ 【原判词留存】：`push_results` 对 401 也抛 `BackflowClientError`，`_push_one` 对一切异常重试 3 次 ⇒ **401 被重试**而非快速失败 |
 | O-G.2 | `tests/integration/test_integration_scanner_error_run.py` 四条（scanner 租约/硬超时两入口 + 计划数>加载数 + 「已终值行不改写」独立断言），判别力经反向对照实测；**两条回收路径均断言「未完成 case 回填 na」**（#260 后租约路径的判据才成立）。另 `tests/test_error_regression_run.py::TestFinishErrorRegression` **7 条无 DB 单测**已覆盖收尾四态 + 回填 + 外部终态不覆盖 | **收尾语义已有覆盖，缺的是「入口调用方」**：`_run_error` 的两条早退（`:379-382` 前置校验不过 → `_mark_error_skipped`；`:384-386` 接管时已取消 → **直接 return、完全不调收尾 ⇒ link 挂到 scanner 回收**）均无测试；R-22 另两条路径（orchestrator cancel / run 级超时）**未逐字复刻**其入口 —— 三者是同一件事的三个面：**被调函数已验，调它的入口未被驱动** |
 | O-G.4 | 载荷序列化方向 + `schema_version` + self_check + 两水位口径 | `run_status` 四值 Literal、`cases[].pass_fail` 三值、字段长度上限 64/48、10 字段必填性枚举；「两水位不得按 trigger_type 收窄」的显式钉死 |
 
-## 三、已落地（18）
+## 三、已落地（19）
 
-`O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· `O-F.9`（双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；*规格自陈「登记不修」，根因未动符合预期*）· **O-E.3**（§7.5 api 配套四项，*批 C7 落地项 2/3/4 + 批 C8 落地项 1*）· **O-E.7**（独立收尾 + R-22 回填 + **scanner 短路**，*短路子项 2026-09-15 落地*）· **O-E.9**（R-12 空答 FAIL，*2026-09-15 落地；G0 前置已于当日判过*）
+`O-B.1`（模型扩列）· `O-B.2`（run 三列）· `O-B.3`（inbox 模型）· `O-B.4`（含四段 DDL 合并为单迁移 `c3d4e5f6a7b8`）· `O-C.1`（信封校验三分支）· `O-C.2`（resolve_agent/interface，*标签偏差：实为 async 查库，非「纯函数」*）· `O-C.4`（`sanitize_words` + 净化空 fail-closed）· `O-C.5`（算子三处登记）· `O-E.1`（终态 fire-and-forget + `maybe_auto_schedule`，*落点在 `orchestrator.py` 而非规格写的 `auto_schedule.py`*）· `O-E.4`（共享 per-agent 槽池，*实为 `core/limiter.py` 非 `runner/limiter.py`*）· `O-E.5`（case_loader error 分支 + 形态过滤）· `O-E.6`（`_run_error` + 熔断域隔离）· `O-F.7`（`error_push.py` 出站推送 10 字段）· `O-F.9`（双 Host 头缺陷的 extra_hosts 绕过 + 回归护栏；*规格自陈「登记不修」，根因未动符合预期*）· **O-E.3**（§7.5 api 配套四项，*批 C7 落地项 2/3/4 + 批 C8 落地项 1*）· **O-E.7**（独立收尾 + R-22 回填 + **scanner 短路**，*短路子项 2026-09-15 落地*）· **O-E.9**（R-12 空答 FAIL，*2026-09-15 落地；G0 前置已于当日判过*）· **O-F.8**（出站**非可重试**失败不重试，*2026-09-15 落地*）
+
+**O-F.8 施行记录（2026-09-15）**——原判词只说「401 被重试 3 次」，
+落地时发现**范围比判词窄**且**判据该按类别而非按 401**：
+
+- **「重试」只存在于 push 路径**：`pull_loop.py` 的两处 `BackflowClientError` 捕获本就只是
+  「记日志 + 留 pending + 下轮幂等重放」，**无任何立即重试循环** ⇒ 本批**未动 pull/ack**。
+- **判据按码的类别**：`BackflowClientError` 增 `status_code: int | None`（网络层= `None`），
+  `error_push._is_retryable` 判「`None` 或 ≥500 或 ∈{408,429} ⇒ 可重试」，其余 4xx ⇒ 一次即止。
+  **未写 401 特判** ⇒ 不必先取证「online 对错误 secret 究竟回 401 还是 403」这个跨仓未知，
+  正确性不依赖它。**代价（承认）**：408/429 归可重试是**按 HTTP 语义定、无真机证据**。
+- **`status_code` 必须是可选参数**：`tests/test_pull_loop_reject.py:172` 以
+  `BackflowClientError("400")` **单参位置**构造 ⇒ 设成必填会当场打红既有测试。
+- **观测量取调用次数而非日志文案**：反事实对照（`_is_retryable` 临时恒 `True`）下**恰好 3 条**
+  新用例红、而 5xx/网络/429 那几条正向对照仍绿 ⇒ 判据有判别力，不是整片红。
+- **判据另一半（secret 不进日志/异常消息）为静态核对**：6 处 raise 只带 `type(exc).__name__`
+  与状态码、`_headers()` 的 secret 只进 Authorization 头、全仓无 logger 触碰该字段。**不等于运行时取证**。
 
 > **O-E.9（R-12）的落地证据与两条连带**（2026-09-15）：
 > - **改动点**：`assertions/ops/text.py` 的 `KeywordNotContainsOp.run()` 内、`isinstance` 分支**之后**插入

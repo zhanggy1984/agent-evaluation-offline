@@ -34,6 +34,26 @@ SCHEMA_VERSION = "1.0"
 PUSH_MAX_RETRIES = 3                     # 首推之外的重试次数（§10.1「重试 3 次」）
 PUSH_BACKOFFS = (1.0, 2.0, 4.0)          # 逐次重试前退避（§10.1 逐字 1s/2s/4s）
 
+# 4xx 里唯一的例外（其余 4xx = 确定性拒绝）：请求超时 / 限流是服务端侧瞬时状态。按 HTTP
+# 语义定，**无真机证据**——本项目未观测到 online 回过这两个码。
+_RETRYABLE_STATUS = {408, 429}
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """出站异常是否值得重试。
+
+    判据按**码的类别**，不硬编码 401（规格 O-F.8 的判据是「被拒且不重试」，而 online 对
+    错误 secret 究竟回 401 还是 403 属跨仓契约、本仓未取证）⇒ 未知不落在正确性路径上。
+
+    - 无 `status_code`（网络层：超时/连接失败）⇒ 可重试，维持原语义；
+    - 5xx ⇒ 可重试；`_RETRYABLE_STATUS` 内的 4xx ⇒ 可重试；
+    - 其余 4xx（含鉴权 401/403、契约 400/422）⇒ 确定性拒绝，**不重试**。
+    """
+    code = getattr(exc, "status_code", None)
+    if code is None:
+        return True
+    return code >= 500 or code in _RETRYABLE_STATUS
+
 
 def _ver_key(value: str) -> tuple[int, ...]:
     """版本号点分 → 数值元组，仅判序用。
@@ -136,7 +156,11 @@ def self_check(body: dict) -> list[str]:
 
 
 async def _push_one(body: dict) -> dict | None:
-    """单笔推送 + 重试（首推 + 3 次重试，退避 1/2/4s）。全败返回 None（调用方记日志）。"""
+    """单笔推送 + 重试（首推 + 3 次重试，退避 1/2/4s）。全败返回 None（调用方记日志）。
+
+    **重试只对「可能自愈」的失败生效**（`_is_retryable`）：确定性拒绝（鉴权类 4xx）重试只是
+    白等 7 秒退避，且把真实故障淹没在「重试后放弃」的措辞里。
+    """
     for attempt in range(PUSH_MAX_RETRIES + 1):
         try:
             resp = await backflow_client.push_results(body)
@@ -144,6 +168,11 @@ async def _push_one(body: dict) -> dict | None:
                          body.get("trigger_signal_id"), body.get("run_id"), resp)
             return resp
         except Exception as exc:  # noqa: BLE001 — fire-and-forget：任何异常都不许冒泡打断收尾
+            if not _is_retryable(exc):
+                logger.error("结果推送被确定性拒绝，不重试：cluster=%s run=%s status=%s err=%s",
+                             body.get("trigger_signal_id"), body.get("run_id"),
+                             getattr(exc, "status_code", None), exc)
+                return None
             if attempt >= PUSH_MAX_RETRIES:
                 logger.error("结果推送三次重试后放弃：cluster=%s run=%s err=%s",
                              body.get("trigger_signal_id"), body.get("run_id"), exc)

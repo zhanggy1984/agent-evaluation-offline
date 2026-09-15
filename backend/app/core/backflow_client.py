@@ -31,7 +31,17 @@ TIMEOUT = 5.0
 
 
 class BackflowClientError(Exception):
-    """出站失败（网络/非 2xx）。调用方按「本轮跳过、下轮重试」处理，不吞不掉。"""
+    """出站失败（网络/非 2xx）。调用方按「本轮跳过、下轮重试」处理，不吞不掉。
+
+    `status_code` = **结构化**的失败码（`None` = 网络层失败，无 HTTP 响应）。它的存在是为了让
+    调用方能**按类别**决定可重试性（`runner/error_push._is_retryable`）：鉴权类 4xx 是确定性拒绝，
+    重试只是白等退避；而网络抖动与 5xx 值得重试。**不把码揉进消息串**——那是调用方要解析字符串，
+    等于把契约签在文案上。
+    """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _headers() -> dict:
@@ -84,9 +94,10 @@ async def pull_payloads(
                 f"{base}{PULL_PATH}", json=body, headers=_headers(), timeout=TIMEOUT
             )
         except httpx.HTTPError as exc:
-            raise BackflowClientError(f"拉取请求失败：{type(exc).__name__}") from exc
+            raise BackflowClientError(f"拉取请求失败：{type(exc).__name__}", None) from exc
     if resp.status_code != 200:
-        raise BackflowClientError(f"拉取返回 {resp.status_code}（鉴权或契约不符）")
+        raise BackflowClientError(
+            f"拉取返回 {resp.status_code}（鉴权或契约不符）", resp.status_code)
     return resp.json()
 
 
@@ -114,9 +125,9 @@ async def ack(
                 f"{base}{ACK_PATH}", json=body, headers=_headers(), timeout=TIMEOUT
             )
         except httpx.HTTPError as exc:
-            raise BackflowClientError(f"ack 请求失败：{type(exc).__name__}") from exc
+            raise BackflowClientError(f"ack 请求失败：{type(exc).__name__}", None) from exc
     if resp.status_code != 200:
-        raise BackflowClientError(f"ack 返回 {resp.status_code}")
+        raise BackflowClientError(f"ack 返回 {resp.status_code}", resp.status_code)
 
 
 async def push_results(body: dict) -> dict:
@@ -136,7 +147,7 @@ async def push_results(body: dict) -> dict:
                 f"{base}{PUSH_PATH}", json=body, headers=_headers(), timeout=TIMEOUT
             )
         except httpx.HTTPError as exc:
-            raise BackflowClientError(f"结果推送请求失败：{type(exc).__name__}") from exc
+            raise BackflowClientError(f"结果推送请求失败：{type(exc).__name__}", None) from exc
     if resp.status_code != 200:
-        raise BackflowClientError(f"结果推送返回 {resp.status_code}")
+        raise BackflowClientError(f"结果推送返回 {resp.status_code}", resp.status_code)
     return resp.json()
