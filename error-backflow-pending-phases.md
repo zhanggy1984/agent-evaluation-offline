@@ -702,7 +702,12 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
   **如实记载在两处**：`error-backflow-status.md` O-D.4（「二、部分落地」，该行本就写着「非 200 一律抛，
   无 blocked/manual_invalidate 分支」—— **真相一直在册，是本句把它盖住了**）+
   `error-backflow-solution_detail.md` §5.7 错误分流 / §5.9（2026-09-16 实现现状注，含复核命令）。
-  ⇒ **本项由「未验收项」改判为「未实现项」**；补不补是独立决策，**未排期**。
+  ⇒ **本项由「未验收项」改判为「未实现项」**。
+  **➜ 收口（2026-09-16，用户拍板选 A）= 不补**：影响面评估（两侧库只读直查）得**触发条件实测零次**
+  —— online `error_case_link` 21 行中 `invalidated_by` 非空 **0** 行；offline inbox 12 行中
+  `ack_status` **12/12 = acked**、`last_error` **全 NULL**（⇒ ack 从未失败、空转重放从未发生）。
+  按「不做会出什么具体故障」答不上来 ⇒ 不做。**失效条件与复核命令见 `error-backflow-status.md` O-D.4**
+  （不在本文件重复，以免两处各自腐）。**⚠️ 未验边界**：只证发生率为 0，**未证撞上时是否产脏数据**。
 - **不证明 `offline_cap_gap` 半支仍正确**：本批只真机跑了 `online_content_gap` 一支；`offline_cap_gap`
   仍限 `{none, pending}` 仅由单测覆盖。
 - **不证明 R-8 探测态节流已实现** —— `CAP_GAP_PROBE` 常量在离线仓**零实现落点**（已登记，未实现）。
