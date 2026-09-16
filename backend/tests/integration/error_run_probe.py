@@ -9,11 +9,12 @@
 `create_error_regression_run` 建单（§7.4）。
 **桩**的部分：`execute_case`（HTTP 执行层）——见「本探针证不了什么」。
 
-四场景共用 **1 个 case + 3 次 run**（case 集不变，只有被测回答变），故无需多 agent：
+五场景共用 **1 个 case + 6 次 run**（case 集不变，只有被测回答变），故无需多 agent：
   1. 非空答、不含关键词 → pass + completed
   2. 非空答、**含**关键词  → fail + completed
   3. 技术失败             → na + partial_failed + error_case==0
   4. case 置 invalidated  → 实跑集空 → cancelled
+  5. 长答、关键词落在 500 字符截断点**之后** → fail + 落库 `actual` 为截断副本
 
 ⚠️ 场景 1/2 **必须用非空答**：`keyword_not_contains` 对空答恒 `hits=[]` ⇒ 判 PASS
 （`assertions/ops/text.py:83-89` 已知缺陷，R-12 未修）。用空答构造会把 2 的预期从
@@ -35,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.core.config import Settings
 from app.models import Agent, AgentInterface, EvalResult, EvalRun, TestCase, TestSuite
+from app.assertions.run import _ACTUAL_TRUNCATE
 from app.runner import orchestrator as orch_mod
 from app.runner.executor import CaseOutcome
 from app.runner.orchestrator import create_error_regression_run
@@ -42,6 +44,8 @@ from app.runner.orchestrator import create_error_regression_run
 KEYWORD = "抱歉，我暂时无法回答"
 GOOD_ANSWER = "您好，这个问题这样处理：先点右上角设置，再选择导出。"  # 非空且不含关键词
 BAD_ANSWER = f"{KEYWORD}，请稍后再试。"[:80]                        # 非空且含关键词
+LONG_PAD = "详细说明如下：" * 100                                   # 远超截断阈值（700 字符）
+LONG_ANSWER = LONG_PAD + KEYWORD + "，请稍后再试。"                 # 关键词落在截断点之后
 TERMINAL = {"completed", "partial_failed", "timeout", "cancelled", "scoring_failed"}
 
 # 构造护栏（把「空答假绿」从「我记得」变成结构约束）：空答恒 hits=[] ⇒ 场景 1/2 会双双判
@@ -49,6 +53,9 @@ TERMINAL = {"completed", "partial_failed", "timeout", "cancelled", "scoring_fail
 assert GOOD_ANSWER and BAD_ANSWER, "答必须非空（空答 ⇒ keyword_not_contains 恒 PASS）"
 assert KEYWORD in BAD_ANSWER, "场景 2 必须真含关键词"
 assert KEYWORD not in GOOD_ANSWER, "场景 1 必须真不含关键词"
+assert len(LONG_PAD) > _ACTUAL_TRUNCATE, "场景 5 填充必须超过截断阈值"
+assert KEYWORD not in LONG_PAD[:_ACTUAL_TRUNCATE], \
+    "场景 5 的关键词必须落在截断点之后，否则该场景抓不到「截断污染判定」"
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -214,6 +221,28 @@ async def main() -> None:
                         expect_status="partial_failed", expect_error_case=0,
                         expect_error_type_set=True,
                         expect_ar=[None])          # 技术失败没跑断言 ⇒ 无明细可落
+
+        # --- 场景 5：长答，关键词落在 500 字符截断点之后（C-4 落库面的边界）---
+        # 验两件**方向相反**的事，缺一不可：
+        #   ① 判定读的是 unified **全文**（`assertions/run.py:25` `impl.run(unified, ...)`）
+        #      ⇒ 答再长、关键词再靠后，仍应判 fail；
+        #   ② 落库的 `actual` 是**截断副本**（`_truncate` 只包 `results` 里的 actual 字段）。
+        # 只验①会漏掉「落库被悄悄改成全文」；只验②会漏掉「截断挪到了判定输入上」。
+        # 关键词位置由文件头的 # 护栏钉死（必须在截断点之后，否则本场景无判别力）。
+        run5 = await _scenario(engine, agent_id, suite_id, case_id,
+                               "5 长答（关键词在截断点之后）",
+                               lambda: _ok(LONG_ANSWER), expect_pf=["fail"],
+                               expect_status="completed", expect_error_case=0,
+                               expect_ar=[[False]])
+        _, rs5 = await _read(engine, run5)
+        got = (rs5[0].assertion_results or [{}])[0].get("actual") if rs5 else None
+        _check("5 · 落库 actual 为截断副本（首尾）",
+               (isinstance(got, str),
+                len(got) if isinstance(got, str) else None,
+                got.endswith("…") if isinstance(got, str) else None),
+               (True, _ACTUAL_TRUNCATE + 1, True))
+        _check("5 · 截断副本确已切掉关键词",
+               KEYWORD in (got if isinstance(got, str) else ""), False)
 
         # --- 场景 4：实跑集为空 → cancelled ---
         async with AsyncSession(engine) as s:
