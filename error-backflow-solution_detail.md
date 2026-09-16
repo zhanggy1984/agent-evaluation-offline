@@ -172,8 +172,15 @@
 
 | 维度 | 值域 | 迁移 |
 |---|---|---|
-| `status`（本地决策） | `new` → `case_created`（记 case_id）/ `rejected`（记 reject_code） | 无 `acked` 值；复位规则见下注 ①（细则 §5.8/§5.9） |
-| `ack_status`（远端闭环） | `none` / `pending` / `acked` / `blocked` | 闭环终态 = case_created+acked 或 rejected+acked |
+| `status`（本地决策） | `new` → `case_created`（记 case_id）→ **`active`**（ack active 回写成功）/ `rejected`（记 reject_code） | 无 `acked` 值；复位规则见下注 ①（细则 §5.8/§5.9） |
+| `ack_status`（远端闭环） | `none` / `pending` / `acked` / `blocked` | 闭环终态 = **`active`+acked** 或 rejected+acked（`case_created` 不含 acked：ack 成功与 `status→active` 在 `_mark` 同一调用内完成） |
+
+> **⚠️ 本表 2026-09-16 按实现补记 `active`**（原表只有 `new/case_created/rejected`）：唯一写入点 =
+> `runner/pull_loop.py:265`（`_ack_active` ack 成功后 `_mark(status="active", ack_status="acked")`）。
+> 经穷尽枚举，inbox 的读取点全集 = 4 处（`cap_gap_probe.py:59-63` 与 `pull_loop.py:117`/`:240`/`:356`），
+> **无一按本值域筛选** ⇒ 补记前亦无功能后果；补记动机是原文值域**写错了**，后人若按
+> `assert row.status in INBOX_STATUS` 写校验会在真实数据上失败。**未动实现**（回三态要动 core runner
+> 且需迁移存量行，收益为零）。
 
 - **复位规则（含 R-8 收窄）**：① 仅当 `ack_status ∈ {none, pending}`（首次/对账未闭环）或收到 requeue/内容刷新时才复位 `ack_status='none'` 重处理；② **cap_gap 自愈对已 acked 的 invalidated 闭环行不复位、不重发 invalidated**，进「等待接入」探测态（每小时本地重跑自检+映射；补齐 → 建 case + 单次 ack active；仍缺 → 静默等轮）——**勿按 phase1 v0.2.1 旧语义实现**（phase2 §2.3 v0.7 注④ / H7-7）。
 - **非法组合**（单测断言）：case_created 无 case_id / rejected 无 reject_code / status=new 且 ack_status=acked。
@@ -220,7 +227,7 @@
 | `schema_version` | VARCHAR(16) | NOT NULL | — |
 | `case_type` | VARCHAR(32) | NOT NULL | — |
 | `envelope_json` | JSON | NOT NULL | 信封原文留档（不改写） |
-| `status` | VARCHAR(24) | NOT NULL | new / case_created / rejected（§3.3） |
+| `status` | VARCHAR(24) | NOT NULL | new / case_created / active / rejected（§3.3；`active` 于 2026-09-16 按实现补入） |
 | `reject_code` | VARCHAR(32) | NULL | online_content_gap / offline_cap_gap / manual_invalidate |
 | `reject_detail` | VARCHAR(512) | NULL | 缺哪个字段 / 原因补注 |
 | `case_id` | BIGINT | NULL | 建成 error case id；作废后置 NULL |

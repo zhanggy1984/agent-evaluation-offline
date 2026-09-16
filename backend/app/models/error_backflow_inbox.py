@@ -6,7 +6,10 @@
 ack 没发出去的行能**重扫自愈**（`case_created` + `ack_status != 'acked'`）。
 
 两维状态**正交**，不要合成一列：
-- `status` = 收单处置结果（new / case_created / rejected），**终态**
+- `status` = 收单处置结果（new / case_created / active / rejected），**可推进**：
+  建 case 后为 `case_created`，ack active 回写成功再推进为 `active`（`runner/pull_loop.py:265`）。
+  ⚠️ 本行原写「**终态**」且值域漏 `active`，2026-09-16 按实现订正 ——
+  「终态」措辞的可推进维度实为 `ack_status`
 - `ack_status` = 对 online 的回写进度（none / pending / acked / blocked），**可推进**
 
 合成一列的后果：`rejected` 也要 ack（invalidated），若只留一维就表达不了
@@ -19,7 +22,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
-INBOX_STATUS = ("new", "case_created", "rejected")
+# 本常量全仓零引用（无校验用它）；`active` 于 2026-09-16 按实现补入
+INBOX_STATUS = ("new", "case_created", "active", "rejected")
 ACK_STATUS = ("none", "pending", "acked", "blocked")
 # online 侧结构自检未过（缺字段） / offline 侧容量或映射缺口 / 人工作废
 REJECT_CODE = ("online_content_gap", "offline_cap_gap", "manual_invalidate")
