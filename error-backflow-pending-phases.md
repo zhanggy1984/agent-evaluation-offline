@@ -558,6 +558,79 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 
 ---
 
+### 5.8 验收结果（批 C / 闭环可用 + R-28 真机，2026-09-16）
+
+本批目标 = **【闭环可用】**：error 回流闭环端到端跑通一次，并补齐两个对照面。
+
+**① R-28 真机复验（本批唯一代码改动，offline `bba5625`）**
+
+现场：`link 2243`（payload `d309f8a3-…`）此前落 `invalidated` / `online_content_gap` / `acked`。
+写入 `dict_config.fallback_utterance` 词表后对其发 `requeue`：
+
+| 面 | requeue 前 | requeue 后 |
+|---|---|---|
+| online `error_case_link` | `invalidated` / `verify_status=pending` | `active` / `case_id=4075` |
+| payload 重组装 | `wordlist_v=1`、`words=0` | `wordlist_v=2`、`words=1` |
+| offline `error_backflow_inbox` 第 12 行 | `rejected` / `online_content_gap` / `acked` | **`active`** / `case_id=4075` / `acked` |
+
+`conversion_record` 存有完整链条：`assemble`（wordlist_v=1, words=0）→ `requeue`（reason=`online_content_gap`, wordlist_v=2, words=1）→ 三条 `regression_result`（run 3662/3663/3664）。
+**同一 `payload_id` 前后两次组装、唯一变量 = 词表** ⇒ 构成天然正反对照，不是「一条链跑绿」。
+
+> ⚠️ **判据订正**：`inbox.status` 的**终态是 `active`**，不是 `case_created` ——
+> `_activate` 先写 `case_created`，随即 `_ack_active` → `_mark(status="active")`，
+> `case_created` 只是**瞬时中间态**。首轮轮询按 `case_created` 判、故**漏报了这次成功**。
+> 后续任何按 status 轮询的探针，判据须含 `active`。
+
+**② C2 负对照（真机链路级，`online/.tmp-probe/c2_negative.py`）**
+
+单测 `test_analyzer_classify.py:86` 已覆盖 `decide()` **纯函数层**（`backflow_allow=False` ⇒ `layer=none`），
+但**证不了链路**。本探针注入两行未判 `trace_judge_state`（`judged=0`、ttl 已过），
+**唯一差异 = agent**，再跑真实 `run_judge_scan` + `run_cluster_merge`：
+
+| | contract-check（负） | customer-service（正对照） |
+|---|---|---|
+| judged | 1 | 1 |
+| layer | **none** | **L1** |
+| 建簇 | **无** | 簇 3862 |
+
+7/7 全绿，收尾自清残留。**正对照不可省**：没有它，「cc 不建簇」可以被「这条行本来就无效」解释掉。
+
+> ⚠️ **归因订正**：探针初稿把差异写作「唯一变量 = `backflow_allow`」，实际 `gate` 里
+> `backflow_enabled` 亦为假。回查 `analyzer/classify.py:8-9` **明文**「cc 双保险 =
+> `agent.backflow_allow=0`（seed D18）+ `backflow_enabled=false`」⇒ 链路级结论只能归到
+> **那一对双保险**，**不能归到单条**。单条充分性由上述单测覆盖 —— **两层拼起来才完整**。
+
+**③ 逐仓结论（B 批）**
+
+| 仓 | 结论 | 依据 |
+|---|---|---|
+| cs | **闭环端到端打通** | 本批 ① 的建单链 |
+| sp | **平台可到达**（登记落点脏数据已修） | 离线 `agent` 表 2297 的 `base_url` 曾是 `…:18080`，而 18080 是 sp 的 **web** 端口、API 是 **18002**（`seed_data.py:509` 本就正确，`:13` 注释亦明示）⇒ **源是对的、库是脏的**；`_seed_agents` 仅插入不更新（「已存在则整家跳过」）⇒ 源修复**不会迁移既有行**。`UPDATE` 后 run 3666（suite 2152，8 case）**8/8 真实调用**（7 过 1 折，答案 458–1006 字符，`error_type` 全 NULL） |
+| gq | **记录为 `none`** —— 上游未部署/未集成，**非平台缺陷** | 宿主无 gq 容器；自 `ai-eval-backend` 内访问 `host.docker.internal:8080` = `ConnectionRefusedError`；gq 仓无 `app.obs` SDK 导入。另：gq 既有三条 active 链接（2238/2241/2242）**全是桩注入**（`first_trace_id='clm-good-question-1'`、输入带 `#时间戳` 后缀），**不得读作真实回流** |
+
+**④ 假红对账（必须记，否则污染台账）**
+
+02:23–02:29 期间 offline `eval_run` 出现 4 笔 `error_regression`（3662–3665，逐分钟一次、`suite_id=2968`），
+对应的 cs 调用全 `llm_timeout`。**这批红是我自己造的** —— 我为造候选把 cs `.env` 的
+`DEEPSEEK_BASE_URL` 指向黑洞 `http://10.255.255.1:9`。**不是产品缺陷**，已按用户裁决（选 A）回滚至
+`https://api.deepseek.com` 并 `--force-recreate`，进程内回读确认（`base_url_is_deepseek=1`、`has_blackhole=0`）。
+
+**⑤ 未验收项（显式，不许被本节的绿盖过）**
+
+- **不证明 requeue 之外的恢复路径可用**：`manual_invalidate` 竞态对账（§5.9）本批**未真机触发**。
+- **不证明 `offline_cap_gap` 半支仍正确**：本批只真机跑了 `online_content_gap` 一支；`offline_cap_gap`
+  仍限 `{none, pending}` 仅由单测覆盖。
+- **不证明 R-8 探测态节流已实现** —— `CAP_GAP_PROBE` 常量在离线仓**零实现落点**（已登记，未实现）。
+- **C2 只验后端判定与建簇**：不证明 online 页面/接口把 `layer=none` 呈现正确。
+- **sp 的 8/8 只证明「平台能到达 sp 并完成评测」**，不证明 sp 侧 error 回流闭环（本轮未造 sp 候选）。
+
+**⑥ 未解释现象（如实登记，不许当成已解释）**
+
+逐分钟一次的 `error_regression` 循环在 **run 3665（10:26:04）后停止**，此后再无新 run。
+其停止时点**早于** cs 回滚（10:33），**不能**用回滚解释。可能是设计上的有界重试，也可能是缺陷 —— **未查**。
+
+---
+
 ## 6. 现场状态（提交/推送 · 残留 · 待裁）
 
 > 本节是「会丢的东西」的清单。**数字由 `git status --porcelain` 与 `ls` 当场产出**（2026-09-15），
@@ -595,6 +668,9 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
   + `core/backflow_client.py` 撤除 `extra_hosts` 绕过 + `tests/test_security.py`（+3 条 R-26 用例）
   + `tests/test_backflow_client.py`（护栏方向反转）+ 三处台账回填（**7 文件 / 182 增 35 删**）。
 - 五笔均**快进、非 force**。**此后新增提交是否已推送，一律以 `git log @{u}..HEAD` 现跑为准。**
+- **2026-09-16 新增 1 笔**：`bba5625`（**R-28** 重处理谓词按 `reject_code` 分流，见 §5.8）。
+  其推送状态**不在此记载**（理由见下方两条告诫）；**当时**（写本节时）现跑
+  `git log @{u}..HEAD` 得 **1 笔未推**。
 
 > ⚠️ **本节不写「已/未推送」的裸标记，只记「已完成的推送范围 + 指向命令」**。
 > 理由（**实证，非预防性**）：本节**前后两版都栽在同一机制上**——第 1 版写「未提交 7 文件」，
@@ -612,6 +688,14 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
   `cc_img_obs.py` / `cs_4dfad19.py` / `cs_img.py` / `gq_5bd4e9c.py` / `gq_img.py` / `probe_cs_cancel.py` / `sp_img_obs.py` / `sp_src.bak` / `sp_test.bak`
 - `%TEMP%\t25*` — **11 项**：`t25_base.sh` / `t25_flake.sh` / `t25_mutate.sh` / `t25app1` / `t25app_base` / `t25app_mut` / `t25base` / `t25cs` / `t25drift` / `t25drift;D` / `t25sp`
   - 其中 `t25drift;D` 疑为**误用 `;` 造成的畸形目录名**，属过去某次命令的副产物。
+
+- **2026-09-16 新增**（`ls` 当场产出）：
+  - `agent-evaluation-online/.tmp-probe/` — **4 个文件**：`c1_watch.py` / `c1_write_wordlist.py` / `c2_negative.py` / `r28_requeue.py`
+  - `customer-service/.tmp-probe/` — **2 个文件**：`probe_b_cs.py` / `probe_b2_cs.py`
+  - 容器内 `obs-backend:/tmp/` — **3 个文件**：`c1.py` / `c2_negative.py` / `q.py`
+  > ⚠️ 上述 `c1_watch.py` / `c1_write_wordlist.py` / `r28_requeue.py` **三个文件被一次错误的 `sed`
+  > 改坏过**（`s|8000/api/v1|8000/api|`，起因是我把登录 404 误判为「基址是 `/api`」；
+  > 真实基址经 `/openapi.json` 复核**仍是 `/api/v1`**）。三者**若复用需先还原该行**。
 
 > 按全局约定：**不主动 `rm`**。清理与否由用户逐项决定。
 
