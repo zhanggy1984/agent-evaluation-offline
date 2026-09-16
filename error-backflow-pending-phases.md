@@ -581,7 +581,12 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 > `case_created` 只是**瞬时中间态**。首轮轮询按 `case_created` 判、故**漏报了这次成功**。
 > 后续任何按 status 轮询的探针，判据须含 `active`。
 
-**② C2 负对照（真机链路级，`online/.tmp-probe/c2_negative.py`）**
+**② C2 负对照（真机链路级，`online/backend/tests/integration/backflow_allow_probe.py`）**
+
+> 该探针原为临时文件 `online/.tmp-probe/c2_negative.py`，2026-09-16 **已转正**入仓（与
+> `cluster_probe.py` 同处、同一跑法：`docker exec obs-backend python
+> /app/tests/integration/backflow_allow_probe.py`），转正后从新路径**实跑复验 7/7 全绿**。
+> 原因：本节以它作证据，证据要么入库、要么别引（临时文件一旦清掉，本引用即成空证据）。
 
 单测 `test_analyzer_classify.py:86` 已覆盖 `decide()` **纯函数层**（`backflow_allow=False` ⇒ `layer=none`），
 但**证不了链路**。本探针注入两行未判 `trace_judge_state`（`judged=0`、ttl 已过），
@@ -591,7 +596,7 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 |---|---|---|
 | judged | 1 | 1 |
 | layer | **none** | **L1** |
-| 建簇 | **无** | 簇 3862 |
+| 建簇 | **无** | 簇 3862（id 自增、**非恒值**；转正后复跑为 3863） |
 
 7/7 全绿，收尾自清残留。**正对照不可省**：没有它，「cc 不建簇」可以被「这条行本来就无效」解释掉。
 
@@ -736,7 +741,8 @@ requeue 建出 case 4075 让 cs 首次进入 `_error_agents`，对账随即把 4
   - 其中 `t25drift;D` 疑为**误用 `;` 造成的畸形目录名**，属过去某次命令的副产物。
 
 - **2026-09-16 新增**（`ls` 当场产出）：
-  - `agent-evaluation-online/.tmp-probe/` — **4 个文件**：`c1_watch.py` / `c1_write_wordlist.py` / `c2_negative.py` / `r28_requeue.py`
+  - `agent-evaluation-online/.tmp-probe/` — **3 个文件**：`c1_watch.py` / `c1_write_wordlist.py` / `r28_requeue.py`
+    （`c2_negative.py` 已于 2026-09-16 转正为 `online/backend/tests/integration/backflow_allow_probe.py`，见 §5.8 ②）
   - `customer-service/.tmp-probe/` — **2 个文件**：`probe_b_cs.py` / `probe_b2_cs.py`
   - 容器内 `obs-backend:/tmp/` — **3 个文件**：`c1.py` / `c2_negative.py` / `q.py`
   > ⚠️ 上述 `c1_watch.py` / `c1_write_wordlist.py` / `r28_requeue.py` **三个文件被一次错误的 `sed`
