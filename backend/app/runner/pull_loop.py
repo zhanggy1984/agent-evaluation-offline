@@ -139,38 +139,10 @@ async def _process_envelope(envelope: dict) -> str:
             # 重拉却每轮 skipped。复位后不 return，直接落回下面的自检流程。
             _reset_for_reprocess(existing, envelope)
 
-        ok, errors, verdict = validate_envelope(envelope)
-        if not ok:
-            return await _reject(db, envelope, payload_id, verdict, "; ".join(errors))
-
-        src = envelope.get("source") or {}
-        agent = await resolve_agent(db, src.get("agent") or "")
-        if agent is None:
-            return await _reject(
-                db, envelope, payload_id, REJECT_CAP_GAP, f"agent 未登记：{src.get('agent')!r}"
-            )
-        interface = await resolve_interface(db, agent, "", src.get("interface") or "")
-        if interface is None:
-            return await _reject(
-                db, envelope, payload_id, REJECT_CAP_GAP,
-                f"interface 未登记：{src.get('interface')!r}",
-            )
-
-        words = sanitize_words((envelope.get("no_fallback_config") or {}).get("words"))
-        if not words:
-            # fail-closed：净化后为空 ⇒ 落一条空断言会恒 pass（兜底判定全进候选）
-            return await _reject(db, envelope, payload_id, REJECT_EMPTY_WORDS, "净化后词表为空")
-
-        # R-27 装载闸：evidence.input 的形状必须能喂进该 agent 的 adapter 模板。不可达时
-        # 渲染侧会**静默**原样发出占位符（`render_template._sub`），被测 agent 回兜底话术 ⇒
-        # 断言恒 pass ⇒ 假绿写入 online。故在此 fail-closed 驳回，与「词表净化后为空」同型论证。
-        problems = check_input_wiring(
-            agent.adapter_config, (envelope.get("evidence") or {}).get("input")
-        )
-        if problems:
-            return await _reject(
-                db, envelope, payload_id, REJECT_CONTENT_GAP, "；".join(problems)
-            )
+        verdict, detail, ctx = await _self_check(db, envelope)
+        if verdict is not None:
+            return await _reject(db, envelope, payload_id, verdict, detail)
+        agent, interface, words = ctx
 
         case = await _activate(db, envelope, payload_id, agent, interface, words)
         await db.commit()
@@ -179,6 +151,45 @@ async def _process_envelope(envelope: dict) -> str:
     # ---- commit 之后才 ack（铁律）----
     await _ack_active(payload_id, case.id)
     return "activated"
+
+
+async def _self_check(db, envelope: dict):
+    """结构自检 + 能力解析（登记 / 词表 / 装载闸）。
+
+    返回 `(verdict, detail, ctx)`：`verdict is None` = 通过，`ctx = (agent, interface, words)`；
+    否则 `ctx is None`、`verdict` 为内部细码、`detail` 为可读原因（只落 `reject_detail`）。
+
+    **两处消费方共用**（拉取路径 `_process_envelope` 与 R-8 探测态 `cap_gap_probe`）——
+    判据必须**同源**：分开写必然分叉，而在探测态上分叉的后果是「拉取时驳回、探测时放行」，
+    等于把当初驳回的行按已放宽的判据建 case（R-27 装载闸就是这么被漏掉的同型教训）。
+    """
+    ok, errors, verdict = validate_envelope(envelope)
+    if not ok:
+        return verdict, "; ".join(errors), None
+
+    src = envelope.get("source") or {}
+    agent = await resolve_agent(db, src.get("agent") or "")
+    if agent is None:
+        return REJECT_CAP_GAP, f"agent 未登记：{src.get('agent')!r}", None
+    interface = await resolve_interface(db, agent, "", src.get("interface") or "")
+    if interface is None:
+        return REJECT_CAP_GAP, f"interface 未登记：{src.get('interface')!r}", None
+
+    words = sanitize_words((envelope.get("no_fallback_config") or {}).get("words"))
+    if not words:
+        # fail-closed：净化后为空 ⇒ 落一条空断言会恒 pass（兜底判定全进候选）
+        return REJECT_EMPTY_WORDS, "净化后词表为空", None
+
+    # R-27 装载闸：evidence.input 的形状必须能喂进该 agent 的 adapter 模板。不可达时
+    # 渲染侧会**静默**原样发出占位符（`render_template._sub`），被测 agent 回兜底话术 ⇒
+    # 断言恒 pass ⇒ 假绿写入 online。故在此 fail-closed 驳回，与「词表净化后为空」同型论证。
+    problems = check_input_wiring(
+        agent.adapter_config, (envelope.get("evidence") or {}).get("input")
+    )
+    if problems:
+        return REJECT_CONTENT_GAP, "；".join(problems), None
+
+    return None, "", (agent, interface, words)
 
 
 def _needs_reprocess(row: ErrorBackflowInbox) -> bool:
