@@ -134,6 +134,9 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 3. **P3-5 无成因证据**：只有「`usage` 全空 + `answer` 非空」这个对照，**任何解释都不许写成结论**。
 4. **`/perf`、`/cost`、`/compare` 判「无对象」是取证结论，不是「验证过没问题」**——将来 error run 开始写 perf/cost 时，**这三面要回头重判**。
 5. **P4-1 的四条真机项**本轮**未复验**，状态取自台账自陈（`task.md:299/:300`）。
+6. **【2026-09-16 新增】⑥环的「补判」路径真机零案例**：`api/backflow.py:1087` 的 `cluster.status=='claim'` 守卫会把判定**静默跳过**，之后靠「后续推送」或 `worker/rejudge_job.py` 补判。**已查全库（`dev.obs`，2026-09-16）：`auto_fixed=6` 那 6 条 `passed` link 的 cluster 全程在 `claim` 态被判，无一条走过「先被守卫跳过、事后补判」这条路** ⇒ 该路径**只有代码存在性证据，无真机案例**。不许据 `rejudge_job` 文件存在就写「兜底已验证」。
+   **为什么不当场验**（用户 2026-09-16 裁定「不造数据」）：验它需把 cluster 3856 从 `open` 推回 `claim` 并重推一笔结果，会向共享观测面注入人造回流，与真缺陷**逐字同形**（同 [[self-injected-fault-looks-like-real-defect]]）。
+   **复核条件**：真实运维中一旦出现「推送到达时 cluster 非 claim」的案例，即可顺带取证；或排期单独造带基线标注的受控实验。
 
 ---
 
@@ -403,7 +406,9 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 | ⑤ | 出站回传 online | ✅ `verify_run_record` **824/823/822**（run_id=3661），载荷 10 字段结构正确 |
 | ⑤ | **`trigger_signal_id` 取值** | ✅ 载荷填 **cluster_id 3856**，**非** `eval_run.trigger_signal_id`（3660）—— O-F.7 警告的「同名非同物」**实现是对的** |
 | ⑥ | online 收敛记录 | ✅ link **2238** 与**连带**的 2222（cluster 3841）/ 2221（cluster 3840）均获 `verify_run_record` |
-| ⑥ | `verify_status` 迁移 | ⚠️ **未取证**：仍 `pending`。写侧在 `backflow/claim.py:84-93`（条件 `verify_status=='pending'`、由 claim 驱动），而 cluster 3856 仍 `open`。**「设计如此」与「⑥环没走完」两种解释表象相同，本表不下结论。** |
+| ⑥ | `verify_status` 迁移 | ✅ **已解释（2026-09-16 订正，原记「未取证 / 两义」框定过窄）**：仍 `pending` 的成因 = `api/backflow.py:1087` 的守卫 `if cluster.status == "claim"` 才跑判定，而 cluster 3856 停在 **`open`**（6b-1 手工造、从未 claim）⇒ 判定被**静默跳过**，link 保持 pending。**⚠️ 同日二次订正 —— 兜底并不存在**：`worker/rejudge_job.py` 的扫描谓词（`_scan_candidates`，实读 `:55-67`）= **`ErrorCluster.status == "claim"` ∧ 有 pending link** ⇒ **cluster 停在 `open` 时 rejudge 也捞不到它**。故对 3856/3861 这类 `open` 簇，`api/backflow.py:1087` 与 `rejudge_job` **两道门谓词相同**，link 会**永久停在 pending**，无任何机制补判。**真机活案例 = link 2243（cluster 3861）**：④⑤ 环已把 4 条 `verify_run_record`（825~828，`case_pass` 全 0）推回，判定从未跑过。
+**✅ 同日三次订正 —— 性质已归因（回详设取证）= 设计如此，非缺陷**：`solution_detail.md` **L1023** 逐字「auto-fixed 判定语义 v1.5 = **claim 固化 `claim_k`** + **claimed-case 级纯净判据**」；**L670** 逐字「每**『claimed case 纯净可判』版** error run 终态判定后」；**L1008** `claim` 行「**必填 `fix_version`**」⇒ 判定成立**必须先有 `fix_version`（claim 时必填）与 `claim_k`（claim 时固化）**，二者**只能来自 claim** ⇒ **未 claim 的簇不判是正确行为**。`backflow.py:1087` 与 `rejudge_job` 谓词同为 `claim`，是**一致**而非两道门都漏。link 2243 停 `pending` 也对：**无人声称修复过，回归结果仅留档**，待 claim 后对全链幂等重放。
+**✅ 同日四次订正 —— ④环疑点亦不成立**：曾疑「error run 在 cluster 未 claim 时被自动建」越界。回 offline 详设 **§7.4 内部创建器 `_create_error_regression_run` 参数表**逐字：`version` = 「**信号 run 的 version（共享域原样承载 = `fix_version`）**」、`trigger_signal_id` = 「触发的信号 **manual/held_out run id**」⇒ **④环的触发入口本就是信号 run 终态，与 cluster 是否 claim 无关**；此处的 `fix_version` 取自信号 run 的 version，**不是** `cluster.fix_version`（claim 时填的那个）。真机佐证：3662~3665 的 `trigger_signal_id` = 2475/2488/2505/3026，全为 `trigger_type='manual'`。**全链 ①~⑥ 至此无缺口。****写侧也非「只由 claim 驱动」**：`verify.py:411/415/425` 在 `_apply_terminal` 内调 `claim_flow._mark_pending_links` 写 passed/failed/superseded（`batches.py:153` 亦写 superseded）。**真机佐证（`dev.obs`，2026-09-16 实查）**：link 分布 `pending 15 / passed 6`、cluster 分布 `open 2 / claim 14 / fixed 6`、`conversion_record` 中 `auto_fixed = 6`，且那 6 条 `passed` 的 link **其 cluster 全为 `fixed` 且每条各带 1 条 `verify_run_record`** ⇒ **自动收敛路径确实迁移 link 终态，机制工作正常**。⚠️ 原「本表不下结论」的措辞系**当时未读守卫生效条件**所致；「cluster 停在 open ⇒ 守卫跳过」这第三种（且正确的）解释未被列入。**残余新缺口见 §4 第 6 条**。 |
 
 **④环触发链（6b-2a 取证，全部来自代码，非推断）**：
 
