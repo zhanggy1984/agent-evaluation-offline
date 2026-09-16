@@ -801,7 +801,7 @@ interface 未登记**且**过不了 R-27 装载闸 —— 其 `evidence.input` �
 > 且**覆盖率门禁段对 `backend/` 布局的仓是死代码**（零测试执行）。**不得读作 lint 通过**；
 > **offline 仓无任何 CI**，唯一 lint 门禁是手动借 online venv + online 配置扫改动文件。
 
-### 6.2 现场残留（**等用户决定，本文件不处置**）
+### 6.2 现场残留（**2026-09-16 已全部裁定：原样留着**）
 
 - `D:\study\aiprojcet\_t25drift\` — **9 个文件**：
   `cc_img_obs.py` / `cs_4dfad19.py` / `cs_img.py` / `gq_5bd4e9c.py` / `gq_img.py` / `probe_cs_cancel.py` / `sp_img_obs.py` / `sp_src.bak` / `sp_test.bak`
@@ -826,6 +826,9 @@ interface 未登记**且**过不了 R-27 装载闸 —— 其 `evidence.input` �
   > 真实基址经 `/openapi.json` 复核**仍是 `/api/v1`**）。三者**若复用需先还原该行**。
 
 > 按全局约定：**不主动 `rm`**。清理与否由用户逐项决定。
+>
+> **2026-09-16 逐条裁定 = 六条全部「原样留着」**（用户逐条拍板、非打包）：① ② 在仓外目录 / `%TEMP%`，**不进任何 `git status`、不影响构建**；③ ④ ⑤ 未跟踪 ⇒ 不进版本库；⑥ 在容器内、容器重建即消失。共同理由 = **删除不产生任何收益（不删不会出任何故障），而 `rm` 不可逆**。其中 ② 附带事实：`%TEMP%` 会被系统自行清理，「留着」不等于留得住；③ 的 `c1_watch.py` / `c1_write_wordlist.py` / `r28_requeue.py` 三者曾被误 `sed` 改坏，**若复用须先还原 `8000/api` → `8000/api/v1`**。
+> ⚠️ **条目数订正**：本残留此前在任务清单（`#327`）里记作「**四组**」——那是本节只有 2 条时留下的旧数，之后补记过、数字从未回改；2026-09-16 全量 `ls` 核实本节实为 **6 条**（新增四：`online/.tmp-probe/` · `offline/.tmp-probe/` · `customer-service/.tmp-probe/` · 容器 `obs-backend:/tmp/`）。**数字从旧记录搬来、未当场核实**，与本节上方 ① ② ③ 三处漏列同族（[[multi-site-doc-edit-enumerate-first]]）。
 
 ### 6.3 待裁项（**已登记，未拍板**）
 
