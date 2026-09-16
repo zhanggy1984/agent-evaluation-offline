@@ -128,7 +128,16 @@ async def _process_envelope(envelope: dict) -> str:
                     # 该列存的就是 online 粗码（见 `_reject`），故可直接透传，**不再过映射表**——
                     # 过了反而是 KeyError（表键是内部细码）。
                     await _ack_rejected(payload_id, existing.reject_code)
-            return "skipped"
+                return "skipped"
+
+            if not _needs_reprocess(existing):
+                return "skipped"
+
+            # requeue 重处理（§6.5 判据第一条，此前漏实现）：admin 在 online requeue 后
+            # assembled_ts 刷新，该 payload_id 再次落进增量窗口被拉回。此时**不得复用旧驳回
+            # 结论**，否则「现场已修正」永远推不进来——真机实证：link 恒 assembled、每轮被
+            # 重拉却每轮 skipped。复位后不 return，直接落回下面的自检流程。
+            _reset_for_reprocess(existing, envelope)
 
         ok, errors, verdict = validate_envelope(envelope)
         if not ok:
@@ -170,6 +179,61 @@ async def _process_envelope(envelope: dict) -> str:
     # ---- commit 之后才 ack（铁律）----
     await _ack_active(payload_id, case.id)
     return "activated"
+
+
+def _needs_reprocess(row: ErrorBackflowInbox) -> bool:
+    """§6.5 判据「重处理 vs 幂等跳过」：rejected 行按驳回码分流。
+
+    - `online_content_gap`（online 现场内容缺/畸形）：ack_status **任意**都重处理——admin
+      requeue 刷新 assembled_ts 后该 payload 才被重拉，重复落进窗口即「内容已刷新」的信号
+      （游标按 assembled_ts 推进）。此处**不比 assembled_ts**：文档即此语义，多一层时间解析
+      判据就多一个「该重处理却被静默跳过」的失败点，比白跑一轮难发现得多。
+    - `offline_cap_gap`（offline 能力缺）：R-8 修订（phase2 v0.7 §2.3 注④）收窄为仅
+      ack_status∈{none,pending}（首次驳回 / 对账未闭环）复位；**已 acked 的 invalidated
+      闭环行不复位、不重发 invalidated**——那是「等被测 agent 接入」的探测态（§5.8）。
+    - `manual_invalidate` 及其它：不复位（人工判无效，重推归 online admin 语义）。
+    """
+    if row.status != "rejected":
+        return False
+    if row.reject_code == "online_content_gap":
+        return True
+    return row.reject_code == "offline_cap_gap" and row.ack_status in ("none", "pending")
+
+
+def _reset_for_reprocess(row: ErrorBackflowInbox, envelope: dict) -> None:
+    """复位待重处理：清驳回痕迹 + ack 复位 none + 覆盖留档信封。
+
+    同 payload_id 的内容已刷新，留档必须跟着走——否则审计链上「该 payload 当时是什么」
+    与实际重组装的载荷对不上（§6.5 明写「覆盖 inbox envelope_json 留档」）。
+    只改字段不 commit：由调用方（`_activate` / `_reject`）的同事务收口。
+    """
+    row.status = "new"
+    row.ack_status = "none"
+    row.reject_code = None
+    row.reject_detail = None
+    row.case_id = None
+    row.schema_version = str(envelope.get("schema_version") or "")
+    row.case_type = str(envelope.get("case_type") or "")
+    row.envelope_json = envelope
+
+
+async def _inbox_put(db, payload_id: str, **fields) -> ErrorBackflowInbox:
+    """inbox 行「有则更新、无则插入」（§5.5 step1 的 upsert 语义）。
+
+    重处理路径下该行已存在，直接 `db.add` 会撞 `uk_inbox_payload`——这是「重处理漏实现」
+    的连带缺口：补了判据不补这个，重处理一跑就 IntegrityError。先查后写：单实例 +
+    `_LOCK` 拉取互斥下无并发写同一 payload 的窗口（与 online `put_config` 对全局键的
+    论证同型）。
+    """
+    row = (await db.execute(
+        select(ErrorBackflowInbox).where(ErrorBackflowInbox.payload_id == payload_id)
+    )).scalars().first()
+    if row is None:
+        row = ErrorBackflowInbox(payload_id=payload_id)
+        db.add(row)
+    for key, value in fields.items():
+        setattr(row, key, value)
+    return row
 
 
 async def _ack_active(payload_id: str, case_id: int | None) -> None:
@@ -224,15 +288,15 @@ async def _activate(db, envelope: dict, payload_id: str, agent: Agent, interface
     db.add(case)
     await db.flush()
 
-    db.add(ErrorBackflowInbox(
-        payload_id=payload_id,
+    await _inbox_put(
+        db, payload_id,
         schema_version=str(envelope.get("schema_version") or ""),
         case_type=str(envelope.get("case_type") or ""),
         envelope_json=envelope,
         status="case_created",
         case_id=case.id,
         ack_status="pending",
-    ))
+    )
     return case
 
 
@@ -242,8 +306,8 @@ async def _reject(db, envelope: dict, payload_id: str, code: str, detail: str) -
     `code` 是本仓内部细码；**落 `reject_code` 的是映射后的 online 粗码**（详设 §3.3 列值域），
     内部细码前置进 `reject_detail` 保住粒度（§5.5：「detail 注明」）。
     """
-    db.add(ErrorBackflowInbox(
-        payload_id=payload_id,
+    await _inbox_put(
+        db, payload_id,
         schema_version=str(envelope.get("schema_version") or ""),
         case_type=str(envelope.get("case_type") or ""),
         envelope_json=envelope,
@@ -251,7 +315,7 @@ async def _reject(db, envelope: dict, payload_id: str, code: str, detail: str) -
         reject_code=_ONLINE_REASON[code],
         reject_detail=f"{code}: {detail}"[:512],
         ack_status="pending",
-    ))
+    )
     await db.commit()
     await _ack_rejected(payload_id, _ONLINE_REASON[code])
     return "rejected"

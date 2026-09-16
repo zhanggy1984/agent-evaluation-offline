@@ -136,10 +136,17 @@ class TestRejectMapping(unittest.TestCase):
 
 
 class _FakeDb:
-    """冒充 Session：只记 `add()` 的 ORM 行（断言落库字段）。"""
+    """冒充 Session：记 `add()` 的 ORM 行（断言落库字段）。
+
+    `execute` 返回 None 行：`_reject` 现走 `_inbox_put` 的「先查后写」，查无 → 落 add 分支，
+    断言面（`added[0]`）与本类建立时一致。
+    """
 
     def __init__(self):
         self.added: list = []
+
+    async def execute(self, *_a, **_kw):
+        return _FakeResult(None)
 
     def add(self, obj):
         self.added.append(obj)
@@ -237,8 +244,20 @@ class TestReplay(unittest.TestCase):
         self.assertEqual(outcome, "skipped")
         self.assertEqual(replayed, [("p-9", "online_content_gap")])
 
-    def test_rejected_acked_is_not_replayed(self) -> None:
-        """已 ack 的驳回不得重发——幂等边界，防止每轮空打 ack。"""
+    def test_content_gap_acked_is_reprocessed_not_skipped(self) -> None:
+        """`online_content_gap` 的已 ack 行必须**重处理**，不是幂等跳过（R-28 订正）。
+
+        本条原名 `test_rejected_acked_is_not_replayed`，钉的是「已 acked 一律跳过」。
+        该语义已被 §6.5 判据的 R-8 修订（`error-backflow-phase1.md:358`）取代：判据为
+        「仅 `ack_status∈{none,pending}` **或收到 requeue/内容刷新**时复位重处理」，并明写
+        原 bullet 的「含已 acked 的 invalidated 闭环」是「v0.2.1 旧语义，勿按旧语义实现」。
+        §6.5 第 355 行对 `online_content_gap` 的重处理触发条件**不提 ack_status**。
+        真机实证（2026-09-16）：旧语义下 requeue 后的 payload 每轮被重拉、每轮 skipped，
+        link 恒 assembled——「现场已修正」永远推不进来。
+
+        注意本条的 `replayed` 非空是**重处理后再驳回**的产物，不是「空打 ack」：下一轮
+        该行的 ack_status 已复位，且 online 对同目标 ack 走幂等 noop。
+        """
         row = _InboxRow("rejected", "acked", reject_code="online_content_gap")
         replayed: list = []
 
@@ -249,8 +268,8 @@ class TestReplay(unittest.TestCase):
                 mock.patch.object(pl, "_ack_rejected", _fake_replay):
             outcome = asyncio.run(pl._process_envelope({"payload_id": "p-9"}))
 
-        self.assertEqual(outcome, "skipped")
-        self.assertEqual(replayed, [])
+        self.assertEqual(outcome, "rejected")  # 落回自检（信封缺字段 → 再驳回），非 skipped
+        self.assertEqual(replayed, [("p-9", "online_content_gap")])
 
     def test_case_created_pending_still_replayed(self) -> None:
         """原有激活重放路径不得被本次改动碰坏。"""
