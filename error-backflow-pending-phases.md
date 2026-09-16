@@ -51,7 +51,7 @@
 | **P3-2** | `F-2` 降格声明**无 `task.md` 载体** | online `docs/integration-report.md:140` |
 | **P3-3** | 详设 §9.4 把 `assertion_results` 写成**表**（实为 `eval_result` 的 **JSON 列**） | 本轮 pre-scan 新发现 |
 | **P3-4** | `O-F.8` 正文的 secret 名（`backflow_outbound_secret` / `BACKFLOW_INBOUND_SECRET`）**已作废**，实配 `settings.evaluator_service_secret`（`core/config.py:38`） | 本轮复核新发现（**文档旧、实现对**） |
-| **P3-5** | **error 通道 `usage` 全空**：84 条 `usage=[null]`、`total_tokens=0`、`total_cost` 全 NULL，而 `answer` **73 条非空** | **本轮新发现，待取证**——未读 error 通道 `_save_result` 与 usage 抽取路径，**不判定** |
+| **P3-5** | **error 通道 `usage` 全空**：84 条 `usage=[null]`、`total_tokens=0`、`total_cost` 全 NULL，而 `answer` **73 条非空** | **本轮新发现，待取证**——未读 error 通道 `_save_result` 与 usage 抽取路径，**不判定**（**⚠️ 2026-09-16 已取证并证伪**：`usage=[null]` 系**探针桩执行的产物**，非 error 通道缺陷 —— `error_run_probe.py:74` 的 `_ok()` 造的 `CaseOutcome` 里**没有 usage**；真跑的 7 条 usage 完整。详见 §4 第 3 条。数字为现在时：`[null]` 共 **93** 条、`answer` 非空 **100** 条） |
 
 ### P4 — 验收覆盖
 
@@ -156,7 +156,25 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
    「重试只存在于 push 路径、`pull_loop` 本就无立即重试」**一致，无遗漏分流**。
    ⚠️ **本行保留不删**（不按「验一个删一条」删行）：第 6 条被本文件他处**按号引用**
    （见「⑥环」段末「残余新缺口见 §4 第 6 条」），删行会致全文错号。
-3. **P3-5 无成因证据**：只有「`usage` 全空 + `answer` 非空」这个对照，**任何解释都不许写成结论**。
+3. ~~**P3-5 无成因证据**：只有「`usage` 全空 + `answer` 非空」这个对照，**任何解释都不许写成结论**。~~
+   ✅ **已取证并证伪（2026-09-16，真库 + 源码双路）**：`usage=[null]` **不是 error 通道的缺陷**，
+   而是**探针桩执行的产物**。机制三段（均可逐行核）：
+   ① `backend/tests/integration/error_run_probe.py:74` 的 `_ok()` 造
+   `CaseOutcome(unified={"answer": answer}, timing={}, status_code=200)` —— **`unified` 里只有 `answer`、没有 `usage`**；
+   ② `orchestrator.py:574` `usages.append(last_outcome.unified.get("usage"))` 追加 **None** ⇒ `usages = [None]`；
+   ③ `_save_result` 的 `usage=usages or (...)` 里 **`[None]` 是「真值」** ⇒ 短路不生效 ⇒ 落库 `[null]`。
+   同理 `timing=[{}]`（桩里 `timing={}`）、`model=None`（桩无 `meta`）。
+   **反证**：真跑出来的 **7 条 usage 完整**（`good-question` 3 条各 1194 tokens、`customer-service` 4 条 0 tokens
+   = 黑洞注入那批），**无一条真跑落 `[null]`**；且 `executor.py:207-208` 对真跑做契约校验
+   （`assembler.usage is None` ⇒ `no_usage` na）⇒ **真实成功路径不可能落 `[null]`**（代码级排除，非仅相关性）。
+   93 条 `[null]` 的归属（真库 group by agent）：`probe-c1-error` 44 / `probe-c3-auto` 16 / `probe-c2-push` 12 /
+   **`good-question` 8** / `probe-c5-s2` 6 / `probe-c4a-pool` 4 / `probe-c5-s1` 3。
+   ⚠️ **`good-question` 那 8 条是探针借真 agent 名播种的**（同 [[self-injected-fault-looks-like-real-defect]] 族）
+   —— **按 `agent.name` 分组会把桩数据读成真流量**，判据必须用「桩指纹」而不是 agent 名。
+   **可复用判别法（桩指纹）**：`usage=[null]` ∧ `model IS NULL` ∧ `timing=[{}]` ⇒ 该行**不是真跑出来的**。
+   ⚠️ **残余（不许被上面这段盖过）**：真跑的 error_regression 样本**只有 7 条**，其中 4 条还是
+   黑洞注入 batch（tokens 全 0）⇒ **真实 error run 的 usage 样本仅 3 条**（`good-question` run 3661）。
+   「`[null]` 已证伪为桩」**不等于**「error 通道 usage 面已充分验证」——后者样本量仍极薄。
 4. **`/perf`、`/cost`、`/compare` 判「无对象」是取证结论，不是「验证过没问题」**——将来 error run 开始写 perf/cost 时，**这三面要回头重判**。
 5. ~~**P4-1 的四条真机项**本轮**未复验**，状态取自台账自陈（`task.md:299/:300`）。~~
    ✅ **已订正（2026-09-16）—— 镜像面已复验，本行原述**已过期**（原写的是「本轮未复验」，而**批 6a 早在 2026-09-15 就做了**）**：
