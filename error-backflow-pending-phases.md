@@ -129,7 +129,24 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
 
 ## 4. 未验清单（**显式**，不许被 §1 的确定语气盖过）
 
-1. **P0-2 的适用面未定**：pre-scan 的 780 条 keyword 断言**未按 `trigger_type` 拆分** ⇒ 不知道其中多少来自 error run。「零空答」这条证据的覆盖面**比 §1 读起来窄**。
+1. ~~**P0-2 的适用面未定**：pre-scan 的 780 条 keyword 断言**未按 `trigger_type` 拆分** ⇒ 不知道其中多少来自 error run。「零空答」这条证据的覆盖面**比 §1 读起来窄**。~~
+   ✅ **已结清（2026-09-16，`ai-eval-backend` 容器内只读直查）**：按 `eval_run.trigger_type` 拆分 ——
+   **error_regression 仅 17 条 / 835 条（2.0%）**，`manual` 818 条、`held_out` 0 条。
+   **原判断「覆盖面比 §1 读起来窄」成立**；另查出两条原条目没问到、但决定该怎么读这条证据的事实：
+   ① **空答 ∩ keyword 断言 = 0 交集**：库里 `answer` 为空的 error 行有 17 条，但这 17 行
+   **一条 keyword 断言都没有** ⇒ `R-12` 的空答语义翻转在**存量 error 域上的作用对象 = 0**
+   ——不是「覆盖窄」，是**无对象**；`R-12` 的价值全在**未来**防漏判（与 pre-scan 报告 §4 第 1 条自陈一致）。
+   **⚠️ 该结论有一处必须自证的地方，已核**：「空答」按 `answer` 列空白判，而 `R-12` 管的是算子取到的
+   `actual` —— 两者只在 `args.path='answer'` 时同物。**全量 835 条实测 `args.path` = 100% `answer`（无其它路径）**
+   ⇒ 该交集结论**直接作用到 `R-12` 的操作对象上**，不存在「路径不同、值不同」的漏口。
+   ② **那 17 条全属同一个 case（`3620`）× 17 个 run**，op 清一色 `keyword_not_contains`（10 pass / 7 fail）
+   ⇒ 若拿它当「error 域已覆盖」，那是**拿一个 case 当一面**。
+   ⚠️ **数字是现在时快照，不是常量**：`eval_result` 现 851 行（pre-scan 当时记 804）、keyword 断言 835 条（当时 780）；
+   且 error 域 117 行里 **100 行根本没有任何断言**（`run_id` ≤ 3685 那批，C-4 落码前）⇒ 分母会随后续 error run 变动。
+   **复核命令**（容器内只读）：`eval_result` join `eval_run`，按 `trigger_type` 分组统计
+   `assertion_results` 中 op ∈ {`keyword_contains`、`keyword_not_contains`} 的条数与空 `actual` 条数。
+   ⚠️ **两个实测坑**：`assertion_results` 是 **JSON 字符串（双重编码）**，**必须先 `json.loads`**
+   ——不 loads 会**静默得 0 条**（本轮踩到，第一版查询即返回 0）；`eval_run` **没有 `agent` 列**（agent 在 case/suite 上）。
 2. ~~**P1-1 只读了两处**：客户端 `backflow_client.py` 与 `error_push.py`；**其余调用方是否另有分流未读**。~~
    ✅ **已结清（2026-09-16）**：按**包根**（`backend/app/`）全仓枚举调用方，**只有两处** ——
    `runner/error_push.py`（`push_results` ×1）、`runner/pull_loop.py`（`pull_payloads` ×1 + `ack` ×2），
