@@ -318,3 +318,34 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 - 条目原文仍在 `error-backflow-task.md`，本表**不复制条目全文**，只记判词与缺口 —— 避免两处
   描述同一件事而漂移；
 - 判词口径新增值时，须同时更新本文件头部口径块。
+- **lint（ruff）复核命令**（2026-09-16 固化；此前**本仓无任何记载**，仅在各批施行记录里
+  零散写「ruff 逐规则对照 HEAD 零新增」而不写怎么跑）：
+  ```bash
+  # ruff 既不在宿主 PATH、也不是本仓依赖；唯一载体 = 借 online 仓 venv 里的 ruff（当时 0.16.6）。
+  R="D:/study/aiprojcet/agent-evaluation-online/backend/.venv/Scripts/ruff.exe"
+  cd D:/study/aiprojcet/agent-evaluation-offline/backend
+  "$R" check app tests alembic --statistics     # 全量存量
+  ```
+  - **口径 = 「零新增」不是「清零」** —— 存量告警**未清理也不打算清理**，判据是**相对 HEAD 的
+    增量对照**（各批施行记录里的「ruff 逐规则对照 HEAD … 零新增」即此意）。
+  - **存量基线（2026-09-16 实测，`backend/ruff.toml` 生效后）**：`app` **260** / `app tests alembic`
+    **594**。⚠️ 这两个数是**「当时」框架**，改代码即变，**引用前重跑**。
+  - ⚠️ **新建/转正文件时必须显式带上 `tests/`**：只扫 `app` 会漏。实证 = online 仓
+    `tests/integration/backflow_allow_probe.py` 转正（其 CI 原文命令是 `ruff check app tests alembic`）
+    漏出 **4 条 E501**，按其自身配置现为**红**。
+- **lint 判据此前不随仓走（2026-09-16 修复）**：本仓原**无任何 ruff 配置**
+  （无 `pyproject.toml` / `ruff.toml` / `setup.cfg`），规则集完全等于「**借来的那个 ruff 版本的默认集**」。
+  实测同一把 ruff 0.16.6：**无配置**时 `backend/app` 报 **238** 条（B008/BLE001/DTZ003/TRY401… 皆为
+  默认集），而 **online** 因 `backend/pyproject.toml` 写明 `select=[E,W,F,I]` 报 **0** 条
+  ⇒ 同一仓、同一命令，**换台机器/换个 ruff 版本就可能得到另一个判据**，而台账照记「零新增」。
+  **现固化 = `backend/ruff.toml`**（照 online 口径：`py311` / `line-length 100` /
+  `select=[E,W,F,I]` + `known-first-party=["app"]`）。**该文件只声明 lint、不声明依赖**
+  —— 本仓依赖仍以 `requirements.txt` / `requirements.lock` 为准；**刻意不放 `pyproject.toml`**，
+  否则凭空多出第二个依赖声明源（online 那份 pyproject 是带 `[project] dependencies` 的完整声明）。
+  **已验证**：`pytest` 配置源仍为 `pytest.ini`（`configfile: pytest.ini`），未受影响；
+  全局 pre-commit hook 的覆盖率门禁**仍是死代码**（其判据 `[ -d tests/unit ]` 判**仓根**，
+  本仓 tests 在 `backend/tests`）。
+- **仍未做（承认）**：本仓**无 CI**（无 `.github/workflows/`、`error-backflow-task.md` 阶段 G6
+  「护栏并入 CI」暂无可挂载体）。故以上全部是**手动门禁** —— 「跑不跑」取决于执行者记不记得，
+  **没有任何机制强制**。本次**不建 CI**：offline 侧 pytest 依赖真库/MySQL，起流水线属重工程，
+  且本仓单人直推、无 PR 流程（文档承诺 ≠ 需求）。**此项留作可选项，未立项。**

@@ -1,0 +1,16 @@
+# offline 仓 lint 判据（2026-09-16 固化）。**此前本仓无任何 ruff 配置** —— 判据完全由
+# 「跑的是哪个 ruff 版本、其默认规则集是什么」决定，不随仓走（详见 error-backflow-status.md
+# 「维护约定」的复核命令一节）。
+#
+# ⚠️ 本文件**只声明 lint 规则，不声明依赖**：本仓依赖仍以 requirements.txt / requirements.lock 为准。
+# 这一点是刻意与 online 仓不同的落法 —— online 把 ruff 配置放在 backend/pyproject.toml（那是一份
+# 带 [project] dependencies 的完整依赖声明），offline 若照搬会凭空多出第二个依赖声明源。
+#
+# 口径与 online 仓 backend/pyproject.toml 的 [tool.ruff] 段保持一致，便于两仓对照。
+target-version = "py311"
+line-length = 100
+# 默认规则集外，开启常用正确性/格式集；按需随代码演进调整
+lint.select = ["E", "W", "F", "I"]
+
+[lint.isort]
+known-first-party = ["app"]
