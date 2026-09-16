@@ -378,6 +378,18 @@ def resolve_interface(db, agent: Agent, method: str, path: str) -> AgentInterfac
   - 404 `ERR_PULL_0003`：即时告警端到端连通性，ack_status=`blocked` + last_error 注明，人工核查（**400 与 404 处置分开**，B-S1）。
   - 400 `ERR_CLUSTER_0003`：解析响应体 `offline_status` + `invalidate_reason`（**R3**）→ 若 `invalidate_reason == "manual_invalidate"` → 走 §5.9 竞态对账（不入 blocked）；否则有界重试（连续 N 次）后落 `blocked`。
   - 5xx/网络错：指数退避重试，ack_status=`pending`，不置 blocked。
+  > **⚠️ 实现现状（2026-09-16 勘察，offline）—— 上面三条分流一条都没实现**：
+  > `backflow_client.ack` 对**非 200 一律抛 `BackflowClientError`**，异常只带 `resp.status_code`、
+  > **响应体从不解析**（`core/backflow_client.py:118-119`）⇒ `offline_status` / `invalidate_reason` **无人读**；
+  > 两个调用点 `runner/pull_loop.py:260`（active）/ `:343`（invalidated）捕获后**只 log + return**
+  > （留 pending 待下轮重放），**都不读 `status_code`**（该文件全文零命中）。
+  > 后果 = 撞上 404/400 时**每轮空转重放**（评审 A-B3「blocked 与 pending 语义分离」要避免的正是这个），
+  > 且 `ack_status` 值域第四值 **`blocked` 全 `app/` 无赋值点**。
+  > **复核命令**（offline 仓 `backend/` 下）：`grep -rn "ERR_CLUSTER_0003" .` → 0 命中；
+  > `grep -n "status_code" app/runner/pull_loop.py` → 0 命中；
+  > `grep -rn "blocked" app/` → 只有 `models/error_backflow_inbox.py:10,23`（docstring + 值域元组）。
+  > 已登记：`error-backflow-status.md` O-D.4（「二、部分落地」行，2026-09-16 复核补注）。
+  > **本条 = 未实现，不是「未验收」** —— 别读成「只差一次真机触发」。
 - **对账扫描（每轮循环第①步）**：`NEEDS_ACK` 集重放 ack（幂等，200 即置 acked）；持续失败 → last_error 累计 + 日志告警不阻塞。`acked` 才视为闭环。
 
 ### 5.8 R-8 cap_gap 探测态节流（自愈扫描，低频每小时）
@@ -394,6 +406,11 @@ def resolve_interface(db, agent: Agent, method: str, path: str) -> AgentInterfac
 
 - **online_content_gap**：等 online admin requeue → requeue 刷新 assembled_ts → 重拉命中 → inbox 复位 `ack_status='none' + status→'new'` + 覆盖 envelope_json → 重走 §5.5 2~5（本平台不自愈造次品）。
 - **manual_invalidate 竞态**（R3）：ack active 收 400 且 invalidate_reason=manual_invalidate → 本地作废已建 case（case_id 置 NULL、case 本体 invalidated 软删语义）→ inbox 落 `rejected + manual_invalidate + acked`（远端已 invalidated 不需再 ack）→ admin requeue 后重处理自愈。
+  > **⚠️ 本条在 offline 未实现（2026-09-16 勘察）**：既无 400 解析、也无需解析 —— ack 非 200 分支整体缺失，
+  > 见 §5.7「错误分流」下的实现现状注（含复核命令）。**「未真机触发」的旧说法已作废**
+  > （`error-backflow-pending-phases.md` §5.6 ⑤ 同日记订正）——真机触发只会走上一节那条「留 pending 重放」，不会走到本条。
+  > 佐证：字符串 `manual_invalidate` 在 `app/` 内**只有三处出现且全非赋值**
+  > （`pull_loop.py:44` 注释 / `:205` 注释 / `models/error_backflow_inbox.py:25` 值域元组）—— 本条若实现，那个赋值点就是它。
 - **重处理 vs 幂等跳过判据**（汇总）：`case_created` → 幂等跳过；`new` 卡住 → 本次跳过 + §5.6 STUCK_NEW 重扫恢复；`rejected` → 仅按 §5.8/§5.9 判据复位重处理（R-8）。
 
 ---

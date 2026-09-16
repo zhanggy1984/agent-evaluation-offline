@@ -165,7 +165,7 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 |---|---|---|
 | O-C.3 | `pull_loop.py:267-277` `_mark` 集中迁移入口 | 非法组合（状态/ack_status/字段）校验；三谓词常量 `NEEDS_ACK/STUCK_NEW/CAP_GAP_PROBE`（**当时只活在注释里**；`CAP_GAP_PROBE` 已于 2026-09-16 在 `runner/cap_gap_probe.py` 落码，另两枚仍未落码）|
 | O-D.1 | `pull_loop.py:68/:79` GET_LOCK 单飞 + payload_id 幂等 + 一步炸不退出 | 规格「五步单轮」的 ①ack 对账 ②inbox 卡住重扫 ④低频自愈（**只落了 ③增量拉取**）|
-| O-D.4 | `pull_loop.py:163-179/:248-264` ack 双态 + pending 幂等重放 | R-8 cap_gap 每小时探测节流；`backflow_client.ack` 的 404/400 错误码分支（非 200 一律抛，无 blocked/manual_invalidate 分支）|
+| O-D.4 | `pull_loop.py:163-179/:248-264` ack 双态 + pending 幂等重放 | R-8 cap_gap 每小时探测节流；`backflow_client.ack` 的 404/400 错误码分支（非 200 一律抛，无 blocked/manual_invalidate 分支）。**⚠️ 2026-09-16 复核确认（非新增，是把这条钉上时刻）**：经全包 grep 核实并**比原措辞更彻底** —— 不只是「缺 blocked/manual_invalidate 分支」，是 **ack 非 200 分支整体缺失**：`backflow_client.py:118-119` 抛异常时响应体不解析、`pull_loop.py:260/:343` 捕获后只 log + return、该文件全文零 `status_code`；`ACK_STATUS` 第四值 `blocked` 全 `app/` 无赋值点、`ERR_CLUSTER_0003` 全 `backend/` 零命中。复核 = 本仓 `backend/` 下 `grep -rn "ERR_CLUSTER_0003" .` → 0；`grep -n "status_code" app/runner/pull_loop.py` → 0；`grep -rn "blocked" app/` → 仅 `models/error_backflow_inbox.py:10,23`。**本行长期被 `-pending-phases.md` §5.6 ⑤ 的「本批未真机触发」盖住**（该句已于同日订正为「未实现」）|
 | O-D.5 | `tests/test_backflow_client.py:37-46` MockTransport 回放 + 请求形状断言 | 入站鉴权名与规格「pull_token」不符（实为 `evaluator_service_secret`，`config.py:38`）；无 happy-path 建 case 全链单测 |
 | O-E.2 | `runner/reconcile_loop.py` 差集对账主体（批 C5，探针 18/18）| backfill 清零对账子项 —— 已判**前提不可达**（见 `error-backflow-task.md` O-E.2 处置裁定注）|
 | O-E.8 | `_error_verdict` → `run_assertions` 判定链 + 空断言不判 pass | 运行期 na 兜底源 `missing_assertion`/`assertion_shape`（grep 零命中；现靠加载即剔除替代）|

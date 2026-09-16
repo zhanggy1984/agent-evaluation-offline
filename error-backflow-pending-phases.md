@@ -692,7 +692,17 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 
 **⑤ 未验收项（显式，不许被本节的绿盖过）**
 
-- **不证明 requeue 之外的恢复路径可用**：`manual_invalidate` 竞态对账（§5.9）本批**未真机触发**。
+- ~~**不证明 requeue 之外的恢复路径可用**：`manual_invalidate` 竞态对账（§5.9）本批**未真机触发**。~~
+  **⚠️ 该句 2026-09-16 勘察后作废（改判，不是补验）**：实情 = **§5.9 这条分支在 offline 根本没有实现**，
+  真机触发一万次也只会走既有的「留 pending 无限重放」路径。把「分支不存在」说成「本批没机会验」，
+  会让后来者以为只差一次触发 —— 而正是这个误述让它从 #324 一路躺到现在。
+  **范围比原判断更宽**：ack 的**非 200 分支整体缺失**（404 `ERR_PULL_0003` → `blocked` 那条同属未实现），
+  不只是 manual_invalidate 一支；`ACK_STATUS` 值域第四值 `blocked` **全 `app/` 无赋值点**，
+  `ERR_CLUSTER_0003` 全 `backend/` 零命中，`pull_loop.py` 全文零 `status_code` 读取。
+  **如实记载在两处**：`error-backflow-status.md` O-D.4（「二、部分落地」，该行本就写着「非 200 一律抛，
+  无 blocked/manual_invalidate 分支」—— **真相一直在册，是本句把它盖住了**）+
+  `error-backflow-solution_detail.md` §5.7 错误分流 / §5.9（2026-09-16 实现现状注，含复核命令）。
+  ⇒ **本项由「未验收项」改判为「未实现项」**；补不补是独立决策，**未排期**。
 - **不证明 `offline_cap_gap` 半支仍正确**：本批只真机跑了 `online_content_gap` 一支；`offline_cap_gap`
   仍限 `{none, pending}` 仅由单测覆盖。
 - **不证明 R-8 探测态节流已实现** —— `CAP_GAP_PROBE` 常量在离线仓**零实现落点**（已登记，未实现）。
