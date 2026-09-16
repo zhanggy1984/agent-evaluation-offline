@@ -626,6 +626,8 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
 - **不证明 `offline_cap_gap` 半支仍正确**：本批只真机跑了 `online_content_gap` 一支；`offline_cap_gap`
   仍限 `{none, pending}` 仅由单测覆盖。
 - **不证明 R-8 探测态节流已实现** —— `CAP_GAP_PROBE` 常量在离线仓**零实现落点**（已登记，未实现）。
+  → **本条已于 2026-09-16 解除**：探测态自愈扫描已落码并验收，见 §5.9（**但自愈支本身仍无真机证据**，
+  该节「⑤ 未验收项」显式列出，勿把本条读成「R-8 全支已验」）。
 - **C2 只验后端判定与建簇**：不证明 online 页面/接口把 `layer=none` 呈现正确。
 - **sp 的 8/8 只证明「平台能到达 sp 并完成评测」**，不证明 sp 侧 error 回流闭环（本轮未造 sp 候选）。
 
@@ -673,6 +675,65 @@ requeue 建出 case 4075 让 cs 首次进入 `_error_agents`，对账随即把 4
 > **行为特征登记（不是缺陷，供日后不误读）**：agent 的 error suite 为空期间，
 > 其所有历史版本的欠账会**攒着不动**；首个 error case 落地时会**集中补**（每周期 1 笔）。
 > 表现为「某 agent 的 error_regression 突然连开数笔」——**那是欠账补交，不是洪峰或死循环**。
+
+---
+
+### 5.9 验收结果（R-8 探测态自愈扫描落码，2026-09-16）
+
+**要解决的问题**：详设 §5.8 给 `offline_cap_gap` 驳回行的恢复入口是「每小时本地重跑自检 + 映射」，
+而 `CAP_GAP_PROBE` 谓词在离线仓**从未落码**（只活在注释里，`status.md` O-C.3 自陈）⇒ 映射补齐之后，
+那条已 acked 的行**没有任何恢复路径**：重处理谓词按 R-8 收窄为 `ack_status ∈ {none, pending}` 把它挡在门外；
+人工 requeue 复用同一 `payload_id` ⇒ 撞同一谓词、且 `requeue.py` 会清掉 `invalidate_reason`
+**反而把 online 侧 R2 例外的判据擦掉**（乙项，本批不修、只登记）。
+
+**改了什么（5 个文件，全在 offline）**：
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/runner/pull_loop.py` | 从 `_process_envelope` 抽出共享自检 `_self_check`（登记解析 / 词表净化 / R-27 装载闸），**判据同源** |
+| `backend/app/runner/cap_gap_probe.py` | **新增**：`CAP_GAP_PROBE` 常量首次落码 + `probe_once()` + `cap_gap_probe_loop()`（`_INTERVAL=3600`、`GET_LOCK` 互斥、门控在 loop 内部） |
+| `backend/app/main.py` | startup 注册 `_cap_gap_task`；**shutdown 补 `_cap_gap_task.cancel()`** |
+| `backend/tests/test_cap_gap_probe.py` | **新增**，8 条 |
+| `backend/tests/integration/cap_gap_probe_probe.py` | **新增**真库探针（只覆盖静默支，见下） |
+
+> **自查查出的缺陷（自己写的，自己修）**：`main.py` 的 shutdown 起初**只 cancel 了 scanner/judge/pull/reconcile**，
+> 漏了 `_cap_gap_task` —— 即新起的后台循环会挂到进程退出为止。已补。
+
+**判据同源（为什么抽 `_self_check`）**：探测态与拉取路径若各写一份自检，必然分叉，后果是
+「拉取时驳回、探测时放行」= 把当初驳回的行按**已放宽的判据**建 case。R-27 的装载闸就是这么被漏掉的同型教训。
+单测用 `assertIs(cgp._self_check, pl._self_check)` 把这条钉成可执行判据（谁哪天抄一份就不绿了）。
+
+**验收（跑过的）**：
+
+| 项 | 结果 |
+|---|---|
+| A 单测 | `tests/test_cap_gap_probe.py` **8 passed** |
+| B 反事实注入 | 翻转「仍缺」分支 ⇒ **3 红 5 绿**；还原后复绿、残留 0 |
+| C 全量回归 | **990 passed / 100 skipped**（基线 982/100，+8 恰为新文件） |
+| D ruff | 借 online venv + online `pyproject.toml` 扫 5 个改动文件：**4 条 = HEAD 基线 4 条**（我新写的 3 条 E501 已清）⇒ **零新增** |
+| E 真库探针 | `tests/integration/cap_gap_probe_probe.py` **10 passed / 0 failed** |
+
+**E 的实跑事实（真库 `ai_evaluation`，2026-09-16）**：
+谓词命中**存量 2 条**（`6a62679c…` / `9ffa8295…`），两条**都走静默**（一条 agent 未登记；另一条
+interface 未登记**且**过不了 R-27 装载闸 —— 其 `evidence.input` 是**裸字符串**，非 `{content: …}` 结构）；
+`probe_once` 交给自检的正是谓词命中集；**行快照逐项不变**（`status` / `reject_code` / `ack_status` / `case_id`）；
+**连跑两轮结论一致**；与 R-28 那条路的行集（`rejected ∧ online_content_gap ∧ acked`，库内有对照行）
+**交集为空**。
+
+**⑤ 未验收项（显式，不许被上面的全绿盖过）**
+
+- **自愈支（补齐 → 建 case + 单次 ack active）无真机证据** —— 用户裁定不真机验。理由：要让它自愈，
+  必须先造一个能过装载闸的 agent/interface，而自愈会建出 **active 的 error case** ⇒ 该 agent **首次进入
+  `_error_agents` 扫描集** ⇒ `reconcile_loop` 随即可能连续补建 error run（其 `base_url` 不通则那批 run
+  全红，与真缺陷**逐字同形**）。这正是 §5.8 那 4 笔假红的因果链，不再重蹈。该支只由单测覆盖。
+- **online 侧 R2 例外（`invalidated(offline_cap_gap) → active`）至今未被真机走过** —— 该状态变更只在
+  自愈时发生，故随上一条一并未验；两条存量 link（`2224` / `2225`）**形态完全符合该例外**
+  （`offline_status=invalidated`、`invalidate_reason='offline_cap_gap'`、`verify_status=pending`、`case_id IS NULL`），
+  即**对端判据的静态吻合已取证，动态放行未取证**。
+- **`_INTERVAL` 真的每小时**：不真等 3600s，只验单轮语义。
+- **乙项（requeue 对 cap_gap 的假动作）本批不修**：`requeue_guard_errors` 函数体不看 `reject_code` ⇒
+  cap_gap 链接可被人工 requeue，而 requeue 复用 `payload_id` + 清 `invalidate_reason` ⇒ 链接退化成
+  「assembled 但永不处理」的死链、R2 判据被擦掉。**仍为登记项**。
 
 ---
 
@@ -741,10 +802,18 @@ requeue 建出 case 4075 让 cs 首次进入 `_error_agents`，对账随即把 4
   - 其中 `t25drift;D` 疑为**误用 `;` 造成的畸形目录名**，属过去某次命令的副产物。
 
 - **2026-09-16 新增**（`ls` 当场产出）：
-  - `agent-evaluation-online/.tmp-probe/` — **3 个文件**：`c1_watch.py` / `c1_write_wordlist.py` / `r28_requeue.py`
+  - `agent-evaluation-online/.tmp-probe/` — **4 个文件**：`c1_watch.py` / `c1_write_wordlist.py` / `pending_links.py` / `r28_requeue.py`
     （`c2_negative.py` 已于 2026-09-16 转正为 `online/backend/tests/integration/backflow_allow_probe.py`，见 §5.8 ②）
+  - `agent-evaluation-offline/.tmp-probe/` — **2 个文件**：`cs_cases.py` / `why_stopped.py`
   - `customer-service/.tmp-probe/` — **2 个文件**：`probe_b_cs.py` / `probe_b2_cs.py`
-  - 容器内 `obs-backend:/tmp/` — **3 个文件**：`c1.py` / `c2_negative.py` / `q.py`
+  - 容器内 `obs-backend:/tmp/` — **4 个文件**：`c1.py` / `c2_negative.py` / `pending_links.py` / `q.py`
+
+  > ⚠️ **本节数字 2026-09-16 全量重核（`ls -1` / `docker exec … ls -1 /tmp/` 当场产出）**，订正三处、全部是**漏列**：
+  > ① `online/.tmp-probe/` 此前写「3 个」且**从未列出 `pending_links.py`** ⇒ 实为 **4**；
+  > ② 容器内 `obs-backend:/tmp/` 此前写「3 个」且**同样漏了 `pending_links.py`** ⇒ 实为 **4**；
+  > ③ **`offline/.tmp-probe/` 整条此前未列**（由 `git status --porcelain` 的 `?? .tmp-probe/` 暴露）⇒ 新增 **2 个**。
+  > 漏列**与 c2 转正无关**（转正只删 `c2_negative.py` 一个，那笔 3→？的账本当时就是错的）；①②漏的是**同一个文件名**，属系统性遗漏而非笔误。
+  > 教训：**「有几处」本身是结论，不许凭印象报**；且清单只核被点名的行、不重跑全量命令，就会**整条目录都漏**。
   > ⚠️ 上述 `c1_watch.py` / `c1_write_wordlist.py` / `r28_requeue.py` **三个文件被一次错误的 `sed`
   > 改坏过**（`s|8000/api/v1|8000/api|`，起因是我把登录 404 误判为「基址是 `/api`」；
   > 真实基址经 `/openapi.json` 复核**仍是 `/api/v1`**）。三者**若复用需先还原该行**。

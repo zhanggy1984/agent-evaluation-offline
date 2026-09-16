@@ -163,7 +163,7 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 
 | 条 | 已落地部分 | 缺什么 |
 |---|---|---|
-| O-C.3 | `pull_loop.py:267-277` `_mark` 集中迁移入口 | 非法组合（状态/ack_status/字段）校验；三谓词常量 `NEEDS_ACK/STUCK_NEW/CAP_GAP_PROBE`（**只活在注释里**）|
+| O-C.3 | `pull_loop.py:267-277` `_mark` 集中迁移入口 | 非法组合（状态/ack_status/字段）校验；三谓词常量 `NEEDS_ACK/STUCK_NEW/CAP_GAP_PROBE`（**当时只活在注释里**；`CAP_GAP_PROBE` 已于 2026-09-16 在 `runner/cap_gap_probe.py` 落码，另两枚仍未落码）|
 | O-D.1 | `pull_loop.py:68/:79` GET_LOCK 单飞 + payload_id 幂等 + 一步炸不退出 | 规格「五步单轮」的 ①ack 对账 ②inbox 卡住重扫 ④低频自愈（**只落了 ③增量拉取**）|
 | O-D.4 | `pull_loop.py:163-179/:248-264` ack 双态 + pending 幂等重放 | R-8 cap_gap 每小时探测节流；`backflow_client.ack` 的 404/400 错误码分支（非 200 一律抛，无 blocked/manual_invalidate 分支）|
 | O-D.5 | `tests/test_backflow_client.py:37-46` MockTransport 回放 + 请求形状断言 | 入站鉴权名与规格「pull_token」不符（实为 `evaluator_service_secret`，`config.py:38`）；无 happy-path 建 case 全链单测 |
