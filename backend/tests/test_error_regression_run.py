@@ -130,14 +130,20 @@ class TestErrorVerdict:
         return CaseOutcome(unified={"answer": answer})
 
     def test_no_keyword_hit_is_pass(self):
-        assert _error_verdict(self._outcome("这是一段正常回答"), _case(1, [_OK_ASSERTION])) == "pass"
+        verdict, results = _error_verdict(self._outcome("这是一段正常回答"), _case(1, [_OK_ASSERTION]))
+        assert verdict == "pass"
+        assert results and results[0]["pass"]  # C-4：明细随终值一并回传
 
     def test_keyword_hit_is_fail(self):
-        assert _error_verdict(self._outcome("抱歉我无法回答 x"), _case(1, [_OK_ASSERTION])) == "fail"
+        verdict, results = _error_verdict(self._outcome("抱歉我无法回答 x"), _case(1, [_OK_ASSERTION]))
+        assert verdict == "fail"
+        assert results and not results[0]["pass"]  # C-4：fail 的成因可读，不再只剩终值
 
     def test_empty_assertions_is_fail_not_pass(self):
         """无判据不算过——防「无断言 ⇒ 真空通过」。"""
-        assert _error_verdict(self._outcome("任意"), _case(1, [])) == "fail"
+        verdict, results = _error_verdict(self._outcome("任意"), _case(1, []))
+        assert verdict == "fail"
+        assert results == []  # 终值与明细同源：无断言 ⇒ 无明细可落
 
 
 class TestErrorPrecheck:
@@ -215,6 +221,8 @@ class TestExecuteWithRetryErrorMode:
     async def test_success_with_keyword_writes_fail(self, monkeypatch):
         out, saved = await self._run(monkeypatch, CaseOutcome(unified={"answer": "抱歉 x"}))
         assert saved[-1]["final_pass_fail"] == "fail"
+        # C-4：终值之外还要落逐条明细，否则 fail 的成因在结果行上不可读
+        assert saved[-1]["assertion_results"] and not saved[-1]["assertion_results"][0]["pass"]
 
     @pytest.mark.asyncio
     async def test_technical_failure_writes_na_not_error(self, monkeypatch):
@@ -242,6 +250,8 @@ class TestExecuteWithRetryErrorMode:
         monkeypatch.setattr(orch, "_ensure_case_version", lambda c: _ret(1))
         await orch._execute_with_retry(1, None, _Agent(), _RetryCase(), {}, None, 30, 1, 0)
         assert saved[-1].get("final_pass_fail") is None
+        # 明细同样不写：普通路径的 assertion_results 归 scorer 阶段，此处让位不抢写
+        assert saved[-1].get("assertion_results") is None
 
 
 async def _ret(v):

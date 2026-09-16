@@ -133,15 +133,22 @@ def _error_precheck_failures(run, is_error_suite: bool) -> list[str]:
     return reasons
 
 
-def _error_verdict(outcome: CaseOutcome, case) -> str:
+def _error_verdict(outcome: CaseOutcome, case) -> tuple[str, list[dict]]:
     """error_regression 判定终值（§8.2）：全部断言通过 → `pass`，否则 `fail`。
 
     **一次写终值**——error run 不经 scorer，结果行不再有二次修正阶段。
     断言为空时不判 pass（`results` 为空 = 无判据）；正常情况 `_load_run_cases` 已把
     形态不符者挡在加载前，此处只是不制造「无判据也算过」的假绿。
+
+    **连同逐条 `results` 一并回传**（C-4，2026-09-16 补）。原实现只返终值字符串 ⇒
+    error run 不经 scorer（唯一写 `eval_result.assertion_results` 的地方）⇒ 该列恒 NULL。
+    后果不是少一列，而是**诊断面塌陷**：R-12 区分出的「空答 fail」与「词表命中 fail」
+    在结果行上同形（都是 `pass_fail='fail'`、无明细可读），只能靠日志回溯。
+    详设 §6 本就把本函数的数据流写成 `CaseOutcome(pass_fail, assertion_results)`，
+    此处是补齐实现。
     """
     results = run_assertions(outcome.unified or {}, case.assertions or [])
-    return "pass" if results and all(r["pass"] for r in results) else "fail"
+    return ("pass" if results and all(r["pass"] for r in results) else "fail"), results
 
 
 class RunOrchestrator:
@@ -528,8 +535,9 @@ class RunOrchestrator:
                                   verdict_fn=None) -> CaseOutcome | None:
         """执行用例并落库，返回最终 outcome（供熔断反馈）。None=未执行（接口停用/取消）。
 
-        `verdict_fn(outcome) -> str`：error_regression 路径传入（= `_error_verdict`），用断言
-        结果算终值（§8.2「成功 → verifier → pass/fail 一次写终值」）；不传 = 普通路径原语义。
+        `verdict_fn(outcome) -> (str, list[dict])`：error_regression 路径传入（= `_error_verdict`），
+        用断言结果算终值 + 回传逐条明细（§8.2「成功 → verifier → pass/fail 一次写终值」）；
+        不传 = 普通路径原语义（明细由 scorer 阶段写）。
         未执行/技术失败两类都归 `na`（§8.2：调度层未执行不落默认 'error' 行）。
         """
         # error 路径下「未执行」与「技术失败」同为 na；普通路径保持原语义（不传终值）
@@ -576,10 +584,14 @@ class RunOrchestrator:
                 await self._save_result(run_id, case, last_outcome,
                                         data_ids[-1] if data_ids else None, **na_kw)
                 return last_outcome
+        # C-4：error 路径的终值与逐条明细同源（同一个 run_assertions 结果），一次算出、一并落库；
+        # 普通路径两者皆 None，明细留给 scorer 阶段写。
+        verdict, assertion_results = verdict_fn(last_outcome) if verdict_fn else (None, None)
         await self._save_result(
             run_id, case, last_outcome, data_ids[-1] if data_ids else None,
             usages=usages, timings=timings, firsts=firsts, ends=ends,
-            final_pass_fail=verdict_fn(last_outcome) if verdict_fn else None,
+            final_pass_fail=verdict,
+            assertion_results=assertion_results,
         )
         return last_outcome
 
@@ -600,12 +612,17 @@ class RunOrchestrator:
     async def _save_result(self, run_id, case, outcome: CaseOutcome | None,
                            data_id=None, *, usages=None, timings=None,
                            firsts=None, ends=None, error_type=None, error_detail=None,
-                           final_pass_fail: str | None = None) -> None:
+                           final_pass_fail: str | None = None,
+                           assertion_results: list[dict] | None = None) -> None:
         """落 eval_result（usage/timing 存全 attempt 数组，看板只读预聚合列）。
 
         `final_pass_fail` = **终值直传口子**（error_regression 路径专用，§8.2「一次写终值」）。
         普通路径不传 → 原语义不变：失败恒 `error`、成功暂标 `pass` 待 scorer 修正。
         error 路径必须传：它不经 scorer，且技术失败码是 `na`（§8.2）而非共享链的 `error`。
+
+        `assertion_results` = 逐条断言明细（C-4）。error 路径在 `_error_verdict` 里已算出，
+        由调用方一并传入；普通路径不传（None），该列仍由 scorer 阶段写——两路径各写各的，
+        不重叠、不互覆。历史行该列为 NULL 是补落库前的既成事实，不做回填。
         """
         case_version_id = await self._ensure_case_version(case)
         async with SessionLocal() as db:
@@ -639,6 +656,7 @@ class RunOrchestrator:
                 timing=timings or ([outcome.timing] if outcome else None),
                 error_type=error_type or (outcome.error_type if outcome else "unknown"),
                 error_detail=error_detail or (outcome.error_detail if outcome else None),
+                assertion_results=assertion_results,  # C-4：error 路径逐条明细（普通路径 None）
                 finished_at=_now(),
             )
             if outcome is not None and outcome.ok:

@@ -208,7 +208,8 @@ grep -rn "TRIGGER_NOT_ERROR_REGRESSION\|CASE_TYPE_IS_NULL\|IS_ERROR_SUITE_FALSE"
    （同文件 `:136-144`）内部 `run_assertions` 算出的**逐条 `results` 被丢弃**。
    ⇒ **R-12 修正的那条路径，在落库面上本来就没有可视化证据**（`actual` 串不落任何列）；
    「空话术证据」目前**无处可读**。**是否补「error 路径逐条断言证据落库」需另立条目裁**
-   （按「批内不掺下一批」，本批不动）。
+   （按「批内不掺下一批」，本批不动）。⇒ **该条目已于 2026-09-16 裁定「补落库」并落码**
+   （结清记录见本文件 C-4 行；⚠️ 真机落库面仍未验）。
 
 **这批的绿不能证明什么**：① **不证明纯空白 answer 在真实 pipeline 里会出现** —— 本批只证明算子层
 **判得对**；存量 108 条**全部非空** ⇒ 该分支在存量上**一次都没被走到**（这正是「受影响面 = 0」的含义）；
@@ -832,7 +833,7 @@ interface 未登记**且**过不了 R-27 装载闸 —— 其 `evidence.input` �
 | ~~C-1~~ | ~~`T-3.17` 三条：① 何时重建四仓镜像 ② 重建后**是否重跑** `integration-report.md` §2 序号 10 ③ 是否加**部署后置检查**~~ **✅ 已裁（2026-09-16，三条全部结清）**：**① 已于 09-15 批 6a 执行**（四仓 + 两平台仓全部重建上线）；**② = 不重跑，改用真机流量改判** —— 重建后 cs 于 09-16 01:21~02:26 产出 **8 条 `error_type='llm_timeout'`**（= `befcc90` 折叠后的白名单值，proves 折叠码已在真机跑），其一已产出 cluster 3861 全链跑通 ⇒ **序号 10 原判「容量型·无输入」被推翻**：零候选的成因是**旧码把输入过滤掉了**（自由串不在 `LLM_ERR_TYPES`），不是量不够；**③ = 只加流程约束**（`docs/integration-report.md` §0 新增第 6 条：凡以「运行实例」为证据面的条目，取数前必核「实例烤入提交 == 宿主 HEAD」），**不加构建期 label**（根因是「没有动作触发去查」而非「查不到」）。**⚠️ 未验边界**：②的证据仅覆盖 cs 一仓（gq/sp/cc 无重建后 error 样本）。详见 online `task.md` T-3.17「本条结清」段 | online `task.md` T-3.17 |
 | ~~C-2~~ | ~~`R-20` G0 的 **选项 A / 选项 B**~~ **✅ 已裁（2026-09-15）= A**：G0 判过、`R-12` 解锁。裁决时查得**订正三条**（4 个未跑 case 里 2 个是 error suite、不属问题域；真未观测的只有 suite 2733 的 2 个普通 case；B 的代价被低估）—— 见 `error-backflow-pre-scan-report.md` **§5.1**；严格表述由「81/85」订正为「**81/83 问题域相关面**」 | 同上 §5.1 |
 | C-3 | **lint 门禁缺口**：ruff 本机不可用（三处 venv 均无）；**offline 仓无任何 CI** ⇒ 唯一门禁是**手动**借 online venv + online 配置扫改动文件 | 长期未验收项 |
-| **C-4** | **error 路径的逐条断言证据不落库**（批 2 探针连带查出）：`eval_result.assertion_results` 在 `error_regression` 上 **84/84 全 NULL**，因 `orchestrator.py:582` 只落终值字符串、`_error_verdict` 的逐条 `results` 被丢弃。⇒ R-12 修正的**目标路径在落库面上零证据**，「空话术证据」无处可读。**待裁 = 补落库 / 判「设计如此、不需落库」** | 本文件 §5.2 · `task.md` O-E.9 施行记录 |
+| ~~**C-4**~~ ✅ | **error 路径的逐条断言证据不落库**（批 2 探针连带查出）：`eval_result.assertion_results` 在 `error_regression` 上 **84/84 全 NULL**，因 `orchestrator.py:582` 只落终值字符串、`_error_verdict` 的逐条 `results` 被丢弃。⇒ R-12 修正的**目标路径在落库面上零证据**，「空话术证据」无处可读。**待裁 = 补落库 / 判「设计如此、不需落库」** ⇒ **2026-09-16 裁定「补落库」并落码**：`_error_verdict` 改返 `(终值, results)`，`_save_result` 增 `assertion_results` 口子（普通路径仍传 None、由 scorer 写，两路径各写各的不互覆）。**真机已验（2026-09-16，`error_run_probe` 容器内真库）**：连跑 2 遍 + 回滚复跑各 **25/25 全绿**（run 3667-3671 / 3672-3676 / 3682-3686）；**另起独立路径回查库内原文**（不读探针自陈）= pass 行落完整明细（`op/args/pass/actual/expected/dimension/source_detail`）、**fail 行落 `pass:False` + `actual` 原答**（= C-4 的目标「fail 成因可读」）、na 行 NULL。**判别力对照**（临时令 `_error_verdict` 不返 results）⇒ 场景 1/2 转红 `got=[None] want=[[True]]`、场景 3 仍绿 ⇒ **该条为反向护栏、无判别力，如实记**。⚠️ **对照产物 = run 3677-3681，其 3678/3679 的 `assertion_results` 为 NULL 是人为造、非缺陷**（对照已撤销、源码已回读复原）。**未验边界 = 长答 `actual` 被截断 500 字符的场景**（本批样本均为短答；截断在 `assertions/run.py:43-47`）。存量 84 行 NULL 属补落库前既成事实，**不回填**。**连带修正**：探针原自陈「出站推送归 C2、不连 online」已成**假自陈**（C2 落地后 `_finish_error_regression` 真调 `fire_push`，不挡就会把哨兵簇 999001 推到 online）⇒ 本批加 `orch_mod.fire_push` 进程内替换，把该自陈从「我记得」变成结构护栏 | 本文件 §5.2 · `task.md` O-E.9 施行记录 |
 | **C-5** | **规格引 <code>assertions/ops/text.py</code> 行号已漂 + `_ASSERTION_OPS`/`ASSERTION_OP_CLASS` 声明过时**（§9.3 写 `L33-62`，现类在 `L61-95`；§3 称算子常量缺 `keyword_not_contains`，而 `core/constants.py` 实已包含）—— **文档旧、实现对**，判 P3 登记项、**只登记不改** | 批 2 勘察 |
 
 ---

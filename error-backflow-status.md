@@ -252,6 +252,10 @@ backfill **子项**，O-E.2 主体在「部分落地」——故最后一项不�
 >   **84/84 全 NULL**。根因是**代码设计**：`orchestrator.py:582` 只落 `verdict_fn(...)` 的**终值字符串**，
 >   `_error_verdict`（`:136-144`）内部算出的逐条 `results` **被丢弃**。⇒ R-12 的**目标受益面在生产库中零样本**，
 >   且「空话术证据」（`actual` 串）**在任何落库面上都不可见**。**本批不修**（批内不掺下一批），只登记。
+>   ⇒ **2026-09-16 已按 C-4 裁定「补落库」并落码**（`_error_verdict` 返 `(终值, results)` + `_save_result`
+>   增 `assertion_results` 口子）；**真机已验**（`error_run_probe` 容器内真库，连跑 2 遍 + 回滚复跑各
+>   25/25，库内原文回查 fail 行确有 `pass:False` + `actual`），存量 84 行 NULL 不回填。
+>   结清记录见 `error-backflow-pending-phases.md` C-4 行。
 
 > **O-E.3 的两条偏离（施行记录，非口径变更）**：
 > 1. **项 1 未照规格字面实施**。规格（`solution_detail.md:524` + `:170`）写「→ 域校验（非空 ≤64

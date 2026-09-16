@@ -22,7 +22,9 @@ fail 变成 pass，探针会「绿着错」。
 **本探针证不了什么**（显式声明，勿外推）：
 - 真 HTTP 打被测 agent（执行/传输层沿用既有验证面，本批未动）
 - 并发槽池共享（§8.3 归 C4）与熔断独立 key（§8.4 归 C4，需 DDL）
-- 出站推送（§10.1 归 C2）——本探针**不连 online**
+- 出站推送（§10.1）——本探针**不连 online**，由**进程内替换 `fire_push`**保证（见文件尾）。
+  原表述「归 C2」写于 C2 落地前，已成**假自陈**：`_finish_error_regression` 现在真调
+  `fire_push`，不替换就会把 cluster=999001 的哨兵载荷推到 online。
 """
 import asyncio
 import sys
@@ -144,7 +146,7 @@ async def _read(engine, run_id: int) -> tuple[EvalRun, list[EvalResult]]:
 
 async def _scenario(engine, agent_id, suite_id, case_id, name, behavior, *,
                     expect_pf, expect_status, expect_error_case, expect_leak=None,
-                    expect_error_type_set=False):
+                    expect_error_type_set=False, expect_ar=None):
     print(f"[场景] {name}")
     holder["fn"] = behavior
     run_id = await _run_once(engine, agent_id, suite_id)
@@ -163,6 +165,14 @@ async def _scenario(engine, agent_id, suite_id, case_id, name, behavior, *,
         # 「na 但原因空白」这种半截落库。
         _check(f"{name} · na 行 error_type 非空",
                [bool(r.error_type) for r in rs], [True] * len(expect_pf))
+    if expect_ar is not None:
+        # C-4：error 路径的**逐条断言明细**必须落库——原实现只落终值字符串 ⇒ 该列恒 NULL，
+        # fail 的成因在结果行上与「空答 fail」同形、不可读。判形态不判「非 None」：
+        # NULL 与空数组在 `or []` 下同形，只有逐条 pass 位能把两者分开。
+        _check(f"{name} · assertion_results 明细",
+               [None if r.assertion_results is None
+                else [x.get("pass") for x in r.assertion_results] for r in rs],
+               expect_ar)
     # 建单参数（§7.4）只查一次
     return run_id
 
@@ -193,14 +203,17 @@ async def main() -> None:
         # --- 四场景 ---
         await _scenario(engine, agent_id, suite_id, case_id, "1 非空答不含关键词",
                         lambda: _ok(GOOD_ANSWER), expect_pf=["pass"],
-                        expect_status="completed", expect_error_case=0, expect_leak=None)
+                        expect_status="completed", expect_error_case=0, expect_leak=None,
+                        expect_ar=[[True]])
         await _scenario(engine, agent_id, suite_id, case_id, "2 非空答含关键词",
                         lambda: _ok(BAD_ANSWER), expect_pf=["fail"],
-                        expect_status="completed", expect_error_case=0)
+                        expect_status="completed", expect_error_case=0,
+                        expect_ar=[[False]])       # C-4 核心：fail 的成因落进结果行
         await _scenario(engine, agent_id, suite_id, case_id, "3 技术失败",
                         lambda: _fail(), expect_pf=["na"],
                         expect_status="partial_failed", expect_error_case=0,
-                        expect_error_type_set=True)
+                        expect_error_type_set=True,
+                        expect_ar=[None])          # 技术失败没跑断言 ⇒ 无明细可落
 
         # --- 场景 4：实跑集为空 → cancelled ---
         async with AsyncSession(engine) as s:
@@ -236,7 +249,15 @@ async def _fake_execute(adapter, client, case, timeout_s):
     return holder["fn"]()
 
 
+def _noop_fire_push(run_id: int) -> None:
+    """替换出站推送。本探针的验证面在落库与判定，不在 §10.1 出站；且它会真推一笔
+    哨兵簇（cluster=999001）到 online。**必须替换**——`_finish_error_regression` 现真调
+    `fire_push`（原 docstring「归 C2、不连 online」已成假自陈）。"""
+    return None
+
+
 orch_mod.execute_case = _fake_execute  # 探针进程内替换，仅本脚本生效
+orch_mod.fire_push = _noop_fire_push   # 同上：不连 online
 
 if __name__ == "__main__":
     print(f"[probe] start {datetime.now().isoformat(timespec='seconds')}")
