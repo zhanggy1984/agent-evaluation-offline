@@ -144,11 +144,20 @@ SQL
 ### 五、本次未处置 / 新登记
 
 - 上一节 §三.1（用户管理对已禁用用户仍显示「禁用」，`Users.vue:46` 标签写死）**本次未动**。
-- **新登记（未处置）**：`solution_detail.md:889` 规格表把 `judge_review_confidence` 记为
-  **scope=run、热生效=是**，而 `frontend/src/constants/configMeta.js` **无此键** ⇒ UI 按 `editable()` 置灰。
-  「规格说可热改、UI 说不可改」= 规格↔前端契约分歧。
-  **这也意味着上一节 §二 里「补 `CONFIG_META` 条目」那条备选修法未必错**，但补了会**同时解锁可编辑**，
-  是否与后端 PUT 白名单一致**未取证**，故本次选了不动权限的精度推断修法。
+- **已订正的一处登记（我原先写反了）**：曾把「`solution_detail.md:889` 说 `judge_review_confidence`
+  热生效=是，而 `configMeta.js` 无此键 ⇒ UI 置灰」登记为**规格↔前端契约分歧**，
+  并暗示「补 `CONFIG_META` 条目」才是对的。
+
+  **取证结论：UI 置灰正确，分歧在文档侧。** `sysconfig_schema.py:15-16` 明写「meta 缺失 → 拒绝热改」，
+  而 PUT 传的 meta 来自 `DEFAULT_SYSTEM_CONFIG`；`judge_review_confidence` 在 `backend/` 下零命中
+  ⇒ PUT 必 400。前端「无契约即置灰」的代理正确，且由 `backend/tests/test_frontend_meta_sync.py`
+  （断言 `configMeta.js` 与 `DEFAULT_SYSTEM_CONFIG` key 集合双向严格相等，实跑 1 passed）守着。
+  DB 里 `is_hot=1` 的那行是**历史残留**，与 `Config.vue:111-113` 注释所称「无契约残留项」吻合。
+
+- **真问题（新登记，未处置）**：`solution_detail.md` §七 表与实现**成片不同步** ——
+  规格 **31 项** / `seed.py` **24 项** / **交集 20**；规格有实现无 **11 项**，实现有规格无 **4 项**。
+  **⚠️ 「实现里没有」≠「实现漏了」**：可能是有意裁剪，也可能是真缺口，**本次未取证、不下结论**。
+  全量 keys 与判定方法记在 online 仓 `task.md` §3.7。
 
 ### 六、复核命令
 
