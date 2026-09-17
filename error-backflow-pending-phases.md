@@ -704,8 +704,10 @@ base_url 组合** —— 7 处调用方共享同一个 `send()`（故单测/真�
   `error-backflow-solution_detail.md` §5.7 错误分流 / §5.9（2026-09-16 实现现状注，含复核命令）。
   ⇒ **本项由「未验收项」改判为「未实现项」**。
   **➜ 收口（2026-09-16，用户拍板选 A）= 不补**：影响面评估（两侧库只读直查）得**触发条件实测零次**
-  —— online `error_case_link` 21 行中 `invalidated_by` 非空 **0** 行；offline inbox 12 行中
+  —— online `error_case_link` 21 行中 `invalidated_by` 非空 **0** 行；offline inbox **当时** 12 行中
   `ack_status` **12/12 = acked**、`last_error` **全 NULL**（⇒ ack 从未失败、空转重放从未发生）。
+  （**2026-09-17 复核现值**：inbox **25 行、25/25 `acked`、`last_error` 仍全 NULL** ⇒ **裁决结论不变**；
+  上列两个数是**当日实测快照**，非现值 —— 原句用现在时且无「当时」标记，是会腐的写法。）
   按「不做会出什么具体故障」答不上来 ⇒ 不做。**失效条件与复核命令见 `error-backflow-status.md` O-D.4**
   （不在本文件重复，以免两处各自腐）。**⚠️ 未验边界**：只证发生率为 0，**未证撞上时是否产脏数据**。
 - **不证明 `offline_cap_gap` 半支仍正确**：本批只真机跑了 `online_content_gap` 一支；`offline_cap_gap`

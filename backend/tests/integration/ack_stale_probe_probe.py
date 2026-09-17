@@ -3,7 +3,9 @@
 跑法（宿主直连共享库，env 从容器整体导出后覆写，见 memory `offline-real-db-probe-recipe`）：
     .venv\\Scripts\\python.exe tests\\integration\\ack_stale_probe_probe.py
 
-**⚠️ 本探针会往真表写行**（`ai_evaluation.error_backflow_inbox`，实机 12 行、12/12 acked）。
+**⚠️ 本探针会往真表写行**（`ai_evaluation.error_backflow_inbox`）——**勿引用固定水位，它会腐**：
+造前当场取 `select count(*), sum(ack_status='acked') from error_backflow_inbox;`
+（2026-09-17 复核 = **25 行、25/25 `acked`**；docstring 早期记的「12 行、12/12」已不准）。
 按两条既往教训办：
 - `probe-repeatability-and-unique-input`：判据是「**必须命中**」⇒ 入参**唯一化**
   （`probe-ackstale-<uuid>`），且断言用「含/不含」而非等号——库内若有别的 stale 行，
