@@ -58,3 +58,6 @@ scripts/reset_passwords_*.py
 
 # ---- 本地调试临时目录（cc 测试 PDF 上传产物，体积大）----
 .tmp_cc_uploads/
+
+# ---- 一次性取证/调试脚本（跑完即弃，不入库；留着会让 git status 长期挂 ??）----
+.tmp-probe/
