@@ -23,6 +23,7 @@ from app.core.db import SessionLocal
 from app.core.errors import E_BODY_TOO_LARGE, register_error_handlers
 from app.core.logging import setup_logging, trace_id_var
 from app.judge.worker import judge_worker_loop
+from app.runner.ack_stale_probe import ack_stale_probe_loop
 from app.runner.cap_gap_probe import cap_gap_probe_loop
 from app.runner.pull_loop import pull_loop
 from app.runner.reconcile_loop import reconcile_loop
@@ -161,7 +162,11 @@ async def startup():
     # （backflow_enabled 缺省 false 时直接 return）——自愈路径要发 ack active 出站，
     # 开关关着时不得出站。
     _cap_gap_task = asyncio.create_task(cap_gap_probe_loop())
-    logger.info("startup: scanner + judge worker + 回流拉取 + 差集对账 + cap_gap 探测 已启动")
+    # T-5.5 / G3 批 1：inbox ack 积压告警。同样**门控在 loop 内部**。
+    _ack_stale_task = asyncio.create_task(ack_stale_probe_loop())
+    logger.info(
+        "startup: scanner + judge worker + 回流拉取 + 差集对账 + cap_gap 探测 + ack 积压探测 已启动"
+    )
 
 
 @app.on_event("shutdown")

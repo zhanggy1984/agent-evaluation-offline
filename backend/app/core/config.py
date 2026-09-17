@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # 回流总开关：**缺省关**——不在既有部署上擅自开跑后台循环
     backflow_enabled: bool = False
 
+    # 上线告警出口（T-5.5 / G3）：**缺省空 ⇒ 降级为进程日志**（不阻断、不报错）。
+    # 未接通知设施的部署必须能安全载入 core/alert.py，否则「加了告警反而起不来」。
+    alert_webhook_url: str = ""
+
     # ---- 密钥（强校验） ----
     jwt_secret: str = ""
     fernet_keys: str = ""
