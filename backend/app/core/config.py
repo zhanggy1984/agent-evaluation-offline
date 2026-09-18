@@ -31,6 +31,21 @@ class Settings(BaseSettings):
     db_migrate_user: str = ""
     db_migrate_password: str = ""
 
+    # ---- 回流（批 B #232）：与 online 平台之间的预共享凭证与基址 ----
+    # secret 必须与 online 仓 .env 的 EVALUATOR_SERVICE_SECRET **逐字符同值**：online 侧
+    # /pull/* 与 /backflow/regression-results 共用同一 require_evaluator，fail-closed。
+    # 缺省空 ⇒ 全部 401，而症状看起来像「对端没有载荷」——故启动时按非空强校验（见下 validator）。
+    evaluator_service_secret: str = ""
+    # online 基址。容器网络内直连容器名；出站须过 SSRF 白名单（core/http.py 的
+    # DEFAULT_AGENT_CIDRS 含 172.16.0.0/12，容器名解析后的 IP 正落在其中）。
+    backflow_online_base: str = "http://obs-backend:8000"
+    # 回流总开关：**缺省关**——不在既有部署上擅自开跑后台循环
+    backflow_enabled: bool = False
+
+    # 上线告警出口（T-5.5 / G3）：**缺省空 ⇒ 降级为进程日志**（不阻断、不报错）。
+    # 未接通知设施的部署必须能安全载入 core/alert.py，否则「加了告警反而起不来」。
+    alert_webhook_url: str = ""
+
     # ---- 密钥（强校验） ----
     jwt_secret: str = ""
     fernet_keys: str = ""

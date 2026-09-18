@@ -37,13 +37,29 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 Admin = Depends(require_role("admin"))
 Staff = Depends(require_role("admin", "evaluator"))
 
-# P2-C4：必须锚定结尾——原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 能入库，
-# 其值会被 Dashboard 图表 tooltip 当 HTML 渲染成 XSS。\Z 拒绝尾部任何字符（含换行）。
-_SEMVER = re.compile(r"^\d+\.\d+\.\d+\Z")
+# §7.5 项 1 / §3.3:170：version 由 strict semver 放宽为「域校验」，接纳 v 前缀 / 日期式 /
+# 预发布后缀等真实版本形态（版本是 agent 侧标识，平台不该规定它长得像 semver）。
+#
+# **此处有意偏离规格字面**：规格写「非空 ≤64 无空白/控制字符」，但 `1.2.3<script>` 和
+# `<script>alert(1)</script>` 一个空白都没有、能整条通过 —— 照抄等于撤掉 P2-C4 修好的那道
+# 入库闸（原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 入库后被 Dashboard tooltip 当 HTML
+# 渲染成 XSS；当时的修法就是补 `\Z`）。故改为**白名单字符集**：既放开版本形态，又保持
+# P2-C4「拒绝任何 HTML 注入形态」的语义不变。
+#
+# 前提（别删这句）：全前端零 `v-html`，唯一把动态串拼进 HTML 的地方是 Dashboard 的 ECharts
+# tooltip formatter 且已做 `esc()` 全量转义。**日后若新增 v-html 渲染点，本层白名单是唯一回退。**
+# 首字符限字母/数字，故 `.`/`-`/`+` 开头（如 `.hidden`、`-x`）仍拒。
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 # #4 放开并发：互斥槽（执行中）与可取消槽拆开——scoring 是「采集完成待评分」终态，
 # 不占用 agent 执行能力，同 agent 可在判分期间开新 run；cancel 仍允许 scoring（判分期可放弃）。
 _ACTIVE_STATUS = ("pending", "running", "scoring")   # 可取消状态（cancel 判断，含 scoring）
 _MUTEX_STATUS = ("pending", "running")               # 互斥槽（create/rerun 计数，scoring 不占）
+# §7.5 项 2：error_regression run 不占互斥槽名额。理由：它由信号驱动、并发上限走自己的
+# ERROR_ACTIVE_QUOTA（orchestrator.ERROR_ACTIVE_QUOTA），若被计入则 N=1 时一条 pending 的
+# error run 会把用户后续的 manual 建单堵成 409（详设 §7.5 项 2 / phase2 §9.2「不占名额不堵
+# manual」）。执行期并发不靠这道建单闸兜底，靠共享 per-agent 执行槽池（phase2 §6.2 v0.4）。
+# 字面量两处（create/rerun 计数）必须同步，故提为常量。
+_ERROR_TRIGGER = "error_regression"
 _DEFAULT_MAX_ACTIVE_RUNS = 1  # 未配置/配置缺失兜底（N=1 = 与旧「单活跃 run」一致）
 _ANSWER_PREVIEW = 500  # D3 answer 截断预览：与断言 actual 同口径（assertions.run._ACTUAL_TRUNCATE）
 _TOP_REASONS_N = 5     # L3.5 top 扣分原因条数上限
@@ -227,14 +243,19 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
                  body.agent_id, body.suite_id, body.version, body.trigger_type)
     # 权限分级：manual（常规评测）与 held_out（留出集复测）均 admin/evaluator（Staff）。
     # evaluator 作为评测师可触发评测（阶段 4 走查决策 #9）。
-    if not _SEMVER.match(body.version):
-        raise ApiError(E_VALIDATION, "version 需符合 semver（如 1.2.3）", 400)
+    if not _VERSION_RE.match(body.version):
+        raise ApiError(E_VALIDATION, "version 仅允许字母/数字及 . _ + -，且不超过 64 字符", 400)
     agent = await db.get(Agent, body.agent_id)
     if agent is None or not agent.enabled:
         raise ApiError(E_NOT_FOUND, "agent 不存在或已禁用", 404)
     suite = await db.get(TestSuite, body.suite_id)
     if suite is None or suite.agent_id != body.agent_id:
         raise ApiError(E_VALIDATION, "suite 不存在或不属于该 agent", 400)
+    # §7.5 项 3：error suite 是内部面（§6.5），不接受公开建单。不拦的话这关过得去
+    # （_ensure_suite_has_cases 只按 status/is_held_out 计数、不带 case_type 过滤），
+    # 而 case_loader 的 manual 分支要求 case_type IS NULL ⇒ 会建出一条 0 case 的空转 run。
+    if suite.is_error_suite:
+        raise ApiError(E_VALIDATION, "该 suite 为 error suite（内部面），不支持手动建 run", 400)
     # #3 定向重跑：case_ids 校验（None/空=全量；非空=子集）
     case_ids = await _validate_case_ids(db, body.suite_id, body.trigger_type, body.case_ids)
     # V1 防 0-case 空转：全量触发时校验 suite 有匹配的 active 用例（子集已有逐 id 校验）
@@ -246,10 +267,12 @@ async def create_run(body: RunCreate, user: User = Staff, db: AsyncSession = Dep
     # 首个一致性读（上方 db.get(Agent)）已建立快照，普通读查 active 会读到旧快照
     # 漏掉并发 worker 刚提交的 run（实测双插）；锁定读永远读最新已提交数据。
     # #4：计数槽用 _MUTEX_STATUS（pending/running，scoring 不占执行槽）；count>=N → 409。
+    # §7.5 项 2：排除 error_regression——error run 不占该名额（见 _ERROR_TRIGGER 注释）。
     async with agent_mutex(body.agent_id, db):
         n = await _max_active_runs(db)
         active = (await db.execute(select(EvalRun.id).with_for_update().where(
-            EvalRun.agent_id == body.agent_id, EvalRun.status.in_(_MUTEX_STATUS)))).all()
+            EvalRun.agent_id == body.agent_id, EvalRun.status.in_(_MUTEX_STATUS),
+            EvalRun.trigger_type != _ERROR_TRIGGER))).all()
         if len(active) >= n:
             raise ApiError(E_RUN_MUTEX,
                            f"该 agent 已有 {len(active)} 个执行中 run（上限 {n}），请等待完成或取消", 409)
@@ -358,6 +381,16 @@ async def rerun_run(run_id: int, request: Request, _: User = Staff,
     src = await db.get(EvalRun, run_id)
     if src is None:
         raise ApiError(E_NOT_FOUND, "run 不存在", 404)
+    # §7.5 项 4：error run 不暴露公开 rerun 通道（§6.7）。error run 由内部创建器直插 DB、
+    # 本端点看得见，而下方 trigger_type=src.trigger_type 是原样复制 ⇒ 不拦就能再产出一条
+    # error run（create_run 侧已被 body.trigger_type 的 Literal 挡死，漏的正是这里）。
+    # 顺序在项 3 之前：error suite 下的 manual run（项 3 落地前造得出的存量）由项 3 兜。
+    if src.trigger_type == _ERROR_TRIGGER:
+        raise ApiError(E_VALIDATION, "error_regression run 不支持重跑（内部面）", 400)
+    # §7.5 项 3：error suite 下的 run（含存量 manual run）同样不给公开 rerun 通道。
+    src_suite = await db.get(TestSuite, src.suite_id)
+    if src_suite is not None and src_suite.is_error_suite:
+        raise ApiError(E_VALIDATION, "该 run 属 error suite（内部面），不支持重跑", 400)
     # #3 定向重跑：None=继承源 run 子集（普通 run=全量，子集 run=同一子集）；非空=定向改批
     case_ids = src.case_ids if body is None or body.case_ids is None else (
         await _validate_case_ids(db, src.suite_id, src.trigger_type, body.case_ids))
@@ -372,10 +405,12 @@ async def rerun_run(run_id: int, request: Request, _: User = Staff,
     # 7.6 C1 同 create_run：跨 worker 串行「查 active + 插 run + commit」
     # P2-D2：同 create_run，活跃检查锁定读，避免 REPEATABLE READ 旧快照漏看并发 run。
     # #4：计数槽 _MUTEX_STATUS，count>=N → 409（scoring 不占槽，判分期间可 rerun）。
+    # §7.5 项 2：同 create_run，排除 error_regression。
     async with agent_mutex(src.agent_id, db):
         n = await _max_active_runs(db)
         active = (await db.execute(select(EvalRun.id).with_for_update().where(
-            EvalRun.agent_id == src.agent_id, EvalRun.status.in_(_MUTEX_STATUS)))).all()
+            EvalRun.agent_id == src.agent_id, EvalRun.status.in_(_MUTEX_STATUS),
+            EvalRun.trigger_type != _ERROR_TRIGGER))).all()
         if len(active) >= n:
             raise ApiError(E_RUN_MUTEX,
                            f"该 agent 已有 {len(active)} 个执行中 run（上限 {n}），请等待完成或取消", 409)

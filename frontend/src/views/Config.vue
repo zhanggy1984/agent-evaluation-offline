@@ -34,10 +34,9 @@
                 v-model="row.value"
                 :disabled="!editable(row)"
                 :controls="false"
-                :precision="row._meta?.precision ?? 0"
+                :precision="numPrecision(row)"
                 style="width: 140px"
               />
-              <span v-if="row._type === 'number' && row._meta?.unit" class="unit-suffix">{{ row._meta.unit }}</span>
               <el-input
                 v-else-if="row._type === 'text'"
                 v-model="row.value"
@@ -53,6 +52,10 @@
                 placeholder="null（使用默认）"
                 @update:model-value="(v) => (row._jsonText = v)"
               />
+              <!-- 单位后缀必须排在整条 v-if/v-else-if/v-else 链之后：它是纯装饰，
+                   排在链中间会另起一条链，导致链尾 v-else 对所有非 text 项（bool、无 unit 的 number）
+                   再渲染一个空 JSON 文本域。 -->
+              <span v-if="row._type === 'number' && row._meta?.unit" class="unit-suffix">{{ row._meta.unit }}</span>
             </template>
           </el-table-column>
           <el-table-column label="热生效" width="90">
@@ -111,6 +114,19 @@ const grouped = computed(() => {
 // 可编辑：admin + is_hot + 有契约（CONFIG_META）。无契约残留项（alarm.*/smtp.* 等）
 // 后端 PUT /config/global 会 2003 拒绝，置灰避免「改了没保存」的困惑。
 const editable = (row) => isAdmin.value && row.is_hot && CONFIG_META[row.key]
+
+// 无契约项（`alarm.error_ratio`、`judge_review_confidence`、`judge_drift_consistency_threshold` 等
+// CONFIG_META 里没有的 key）取不到 precision，旧写法 `?? 0` 会把库里的 0.7/0.5/0.8 显示成 1。
+// 展示失真不报错，只能按值推断小数位：整数取 0 位，小数取实际小数位数。
+// 已知不覆盖：`String(1e-7)` 是 "1e-7"、不含小数点 ⇒ 会推成 0 位、显示成 `0`。
+// 此处**不**为科学计数法加分支——加 6 位兜底只会显示成 `0.000000`，同样是错值，
+// 徒增一条不起作用的代码。真有这种量级的配置项，得单独定口径，不是这里顺手能治的。
+const numPrecision = (row) => {
+  if (row._meta?.precision != null) return row._meta.precision
+  const s = String(row.value)
+  const dot = s.indexOf('.')
+  return dot < 0 ? 0 : s.length - dot - 1
+}
 
 const load = async () => {
   loading.value = true

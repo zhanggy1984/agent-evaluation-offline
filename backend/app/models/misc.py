@@ -1,6 +1,6 @@
 """系统配置 / 导出令牌 / 审计日志 / 熔断器。（issue 系统与告警通知已随轻量化删除。）"""
 from sqlalchemy import (
-    Boolean, CHAR, DateTime, Enum, Float, ForeignKey, Index, Integer, JSON, String,
+    Boolean, CHAR, DateTime, Double, Enum, ForeignKey, Index, Integer, JSON, String,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -58,7 +58,11 @@ class AuditLog(Base):
 
 
 class AgentCircuit(Base):
-    """7.6 C3 熔断器跨 worker 持久化：agent 级一行，存状态机快照。
+    """7.6 C3 熔断器跨 worker 持久化：**agent × 域**一行，存状态机快照。
+
+    §8.4 熔断域隔离（C4b）：manual/held_out 与 error 复现各有独立状态行，互不牵连
+    （共用一行会让 error 复现连败把 manual 评测一起熔断）。域用同一张表的多行表达，
+    不为单维度开销一张新表。
 
     state 用 String 直存（closed/open/half_open），opened_at 为 wall clock epoch 秒
     （circuit_breaker 已统一 time.time 基准，跨进程/重启可比）。
@@ -69,11 +73,23 @@ class AgentCircuit(Base):
 
     agent_id: Mapped[int] = mapped_column(
         ForeignKey("agent.id", ondelete="CASCADE"), primary_key=True)
+    # 熔断域：manual（含 held_out）/ error_regression（§8.4）。default 给 Python 侧，
+    # 使既有调用点不传也能落 manual——DEFAULT 与列默认必须同值，否则 ORM 插入与裸 SQL 分叉
+    domain: Mapped[str] = mapped_column(String(32), primary_key=True, default="manual")
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="closed")
     failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # opened_at 必须 DOUBLE：MySQL FLOAT(单精度) 对 epoch 秒(1.7e9) 精度丢失（1787201704 → 1787200000），
-    # 误差超 1700s 会让熔断误判冷却已到、跨 run 放行探针（7.6 C3 集成测试抓出的 bug）
-    opened_at: Mapped[float | None] = mapped_column(Float(precision=53))
+    # opened_at 必须**双精度**：MySQL FLOAT（单精度）对 epoch 秒（1.7e9）精度丢失
+    # （1787201704 → 1787200000），误差超 1700s 会让熔断误判冷却已到、跨 run 放行探针
+    # （7.6 C3 集成测试抓出的 bug）。
+    # 之所以写 `Double(asdecimal=False)` 而非 `Float(precision=53)`：两者在 MySQL **存成同一个
+    # `double`**（`FLOAT(p>24)` 即 DOUBLE，2026-09-15 临时表实测），语义等价；但后者的类型对象
+    # 与反射结果对不上 ⇒ `alembic check` **恒报** modify_type 且**改不动**
+    # （autogenerate 建议的 FLOAT(53) 执行后仍是 double，下次仍报 —— 死循环）。
+    # `asdecimal=False` 与不写**等价**（实测 `Double().asdecimal is False`，`Float` 同）—— 显式写出
+    # 只为表明本列取值须为 `float`（`asdecimal=True` 时 `python_type` 才是 `Decimal`）。判词里的
+    # `DOUBLE(asdecimal=True)` 是**反射侧**表示、非本模型声明（比对器不看 `asdecimal`）。
+    # 详见 task.md T-3.16。
+    opened_at: Mapped[float | None] = mapped_column(Double(asdecimal=False))
     probe_inflight: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[object] = mapped_column(
         DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"),

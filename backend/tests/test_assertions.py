@@ -179,6 +179,32 @@ class TestKeywordContains(unittest.TestCase):
         with self.assertRaises(AssertionOpError):
             self.op.run(UNIFIED, {"keywords": []})
 
+    # ---------- #235：大小写不敏感（2026-09-14 拍板，翻案） ----------
+
+    def test_case_insensitive_both_directions(self):
+        """词表给大写、文本给小写（及反向）都要命中——改前这是 False。
+
+        本例是 #235 的**判别力来源**：旧的 `k in val` 大小写敏感实现跑它会红。
+        """
+        self.assertTrue(self.op.run({"answer": "the FALLBACK was triggered"},
+                                    {"keywords": ["fallback"]})[0])
+        self.assertTrue(self.op.run({"answer": "the fallback was triggered"},
+                                    {"keywords": ["FALLBACK"]})[0])
+
+    def test_case_folding_does_not_make_everything_match(self):
+        """反例：折叠不得把**不相关**的词也放过（防「一 fold 就恒真」这类做反法）。"""
+        self.assertFalse(self.op.run({"answer": "the fallback was triggered"},
+                                     {"keywords": ["fallback", "完全不存在的词"]})[0])
+
+    def test_non_str_keyword_raises(self):
+        """元素非 str 抛 AssertionOpError（不是 TypeError/AttributeError）。
+
+        折叠加了 `.lower()` 会把这条例外从 TypeError 变成 AttributeError，
+        报错更差，故显式守卫——本条把它钉死。
+        """
+        with self.assertRaises(AssertionOpError):
+            self.op.run(UNIFIED, {"keywords": ["生效日期", 123]})
+
 
 class TestKeywordNotContains(unittest.TestCase):
     """keyword_not_contains：防御性金丝雀断言——answer 残留工具调用声明（DSML/XML 泄漏）即 fail。
@@ -192,6 +218,25 @@ class TestKeywordNotContains(unittest.TestCase):
 
     def test_clean_answer_passes(self):
         ok, _ = self.op.run(UNIFIED, {"keywords": ["DSML", "tool_calls"]})
+        self.assertTrue(ok)
+
+    def test_blank_answer_fails(self):
+        """R-12：空/纯空白应答 = leakage 空话术复发证据 ⇒ FAIL（**不是 na**）。
+
+        空串天然不含任何 keyword，改动前会被 `not hits` 判成 PASS ⇒ 该抓的没抓到。
+        纯空白必须单列：只写 `== ""` 的实现会在纯空白形态上漏判。
+        """
+        for blank in ("", "   ", "   \n\t "):
+            with self.subTest(blank=repr(blank)):
+                ok, actual = self.op.run({"answer": blank}, {"keywords": ["DSML", "tool_calls"]})
+                self.assertFalse(ok)
+                self.assertIn("空/纯空白", str(actual))
+
+    def test_nonempty_answer_without_keyword_still_passes(self):
+        """防误伤正面判据：非空且不命中 ⇒ 仍 PASS（否则「一刀切 return False」也会全绿）。"""
+        ok, _ = self.op.run(
+            {"answer": "根据制度，年休假按连续工作年限划分。"},
+            {"keywords": ["DSML", "tool_calls"]})
         self.assertTrue(ok)
 
     def test_dsml_markup_fails(self):
@@ -231,6 +276,46 @@ class TestKeywordNotContains(unittest.TestCase):
     def test_empty_keywords_raises(self):
         with self.assertRaises(AssertionOpError):
             self.op.run(UNIFIED, {"keywords": []})
+
+    # ---------- #235：大小写不敏感（本算子是**漏判**的那一侧） ----------
+
+    def test_case_insensitive_catches_capitalized_leak(self):
+        """词表折叠成小写后，仍须拦住**大写开头**的泄漏标记——改前这里是漏判。
+
+        成因：`sanitize_words` 把词表折成 `dsml`，而 `k in val` 大小写敏感 ⇒
+        `"<DSML>"` 匹配不上 ⇒ 金丝雀 **静默放行**。这正是 #235 要修的主缺陷
+        （方向 = 假绿，最危险的一侧）。
+        """
+        ok, _ = self.op.run({"answer": "残留 <DSML> 声明"}, {"keywords": ["dsml"]})
+        self.assertFalse(ok, "折小写的词表竟拦不住大写泄漏 —— 漏判复发")
+        ok2, _ = self.op.run({"answer": "残留 <dsml> 声明"}, {"keywords": ["DSML"]})
+        self.assertFalse(ok2)
+
+    def test_case_insensitive_does_not_false_alarm(self):
+        """反例：折叠不得把干净文本判成泄漏（否则是假红，方向虽安全但同样错）。"""
+        ok, _ = self.op.run({"answer": "一切正常，无任何标记"}, {"keywords": ["DSML"]})
+        self.assertTrue(ok)
+
+    def test_non_str_keyword_raises(self):
+        with self.assertRaises(AssertionOpError):
+            self.op.run(UNIFIED, {"keywords": ["DSML", None]})
+
+
+class TestKeywordOpsShareFolding(unittest.TestCase):
+    """**结构性护栏的判别力检查**（#235）：两个算子必须对同一输入给出一致的大小写口径。
+
+    实现上二者共用 `_keyword_hits`（见 `assertions/ops/text.py`），故「只改一侧」本应
+    不可能发生；本例把这个结构约束**钉在测试面**——若日后有人把某个算子改回手写
+    `k in val`，这里会红。这正是本仓「两侧必须同批动」的判据。
+    """
+
+    def test_both_ops_agree_on_folded_case(self):
+        val = {"answer": "触发 Fallback 兜底"}
+        contains_hit = get_op("keyword_contains").run(val, {"keywords": ["FALLBACK"]})[0]
+        not_contains_hit = get_op("keyword_not_contains").run(val, {"keywords": ["FALLBACK"]})[0]
+        # 同一文本、同一关键词：前者判定「包含」= True，后者判定「不包含」= False
+        self.assertTrue(contains_hit, "keyword_contains 未折叠大小写")
+        self.assertFalse(not_contains_hit, "keyword_not_contains 未折叠大小写（两算子口径脱节）")
 
 
 class TestToolCalled(unittest.TestCase):

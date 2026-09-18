@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.agents import _get_agent, _get_allowlist_cidrs
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_normal_case, require_role
 from app.core.contracts import diff_manifest, parse_manifest, unique_name
 from app.core.contracts_v2 import AdapterDraft, build_adapter_config, parse_manifest_v2
 from app.core.skeleton import build_suite_skeleton
@@ -343,6 +343,7 @@ async def add_case_scenes(case_id: int, body: CaseSceneBody, _: User = Staff,
     case = await db.get(TestCase, case_id)
     if case is None:
         raise ApiError(E_NOT_FOUND, "用例不存在", 404)
+    require_normal_case(case)  # §6.5：error case 一律 403（场景标签同样会改判定素材）
     suite = await db.get(TestSuite, case.suite_id)
     if suite is None:
         raise ApiError(E_NOT_FOUND, "用例所属 suite 不存在", 404)

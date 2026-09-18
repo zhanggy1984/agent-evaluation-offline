@@ -9,6 +9,9 @@
   不破坏「open 拦截失败流量 / 冷却后放行探针 / 探针成败决定恢复」关键不变量；
   且同一 agent 的并发用例本就受 per_agent 限流约束，高频写放行可接受。
 - 状态行随 agent 软删 CASCADE 清理。
+- §8.4 熔断域隔离：状态行按 (agent_id, domain) 取。manual/held_out 用默认域 `manual`，
+  error 复现传 `error_regression`——**每一处 select/INSERT 都必须带 domain**，
+  否则并发首访的 IntegrityError 兜底分支会串域（读到/写出另一域的计数）。
 """
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -17,20 +20,23 @@ from app.core.circuit_breaker import CircuitBreaker
 from app.models.misc import AgentCircuit
 
 
-async def load(db, agent_id: int, breaker: CircuitBreaker | None = None) -> CircuitBreaker:
-    """读 agent 熔断快照；无行则建默认 closed 行（独立 commit，幂等）。"""
+async def load(db, agent_id: int, breaker: CircuitBreaker | None = None,
+               domain: str = "manual") -> CircuitBreaker:
+    """读 agent **某熔断域**的快照；无行则建默认 closed 行（独立 commit，幂等）。"""
     b = breaker or CircuitBreaker()
     row = (await db.execute(select(AgentCircuit).where(
-        AgentCircuit.agent_id == agent_id))).scalar_one_or_none()
+        AgentCircuit.agent_id == agent_id,
+        AgentCircuit.domain == domain))).scalar_one_or_none()
     if row is None:
-        db.add(AgentCircuit(agent_id=agent_id, state="closed",
+        db.add(AgentCircuit(agent_id=agent_id, domain=domain, state="closed",
                             failures=0, opened_at=None, probe_inflight=0))
         try:
             await db.commit()
         except IntegrityError:
             await db.rollback()  # 并发首次访问：另一 worker 已建行，重查即可
         row = (await db.execute(select(AgentCircuit).where(
-            AgentCircuit.agent_id == agent_id))).scalar_one()
+            AgentCircuit.agent_id == agent_id,
+            AgentCircuit.domain == domain))).scalar_one()
     return b.from_dict({
         "state": row.state,
         "failures": row.failures,
@@ -39,13 +45,15 @@ async def load(db, agent_id: int, breaker: CircuitBreaker | None = None) -> Circ
     })
 
 
-async def save(db, agent_id: int, breaker: CircuitBreaker) -> None:
+async def save(db, agent_id: int, breaker: CircuitBreaker,
+               domain: str = "manual") -> None:
     """快照写回 + commit（last-write-wins；调用方持同一 db session）。"""
     d = breaker.to_dict()
     row = (await db.execute(select(AgentCircuit).where(
-        AgentCircuit.agent_id == agent_id))).scalar_one_or_none()
+        AgentCircuit.agent_id == agent_id,
+        AgentCircuit.domain == domain))).scalar_one_or_none()
     if row is None:
-        db.add(AgentCircuit(agent_id=agent_id, **d))
+        db.add(AgentCircuit(agent_id=agent_id, domain=domain, **d))
     else:
         row.state = d["state"]
         row.failures = d["failures"]

@@ -23,6 +23,10 @@ from app.core.db import SessionLocal
 from app.core.errors import E_BODY_TOO_LARGE, register_error_handlers
 from app.core.logging import setup_logging, trace_id_var
 from app.judge.worker import judge_worker_loop
+from app.runner.ack_stale_probe import ack_stale_probe_loop
+from app.runner.cap_gap_probe import cap_gap_probe_loop
+from app.runner.pull_loop import pull_loop
+from app.runner.reconcile_loop import reconcile_loop
 from app.runner.scanner import scanner_loop
 
 setup_logging()
@@ -125,6 +129,9 @@ app.include_router(meta.router, prefix="/api")
 
 _scanner_task: asyncio.Task | None = None
 _judge_task: asyncio.Task | None = None
+_pull_task: asyncio.Task | None = None
+_reconcile_task: asyncio.Task | None = None
+_cap_gap_task: asyncio.Task | None = None
 
 
 @app.get("/healthz")
@@ -143,10 +150,23 @@ async def healthz():
 
 @app.on_event("startup")
 async def startup():
-    global _scanner_task, _judge_task
+    global _scanner_task, _judge_task, _pull_task, _reconcile_task, _cap_gap_task
     _scanner_task = asyncio.create_task(scanner_loop())
     _judge_task = asyncio.create_task(judge_worker_loop())
-    logger.info("startup: scanner + judge worker 已启动")
+    # 批 B #232：回流拉取。**门控在 pull_loop 内部**（backflow_enabled 缺省 false 时直接
+    # return），不在此处判断——保证「task 起没起」与「开关开没开」两件事不互相掩盖。
+    _pull_task = asyncio.create_task(pull_loop())
+    # 批 C5：R-3 版本差集对账（§7.3）。同样门控在 loop 内部。
+    _reconcile_task = asyncio.create_task(reconcile_loop())
+    # R-8 cap_gap 探测态自愈（§5.8，低频每小时）。同样**门控在 loop 内部**
+    # （backflow_enabled 缺省 false 时直接 return）——自愈路径要发 ack active 出站，
+    # 开关关着时不得出站。
+    _cap_gap_task = asyncio.create_task(cap_gap_probe_loop())
+    # T-5.5 / G3 批 1：inbox ack 积压告警。同样**门控在 loop 内部**。
+    _ack_stale_task = asyncio.create_task(ack_stale_probe_loop())
+    logger.info(
+        "startup: scanner + judge worker + 回流拉取 + 差集对账 + cap_gap 探测 + ack 积压探测 已启动"
+    )
 
 
 @app.on_event("shutdown")
@@ -155,4 +175,10 @@ async def shutdown():
         _scanner_task.cancel()
     if _judge_task is not None:
         _judge_task.cancel()
+    if _pull_task is not None:
+        _pull_task.cancel()
+    if _reconcile_task is not None:
+        _reconcile_task.cancel()
+    if _cap_gap_task is not None:
+        _cap_gap_task.cancel()
         logger.info("shutdown: scanner + judge worker 已停止")

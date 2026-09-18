@@ -46,7 +46,8 @@ class _FakeDB:
         if name == "Agent":
             return SimpleNamespace(id=1, enabled=True)
         if name == "TestSuite":
-            return SimpleNamespace(id=1, agent_id=1)
+            # is_error_suite 是真模型列（models/case.py:19-20）：§7.5 项 3 守卫要读它
+            return SimpleNamespace(id=1, agent_id=1, is_error_suite=False)
         if name == "EvalRun":
             return self._src
         return None

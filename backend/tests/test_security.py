@@ -3,6 +3,9 @@
 JWT(HS256 硬编码) / MultiFernet / bcrypt。宿主跑依赖 conftest 兜底注入
 JWT_SECRET / FERNET_KEYS / DB_PASSWORD（Settings #31 强校验，见 conftest.py）。
 """
+import asyncio
+
+import httpx
 import jwt as pyjwt
 import pytest
 
@@ -93,9 +96,9 @@ def test_random_ids():
 
 
 # ---------------- SSRF（7.6 A4：build_networks 拒全放行 / 169.254 移出白名单） ----------------
-from app.core.http import (DEFAULT_AGENT_CIDRS, JUDGE_DENY_CIDRS,
-                           AllowlistAsyncClient, build_agent_client,
-                           build_networks, validate_base_url)
+from app.core.http import (DEFAULT_AGENT_CIDRS, DEFAULT_AGENT_HOSTS,
+                           JUDGE_DENY_CIDRS, AllowlistAsyncClient,
+                           build_agent_client, build_networks, validate_base_url)
 
 
 def test_build_networks_rejects_any_any():
@@ -209,24 +212,103 @@ def test_agent_client_extra_cidrs_widen_allowlist():
     assert widened._resolve("11.0.1.5", 80) == "11.0.1.5"
 
 
-# ---------------- P2-C4 version 严格 semver（防 tooltip XSS） ----------------
-from app.api.runs import _SEMVER
+# ---------------- R-26：send() 重写路径的 Host 去重（2026-09-15 批 4） ----------------
+# 缺陷形态（实测，非读码推断）：旧写法 `dict(request.headers)` 的键已小写为 'host'，随后
+# `new_headers["Host"] = host` 又加一个大写 H 的键 —— 两键在 dict 里并存、进 httpx.Headers 后
+# 归一为同名 ⇒ 实发**两个** Host，h11 抛 `LocalProtocolError: Found multiple Host: headers`，
+# 请求根本发不出去（容器名出站整体不可用；回流集成当年靠把 hostname 塞进 allow_hosts 绕过）。
+# 判据写成「**等于谁**」而不只是「不为 2」：Host 值本身也必须对（旧写法丢端口，见用例 1）。
+_FAKE_HOST = "agent-x.internal"   # 可解析但不在 allow_hosts ⇒ 必走重写路径
 
 
-def test_run_version_full_semver_accepted():
-    # 合法 semver 通过
-    assert _SEMVER.match("1.2.3")
-    assert _SEMVER.match("10.20.300")
-    assert _SEMVER.match("0.0.1")
+def _client_with_capture(*, allow_hosts=None, fake_ip="127.0.0.1"):
+    """返回 (client, captured)。captured 在请求发到「传输层」时被填 —— 即**重写之后**的形状。"""
+    captured: dict = {}
+    real = socket.getaddrinfo
+
+    def fake_gai(host, port, **kw):
+        if host == _FAKE_HOST:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (fake_ip, port))]
+        return real(host, port, **kw)
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        captured["headers"] = list(request.headers.multi_items())
+        return httpx.Response(200, text="ok")
+
+    client = AllowlistAsyncClient(
+        allow_hosts=allow_hosts if allow_hosts is not None else DEFAULT_AGENT_HOSTS,
+        allow_cidrs=DEFAULT_AGENT_CIDRS,
+        transport=httpx.MockTransport(handler),
+    )
+    return client, captured, fake_gai
 
 
-def test_run_version_injection_suffix_rejected():
-    # 原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 等可入库 → Dashboard tooltip XSS；
-    # 必须拒绝任何后缀（含 HTML/空白/换行/额外字符）
-    assert not _SEMVER.match("1.2.3<script>")
-    assert not _SEMVER.match("1.2.3 <img src=x onerror=alert(1)>")
-    assert not _SEMVER.match("1.2.3abc")
-    assert not _SEMVER.match("1.2.3\n")
-    assert not _SEMVER.match("1.2.3/1")
-    assert not _SEMVER.match("1.2")  # 缺 patch
-    assert not _SEMVER.match("1.2.3.4")  # 超 3 段
+def _send_rewritten(monkeypatch, **kwargs):
+    client, captured, fake_gai = _client_with_capture(**kwargs)
+    monkeypatch.setattr(socket, "getaddrinfo", fake_gai)
+    asyncio.run(client.get(f"http://{_FAKE_HOST}:8080/ping"))
+    return captured
+
+
+def test_send_rewrite_emits_exactly_one_host_header(monkeypatch):
+    """重写路径下 Host **恰好一条**，且值 = 原 authority（**含端口**）。"""
+    captured = _send_rewritten(monkeypatch)
+    assert captured["url"] == "http://127.0.0.1:8080/ping"   # 证明确实走了重写（换成解析后的 IP）
+    hosts = [v for k, v in captured["headers"] if k.lower() == "host"]
+    assert hosts == ["agent-x.internal:8080"]
+
+
+def test_send_rewrite_preserves_duplicate_headers(monkeypatch):
+    """同名多值头不得被折叠 —— `dict(Headers)` 会把两条 Cookie 并成 "a=1, b=2"（实测）。"""
+    client, captured, fake_gai = _client_with_capture()
+    monkeypatch.setattr(socket, "getaddrinfo", fake_gai)
+    asyncio.run(client.get(f"http://{_FAKE_HOST}:8080/ping",
+                           headers=[("Cookie", "a=1"), ("Cookie", "b=2")]))
+    cookies = [v for k, v in captured["headers"] if k.lower() == "cookie"]
+    assert cookies == ["a=1", "b=2"]
+
+
+def test_send_no_rewrite_when_host_allowlisted(monkeypatch):
+    """正向对照：白名单内 host 不走重写 —— 证明上面两条验的是**重写分支**，非「全改坏」。"""
+    captured = _send_rewritten(monkeypatch, allow_hosts=[*DEFAULT_AGENT_HOSTS, _FAKE_HOST])
+    assert captured["url"] == f"http://{_FAKE_HOST}:8080/ping"   # URL 未被换成 IP ⇒ 未重写
+    hosts = [v for k, v in captured["headers"] if k.lower() == "host"]
+    assert hosts == ["agent-x.internal:8080"]
+
+
+# ---------------- P2-C4 version 白名单字符集（防 tooltip XSS） ----------------
+# §7.5 项 1 把 strict semver 放宽为「域校验」。**但没有照规格字面用「无空白/控制字符」**：
+# `1.2.3<script>` 与 `<script>alert(1)</script>` 都不含空白，那样放得进来 ⇒ 等于撤掉 P2-C4
+# 的入库闸。现规则 = 白名单字符集，**「拒绝任何 HTML 注入形态」的语义不变**，只是不再要求
+# 「必须是三段数字」。故用例分两组：放宽组（必须过）与注入组（必须拒）—— 缺任一组都证明不了本层。
+from app.api.runs import _VERSION_RE
+
+
+def test_run_version_non_semver_now_accepted():
+    # §7.5 项 1 的放宽目标：版本是 agent 侧标识，平台不规定它长得像 semver。
+    # v 前缀 / 日期式 / 预发布 / build 元数据 / 非三段 —— 全部必须过。
+    for v in ("1.2.3", "10.20.300", "0.0.1", "v1.2.3", "1.2.3-beta.1", "1.2.3+build.5",
+              "2026.09.15", "1.2", "1.2.3.4", "1.2.3abc"):
+        assert _VERSION_RE.match(v), v
+
+
+def test_run_version_injection_still_rejected():
+    # P2-C4 语义：任何能构成 HTML 注入的形态都必须拒 —— 这是本层存在的理由，放宽不得触及。
+    # 原 `^\d+\.\d+\.\d+` 只验前缀，`1.2.3<script>` 入库后被 Dashboard tooltip 当 HTML 渲染。
+    for v in ("1.2.3<script>", "1.2.3 <img src=x onerror=alert(1)>",
+              "<script>alert(1)</script>", "1.2.3\n", "1.2.3\r\n", "1.2.3/1",
+              "1.2.3'", '1.2.3"', "1.2.3`", "1.2.3&x;"):
+        assert not _VERSION_RE.match(v), v
+
+
+def test_run_version_charset_and_length_boundaries():
+    assert _VERSION_RE.match("a" * 64)
+    assert not _VERSION_RE.match("a" * 65)
+    assert not _VERSION_RE.match("")
+    assert not _VERSION_RE.match(".hidden")      # 首字符不得为 `.`
+    assert not _VERSION_RE.match("-x")           # 首字符不得为 `-`
+    assert not _VERSION_RE.match("+x")           # 首字符不得为 `+`
+    assert not _VERSION_RE.match("1.2.3  ")      # 尾随空格
+    assert not _VERSION_RE.match("1.2.3\t")      # 制表符
+    assert not _VERSION_RE.match("版本1.2.3")     # 非 ASCII
