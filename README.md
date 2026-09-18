@@ -2,33 +2,28 @@
 
 > **Agent 提测上线前的线下评测平台**：对任意 agent 的核心 LLM 接口在隔离测试环境做 HTTP 评测，量化**答案准确性 / 性能 / token 成本**三类指标，看板呈现汇总、版本对比、逐层下钻定位问题点。**线下**——评测不与生产流量混跑，用固定用例集 + 契约探测在独立测试环境执行。
 
-第一次接触这个项目，只看下面三句就够了：
+第一次接触这个项目，只看下面四句就够了：
 
 - **做什么**：把任意 agent（对话、问答、合同审查等 AI 服务）按统一标准接入，用固定用例集在隔离环境里反复调用、量化打分——答案准不准、快不快、贵不贵，一张看板看全，逐层下钻到「为什么扣分」的证据级；
 - **怎么做**：契约探测（L0 硬拦截，接口协议不达标直接标失败）→ 逐 case 重置数据 → 调用 → 采集 → 规则断言 + LLM-judge 混合评分 → scorer 汇总 → 门禁墙呈现；agent 只适配标准契约，平台对任何 agent 零特判；
+- **还能做什么**：把**线上真实错误**接进来，自动复现成回归用例并判定通过与否——`观测 → 聚类 → 组装 → 拉取 → 判定 → 回归回推 → 收口` 七环闭环，本平台承担其中的**判定侧**，运营认领修复版本后自动收敛为 `fixed`（详见「六、技术闪光点」第 1 条）；
 - **好在哪**：任意 agent 统一标准接入即用、评分带判定理由（不用复现现场就能定位问题）、性能/成本真实量化、PDF 报告一键导出；916 项自动化测试 + 四家 agent 门禁全 PASS。
 
-本系统是**生产级线下评测平台**：docker-compose 两容器（backend + frontend）一键启动、MySQL 走共享 infra、强契约驱动任意 agent 接入、规则断言 + LLM-judge 混合评分、门禁墙逐层下钻、PDF 报告导出。
-
-> **🔧 coding 入口（新会话开工先读）——当前主线 = error-backflow（error 回流闭环）**：online 平台 error 事件 → 本仓复现判定 → verifier no_fallback 复验。
->
-> 1. **权威实施源**：`error-backflow-task.md`（37 项 O-A.1~O-G.3 + 门 G0~G6 × 里程碑 M1~M9 + 联调环 1/2 + X 系列集成用例）按门认领；实现细节锚 `error-backflow-solution_detail.md` **v1.2**（正文「详设 §x.y」即其章节，含 §12.6 X-1~X-11 集成异常/边界用例）。
-> 2. **语义溯源 / 上游契约**：改方案语义才读 `error-backflow-phase1.md`（批 1 v0.3.0）/ `error-backflow-phase2.md`（批 2 v0.8.0）；契约消费 online 仓 `solution_detail.md` v1.23（**v1.23 平台间契约反转：结果回传方向反转为 offline 主动推送 `POST /backflow/regression-results`，online 零 outbound**） / `solution.md` v3.5.9 / `task.md` 环 0~3。
-> 3. **实施铁律**：`backend/` 截至 2026-09-07 零 error-backflow 代码落地（`case_type`/`is_error_suite`/`error_backflow_inbox`/`error_regression`/`no_fallback` 均无标识符），动手前以当时 HEAD 重对现码；实施前置风险注见 `error-backflow-task.md` header。
->
-> 本文件下文 = **老评测平台本体**（backend/frontend）说明；error-backflow 是其上的增量改造，方案文档独立（`error-backflow-*` 前缀）。
+本系统是**生产级线下评测平台**：docker-compose 两容器（backend + frontend）一键启动、MySQL 走共享 infra、强契约驱动任意 agent 接入，并已把**线上错误回流闭环**接入其中（本仓承担判定侧）。
 
 ---
 
-> ## ⚠️ 前置依赖：共享 infra
+> **⚠️ 前置依赖：共享 infra**
 >
 > 本 agent **不自带任何中间件**，运行前须先部署共享 infra（MySQL 等）。
 >
 > ```bash
 > # 发布物：clone infra 独立仓库后启动
-> git clone https://github.com/zhanggy1984/share-infra && cd infra && docker compose up -d
+> git clone https://github.com/zhanggy1984/share-infra && cd share-infra && docker compose up -d
+> cd api-gateway && docker compose up -d      # 统一网关是独立 compose，不在根 compose 内
 > # 本地开发：infra 位于 ../infra
 > cd ../infra && docker compose up -d
+> cd api-gateway && docker compose up -d
 > ```
 
 ## 目录
@@ -46,6 +41,7 @@
 - [十一、开发指南](#十一开发指南)
 - [十二、常见问题](#十二常见问题)
 - [十三、已知限制与优化方向](#十三已知限制与优化方向)
+- [文档索引](#文档索引)
 
 ---
 
@@ -58,7 +54,7 @@ agent 提测上线前，质量缺乏系统化量化与呈现：
 - **性能 / 成本不可见**：首字延迟、端到端耗时、token 消耗无量化，上线前不知道是否达标；
 - **问题定位慢**：分数低不知道差在哪——是答案错了、推理缺步、工具调用错，还是接口超时。
 
-本系统针对以上痛点，提供四个核心能力：
+本系统针对以上痛点，提供五个核心能力：
 
 | 能力 | 实现 | 对应痛点 |
 |------|------|---------|
@@ -66,6 +62,7 @@ agent 提测上线前，质量缺乏系统化量化与呈现：
 | **规则 + LLM 混合评分** | 确定性断言扣分 + LLM-judge 六级 rubric 精评（含判定理由） | 回归难发现 |
 | **性能 / 成本量化** | 真实 usage 透出 × 模型单价表，TTFT/E2E 的 P50/P95，成本趋势 | 不可见 |
 | **逐层下钻定位** | 门禁墙 L0 契约 → L3 用例明细 → L3.5 未达标摘要 → L4 证据级回放 | 定位慢 |
+| **线上错误回流闭环** | 线上观测平台的 error 经回流落为本平台的 error 回归用例（`case_type=error_regression`），判定结果回推线上、驱动簇收口 | 回归难发现 |
 
 **评测范围**：只评「有 LLM 参与的核心业务接口」；注册/登录/CRUD/健康检查不进评测。
 
@@ -120,7 +117,7 @@ graph TB
 
 > **图读法（自顶向下）**：请求链路 浏览器 → nginx → 网关 → API → runner → 能力层；后端内「API 层（薄）→ 编排层 runner → 能力层」单向依赖，**runner 是唯一编排者**（调度 executor 逐 case、scanner 心跳回收、scorer 汇总），judge / metrics / assertions / adapters 只被 runner 调用；MySQL 与 judge LLM 属外部依赖，仅由后端访问。
 
-**对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api` 反代到共享网关 `api-gateway:8099`（`Host: eval.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。**P2-D12：backend 已收敛，不暴露宿主端口（无 `localhost:8100`），后端仅内网可达、对外唯一入口即前端 nginx → 网关**；宿主侧开发脚本经 `localhost:8180`（网关链路）或容器内 `8000`（`docker exec`）访问。
+**对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api` 反代到共享网关 `api-gateway:8099`（`Host: eval.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。**backend 已收敛：不暴露宿主端口（无 `localhost:8100`），仅内网可达，对外唯一入口即前端 nginx → 网关**；宿主侧开发脚本经 `localhost:8180`（网关链路）或容器内 `8000`（`docker exec`）访问。
 
 **关键链路**：触发评测（手动）→ 契约探测（L0 硬拦截）→ 逐 case：reset(seed) 造数归位 → 调用 agent 接口（采集 answer/usage/timing/tool_call）→ 断言 + judge 评分 → scorer 汇总（加权平均 + 维度门禁 + run 终态）→ 门禁墙呈现 + 未达标摘要 → PDF 报告导出。
 
@@ -129,7 +126,7 @@ graph TB
 ## 三、快速开始（3 步跑起来）
 
 > 前置：Docker Desktop（Linux 容器）、Python 3.11。
-> **共享 infra**：本 agent 不自带任何中间件（仅依赖共享 infra 的 MySQL）。启动前先部署 infra（见 infra 仓库 README：`docker compose up -d`）。
+> **共享 infra**：本 agent 不自带任何中间件（仅依赖共享 infra 的 MySQL），启动前先部署（见文首「前置依赖」）。
 
 ### 第 1 步：配置环境变量
 
@@ -142,14 +139,15 @@ cp .env.example .env
 # 可选：
 #   JUDGE_API_KEY=xxx      # judge LLM API Key（语义维度评分必需）
 #   ADMIN_PASSWORD=xxx     # 空库重建 admin 初始密码
-#   AGENT_AUTH_SECRETS=xxx # P2-D17：被评 agent 调用凭证（JSON，key=agent name；
-#                          #   如 {"customer-service":{"username":"admin","password":"…"}}；
-#                          #   缺省则被评 agent 按匿名调用，seed_data 不含明文）
-#   DEMO_EVALUATOR_PASSWORD=xxx / DEMO_VIEWER_PASSWORD=xxx  # P2-D18：seed 建 demo 账号密码（缺省不建）
-#   SMOKE_PASSWORD=xxx     # P2-D18：verify_fresh_start 改密后统一密码（验证脚本运行期）
+#   AGENT_AUTH_SECRETS=xxx # 被评 agent 调用凭证（JSON，key=agent name；
+#                          #   形如 {"customer-service":{"username":"admin","password":"…"}}；
+#                          #   缺省则被评 agent 按匿名调用，seed 不含明文）
+#   DEMO_EVALUATOR_PASSWORD=xxx / DEMO_VIEWER_PASSWORD=xxx  # seed 建 demo 账号密码（缺省不建）
+#   SMOKE_PASSWORD=xxx     # 改密后统一密码（验证脚本运行期）
+# 各变量完整说明见「八、配置说明」8.1。
 ```
 
-> **P2-D18 验证脚本凭据约定**：`backend/` 下验收/监控脚本（`verify_*.py`、`trigger_*.py`、`expand_*.py`、`monitor_run.py` 等）一律不入库、不写死凭据——登录密码从对应 env 读取（evaluator→`DEMO_EVALUATOR_PASSWORD`、viewer→`DEMO_VIEWER_PASSWORD`、admin→`ADMIN_PASSWORD`；DB 直连→`DB_PASSWORD`），缺 env 即 fail-fast。宿主跑读项目根 `.env`，容器内跑读 compose 注入的同一批 env。
+> **脚本凭据约定**：本仓验收/监控脚本一律不入库、不写死凭据——登录密码从对应环境变量读取（evaluator→`DEMO_EVALUATOR_PASSWORD`、viewer→`DEMO_VIEWER_PASSWORD`、admin→`ADMIN_PASSWORD`；DB 直连→`DB_PASSWORD`），缺 env 即 fail-fast。宿主跑读项目根 `.env`，容器内跑读 compose 注入的同一批 env。
 
 ### 第 2 步：启动应用容器（backend + frontend）
 
@@ -165,19 +163,19 @@ curl localhost:8180/healthz       # {"status":"ok"}（经前端 nginx → 网关
 
 | 容器 | 宿主端口 | 容器内 |
 |------|---------|--------|
-| backend | 无（P2-D12 收敛，仅内网） | 8000 |
+| backend | 无（已收敛，仅内网） | 8000 |
 | frontend | 8180（`FRONT_HOST_PORT`） | 80 |
 
 > 本 agent 只起应用容器；MySQL 在共享 infra（库 `ai_evaluation`）。
 
-> **P2-E8 Linux 部署上线检查**：容器以非 root（uid 10001）运行，落盘目录权限取决于宿主挂载目录。
+> **Linux 部署上线检查**：容器以非 root（uid 10001）运行，落盘目录权限取决于宿主挂载目录。
 > Docker Desktop（Windows）挂载权限宽松无需处理；**Linux 部署需宿主先授权**，否则容器内上传/报告导出
 > 因无写权限失败：
 > ```bash
 > chown -R 10001:10001 uploads backend/exports   # uploads=用例附件、backend/exports=导出报告临时文件
 > ```
 
-**备份（P2-D14）**：`scripts/backup_db.ps1` 全库备份（共享 infra MySQL 容器内 mysqldump，`--single-transaction --no-tablespaces`，密码从 `../infra/.env` 读，不硬编码），滚动保留最近 14 份。
+**备份**：`scripts/backup_db.ps1` 全库备份（共享 infra MySQL 容器内 mysqldump，`--single-transaction --no-tablespaces`，密码从 `../infra/.env` 读，不硬编码），滚动保留最近 14 份。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/backup_db.ps1   # → backups/ai_evaluation_YYYYMMDD_HHMMSS.sql
@@ -244,12 +242,7 @@ open http://localhost:8180        # 浏览器前端
 - 想验证「改造是变好还是变坏」：同配置再触发一次，用「版本对比」选两次 run；
 - 每一步的操作细节（角色权限、run 状态含义、结果解读）见 [用户使用指南](docs/用户使用指南.md)，15 分钟完整跑通见其第四章。
 
-### 4.3 接一个新 agent
-
-平台是**公开、统一标准**的：任何 agent 满足标准契约即可接入，平台零特判。接入完整教程（manifest v2 + SSE/同步契约 + 平台注册 6 步 + 离线自测）见：
-
-- **Agent 接入评测指南**（面向接入工程师，从零走通）→ [docs/Agent接入评测指南.md](docs/Agent接入评测指南.md)
-- **接入指南**（manifest v2 + 标准契约完整规范，含 4 家已接入样例）→ [docs/接入指南.md](docs/接入指南.md)
+> 接一个新 agent 的完整教程见 [五、接入 Agent](#五接入-agent)。
 
 ---
 
@@ -271,49 +264,9 @@ open http://localhost:8180        # 浏览器前端
 
 ## 六、技术闪光点
 
-### 1. 强契约驱动 + 平台定标准（agent 只适配，平台零特判）
-平台定义标准契约（SSE 变体：`usage`/`done` 必选 + `meta` 建议首事件 + `id:` 帧 + data 内 `ts`；同步变体：`answer`/`usage`/`timing` 必选，不验 done；判定口径以 `backend/app/core/probe.py` 为准），接入方 agent 按标准收敛改造（标准契约 + `POST /admin/reset` 造数重置接口 + 鉴权 env 开关）。**平台侧禁止 `if agent` 特判**——发现/校验只认标准契约信号，契约探测不达标直接拦截报错，保证任意新 agent 接入即用。
+### 1. 错误回流闭环：从线上错误到回归用例的自动化管道
 
-### 2. 规则 + LLM-judge 混合评分
-- **确定性断言**：结构/文本/工具/检索四类断言算子（白名单插件注册），扣分制不否决，维度内精评；
-- **LLM-judge**：语义维度（factuality/reasoning）用六级锚点 rubric（1.0/0.8/0.6/0.4/0.2/0.0）+ 理由，不输出模糊连续分；
-- **分数合成**：加权平均 + 每维度阈值门禁（pass/fail），N/A 剔除重归一化，error 率硬门禁。
-
-### 3. 金标准 = 校准集，驱动基线对比
-`is_gold` 用例是绝对水平基线：baseline_target 从金标准校准集自动标定（接口 × 维度 vs 达标分），`golden_answer` 同时作为 judge 判分的事实参考。
-
-### 4. run 状态机 + 多 worker 跨进程 DB 化
-run 终态由 `scorer` 汇总（`partial_failed` 只认执行/技术 error，`fail` 未达标不改变终态）；scanner 后台心跳租约 + 硬超时回收；跨进程状态全部 DB 化：run 互斥（agent 行 `FOR UPDATE`）、reset(seed) 锁、熔断（`agent_circuit`）、scanner 单例（`GET_LOCK`）——多 worker 部署也不丢状态。
-
-### 5. 门禁墙逐层下钻（L0 → L4）
-| 层 | 内容 | 作用 |
-|----|------|------|
-| L0 | 门禁墙（agent 级汇总） | agent 均分 / 通过率 / 用例数；跑前契约探测不达标 → run 直接 partial_failed（硬拦截） |
-| L3 | 用例明细 | 每用例得分 + 每维度分 |
-| L3.5 | 未达标摘要 | 未达标用例 + 维度分 < 达标分的逐条判定理由 |
-| L4 | 证据回放 | agent 回答 / 思考链 / judge 判定 / 断言 / 工具调用 / usage |
-
-### 6. 插件化评测
-维度（completeness/factuality/reasoning/tool_usage + ttft/e2e/cost）、adapter（配置型声明 base_url/接口/reset/conversation_id，通用引擎执行）、rubric、断言算子四者均可插拔——新增评测维度不碰核心代码。
-
-### 7. 成本透明 + 单价可配
-agent 透出真实 usage（不估算），× 模型单价表（元/百万 token）算成本；`model-prices` 支持峰谷价（deepseek-chat 空闲 1.5/4.5），成本面板展示趋势 + 明细 + 单价。
-
-### 8. 安全与合规基线
-- **RBAC 三角色**：admin / evaluator / viewer + JWT；评测触发需 Staff；
-- **SSRF 白名单**：`DEFAULT_AGENT_CIDRS` 代码常量与 DB seed 双处同步，agent 直连仅内网；
-- **安全响应头**：CSP 收紧 `default-src 'none'`、`X-Frame-Options: DENY` 等；
-- **报告安全**：token 明文仅返一次、DB 存 sha256、PDF 页脚水印；
-- **插件白名单**：断言算子 class_path 白名单校验。
-
-### 9. 工程化细节
-- 后端容器热挂载源码（改代码 `docker compose restart backend` 即生效，无需 rebuild）；
-- 宿主跑 pytest 有环境开关（`RUN_INTEGRATION=1` 才连库，默认 integration 自动 skip）；
-- 场景清单由 seed 固化，用例标注（gold / 场景 / 断言）走用例管理页。
-
-### 10. 错误回流闭环：从线上错误到回归用例的自动化管道
-
-平台的能力不止于"跑评测"，而是把**线上错误本身**转化为可复现、可回归的评测资产，形成
+平台的能力不止于「跑评测」，而是把**线上错误本身**转化为可复现、可回归的评测资产，形成
 `观测 → 聚类 → 组装 → 拉取 → 判定 → 回归回推 → 收口` 的完整闭环。本仓承担其中的**判定侧**。
 
 **闭环分工**
@@ -323,9 +276,9 @@ agent 透出真实 usage（不估算），× 模型单价表（元/百万 token�
 
 **关键设计**
 - **判定双轨**：确定性断言 + LLM-judge 语义评分分列呈现，互不掩盖；
-- **verifier no_fallback**：判定必须走"真实复现"路径，**禁用兜底语义**——否则"模型兜底成功"会被误记为"已修复"，闭环退化成正反馈；
+- **verifier no_fallback**：判定必须走「真实复现」路径，**禁用兜底语义**——否则「模型兜底成功」会被误记为「已修复」，闭环退化成正反馈；
 - **六个常驻后台作业**：`judge_scan` / `cluster` / `assemble` / `claim_ttl` / `rejudge` / `rollup` 各司其职、互不阻塞，失败可重入；
-- **版本扫掠 + K 版纯净序列**：收口要求连续 K 个版本无回归才判定为真实修复，避免"这版好了、下版又坏"被过早关闭；
+- **版本扫掠 + K 版纯净序列**：收口要求连续 K 个版本无回归才判定为真实修复，避免「这版好了、下版又坏」被过早关闭；
 - **跨端契约对账**：回流信封的字段形态与规范化口径在 online / offline 两侧逐字对齐，并有对账用例守护。
 
 **验证方式：主动故障注入的端到端闭环验证**
@@ -337,6 +290,46 @@ agent 透出真实 usage（不估算），× 模型单价表（元/百万 token�
 四个接入 agent（contract-check / good-question / smart-procurement / customer-service）**均已用该方式完成端到端闭环验证**，
 其中 `contract-check` 额外覆盖了回归回推的**两条触发路径**，`customer-service` 因 `/chat` 本身即 agent 主链路，
 另取得了一条**由真实用户提问触发**的完整闭环样本。
+
+### 2. 强契约驱动 + 平台定标准（agent 只适配，平台零特判）
+平台定义标准契约（SSE 变体：`usage`/`done` 必选 + `meta` 建议首事件 + `id:` 帧 + data 内 `ts`；同步变体：`answer`/`usage`/`timing` 必选，不验 done；判定口径以 `backend/app/core/probe.py` 为准），接入方 agent 按标准收敛改造（标准契约 + `POST /admin/reset` 造数重置接口 + 鉴权 env 开关）。**平台侧禁止 `if agent` 特判**——发现/校验只认标准契约信号，契约探测不达标直接拦截报错，保证任意新 agent 接入即用。
+
+### 3. 规则 + LLM-judge 混合评分
+- **确定性断言**：结构/文本/工具/检索四类断言算子（白名单插件注册），扣分制不否决，维度内精评；
+- **LLM-judge**：语义维度（factuality/reasoning）用六级锚点 rubric（1.0/0.8/0.6/0.4/0.2/0.0）+ 理由，不输出模糊连续分；
+- **分数合成**：加权平均 + 每维度阈值门禁（pass/fail），N/A 剔除重归一化，error 率硬门禁。
+
+### 4. 金标准 = 校准集，驱动基线对比
+`is_gold` 用例是绝对水平基线：baseline_target 从金标准校准集自动标定（接口 × 维度 vs 达标分），`golden_answer` 同时作为 judge 判分的事实参考。
+
+### 5. run 状态机 + 多 worker 跨进程 DB 化
+run 终态由 `scorer` 汇总（`partial_failed` 只认执行/技术 error，`fail` 未达标不改变终态）；scanner 后台心跳租约 + 硬超时回收；跨进程状态全部 DB 化：run 互斥（agent 行 `FOR UPDATE`）、reset(seed) 锁、熔断（`agent_circuit`）、scanner 单例（`GET_LOCK`）——多 worker 部署也不丢状态。
+
+### 6. 门禁墙逐层下钻（L0 → L4）
+| 层 | 内容 | 作用 |
+|----|------|------|
+| L0 | 门禁墙（agent 级汇总） | agent 均分 / 通过率 / 用例数；跑前契约探测不达标 → run 直接 partial_failed（硬拦截） |
+| L3 | 用例明细 | 每用例得分 + 每维度分 |
+| L3.5 | 未达标摘要 | 未达标用例 + 维度分 < 达标分的逐条判定理由 |
+| L4 | 证据回放 | agent 回答 / 思考链 / judge 判定 / 断言 / 工具调用 / usage |
+
+### 7. 插件化评测
+维度（completeness/factuality/reasoning/tool_usage + ttft/e2e/cost）、adapter（配置型声明 base_url/接口/reset/conversation_id，通用引擎执行）、rubric、断言算子四者均可插拔——新增评测维度不碰核心代码。
+
+### 8. 成本透明 + 单价可配
+agent 透出真实 usage（不估算），× 模型单价表（元/百万 token）算成本；`model-prices` 支持峰谷价（deepseek-chat 空闲 1.5/4.5），成本面板展示趋势 + 明细 + 单价。
+
+### 9. 安全与合规基线
+- **RBAC 三角色**：admin / evaluator / viewer + JWT；评测触发需 Staff；
+- **SSRF 白名单**：`DEFAULT_AGENT_CIDRS` 代码常量与 DB seed 双处同步，agent 直连仅内网；
+- **安全响应头**：CSP 收紧 `default-src 'none'`、`X-Frame-Options: DENY` 等；
+- **报告安全**：token 明文仅返一次、DB 存 sha256、PDF 页脚水印；
+- **插件白名单**：断言算子 class_path 白名单校验。
+
+### 10. 工程化细节
+- 后端容器热挂载源码（改代码 `docker compose restart backend` 即生效，无需 rebuild）；
+- 宿主跑 pytest 有环境开关（`RUN_INTEGRATION=1` 才连库，默认 integration 自动 skip）；
+- 场景清单由 seed 固化，用例标注（gold / 场景 / 断言）走用例管理页。
 
 ---
 
@@ -459,9 +452,7 @@ gq 是唯一需门禁 target 调整方（factuality 90→80、reasoning 85→80�
 cd backend
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -p pytest_asyncio.plugin tests/ --ignore=tests/integration
 
-# 集成测试（需连库）。Windows 宿主无法直达 docker bridge IP，需 socat 转发
-# （详见 tests/integration/conftest.py；转发容器已存在则复用，DB_PORT 按实际转发端口）：
-# 共享 infra MySQL 已映射宿主 33061，Windows 宿主可直接连接（无需 socat）：
+# 集成测试（需连库）。共享 infra MySQL 已映射宿主 33061，Windows 宿主可直接连接，无需 socat：
 cd backend
 $env:RUN_INTEGRATION='1'; $env:DB_HOST='127.0.0.1'; $env:DB_PORT='33061'; $env:DB_PASSWORD='<密码>'
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -p pytest_asyncio.plugin tests/integration
@@ -487,9 +478,8 @@ docker compose exec backend python -m app.seed   # 初始化数据
 ```
 
 ### 改后端代码
-- `backend/` 以只读卷热挂载进容器（`./backend:/app`），**改代码 `docker compose restart backend` 即生效**，无需 rebuild；
+- `backend/` 以只读卷热挂载进容器（`./backend:/app`），**改代码 `docker compose restart backend` 即生效**（uvicorn 不自动重载），无需 rebuild；
 - 改依赖（requirements.txt）才需 `docker compose build backend`。
-- 改了 orchestrator/scorer 等核心逻辑后必须 restart backend（uvicorn 不自动重载）。
 
 ### 改前端代码
 - 前端是构建产物进 nginx，**改 `frontend/src/` 必须 `docker compose build frontend && docker compose up -d frontend`** 重建镜像。
@@ -502,15 +492,14 @@ docker compose exec backend python -m app.seed   # 初始化数据
 - metrics 子包新增维度（继承 base + 注册到 registry）→ 配置启用 → 前端展示映射 → seed 配置项同步。
 
 ### 新增接口
-- api 子包新增 router → 注册到 `main.py` → 前端 api/ 模块 → 权限按角色；
-- **契约优先**：涉及 `*Api.java` 等对外契约变更需架构组批准（本项目遵循）。
+- api 子包新增 router → 注册到 `main.py` → 前端 api/ 模块 → 权限按角色。
 
 ### 数据库变更
 - 改模型后 `docker compose exec backend alembic revision --autogenerate -m "描述"` → `alembic upgrade head`；
 - 新增 `system_config` 项需手动补 seed 才进库（seed 不自动跑）。
 
 ### 编码规范（约定）
-- 4 空格缩进、阿里 Java 规范思想；注释写「为什么」、中文注释、英文标识符；
+- 4 空格缩进；注释写「为什么」、中文注释、英文标识符；
 - 新增接口/消费者打印入参出参（debug 级）；核心逻辑（Service 业务分支）必须单测覆盖。
 
 ---
