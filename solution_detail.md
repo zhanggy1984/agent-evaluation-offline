@@ -1,6 +1,6 @@
 # AI Agent 评测系统 — 详设文档（v1.2，可编码）
 
-> 依据 `solution.md`（v0.3，88 项决策）+ 五轮 subagent 研判修订；agent 真实形态见 `agent-baseline.md`。
+> 依据 `solution.md`（v0.3，88 项决策）+ 五轮专项评审研判修订；agent 真实形态见 `agent-baseline.md`。
 > 本文是开发落地依据，优先级高于口述。P2/P3 项在正文以【P2】/【P3】标注。
 > 文末「遗留问题清单」为第五轮 review 收敛的交叉引用不一致，进入 P1 编码时逐条落地。
 
