@@ -112,6 +112,14 @@ def _cases_of_cluster(cases: list[TestCase], rows: dict[int, EvalResult]) -> dic
             "case_type": case.case_type,
             "pass_fail": r.pass_fail if r else "na",
         }
+        # 显式降级凭据外发（批 54）：本次回放用的**不是现场输入**，而是平台样例文件，
+        # 原引用在 `_substituted_from`（pull_loop 落库时写进 case.input）。
+        # 为什么必须外发：替换后的 pass 与「原场景真修好了」在 online 侧**逐字同形**——
+        # 用户看到一条 pass、无从知道它跑的是替身输入 ⇒ 假绿，且没有任何判据会红。
+        # 只在为真时落键（与本函数 error_type/error_detail 同一写法），故旧载荷形状不变、
+        # 旧行在 online 侧默认 False（语义 = 「当时没发生替换」，与事实一致）。
+        if isinstance(case.input, dict) and case.input.get("_substituted_from"):
+            item["input_substituted"] = True
         if r is not None:
             if r.error_type:
                 item["error_type"] = r.error_type

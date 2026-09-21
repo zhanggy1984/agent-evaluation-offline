@@ -28,9 +28,13 @@
 （`online app/backflow/ack.py` 的 `REASON_CODES`），改 online 契约时须同步此处。
 """
 import asyncio
+import os
+import tempfile
 import unittest
 from unittest import mock
 
+from app.adapters import base as base_mod
+from app.core import probe as probe_mod
 from app.runner import pull_loop as pl
 
 # online `app/backflow/ack.py` 的 REASON_CODES 真值（真机读得，非文档转录）。
@@ -102,12 +106,17 @@ class TestRejectMapping(unittest.TestCase):
         self.assertEqual(bad, {}, f"以下内部码映射到了 online 值域之外：{bad}")
 
     def test_every_internal_code_is_mapped(self) -> None:
-        """四个内部码一个都不能漏——漏了 `_ack_rejected` 会在字典取值处 KeyError。"""
+        """**全部**内部码一个都不能漏——漏了 `_ack_rejected` 会在字典取值处 KeyError。
+
+        ⚠️ 本清单是**枚举**，新增内部码时必须同步加进来：不加的话新码无人钉，
+        而本测试照样绿（负向断言的经典失效面）。
+        """
         internal = {
             pl.REJECT_CONTENT_GAP,
             pl.REJECT_VERSION_DRIFT,
             pl.REJECT_CAP_GAP,
             pl.REJECT_EMPTY_WORDS,
+            pl.REJECT_MISSING_SAMPLE,
         }
         self.assertEqual(internal - set(pl._ONLINE_REASON), set())
 
@@ -222,7 +231,8 @@ class TestRejectStoredColumns(unittest.TestCase):
     def test_reject_code_and_ack_reason_are_same_value(self) -> None:
         """落库列与出站 ack 必须同源——两者分叉会让 online 的 link 与本仓记的对不上。"""
         for internal in (pl.REJECT_CONTENT_GAP, pl.REJECT_VERSION_DRIFT,
-                         pl.REJECT_EMPTY_WORDS, pl.REJECT_CAP_GAP):
+                         pl.REJECT_EMPTY_WORDS, pl.REJECT_CAP_GAP,
+                         pl.REJECT_MISSING_SAMPLE):
             row, sent = self._reject_and_capture(internal)
             self.assertEqual(sent, [("p-7", row.reject_code)], internal)
 
@@ -436,6 +446,512 @@ class TestInputWiringGate(unittest.TestCase):
         self.assertEqual(outcome, "activated")
         self.assertEqual(rejected, [])
         self.assertEqual(len(activated), 1)
+
+
+class TestMissingSampleFileGate(unittest.TestCase):
+    """批 A 存在闸：`evidence.input.file_path` 引用的文件在平台 uploads 内**不存在** ⇒ 驳回。
+
+    背景（2026-09-21 真机实证）：cc 的回流 case 4085 载荷里 `file_path` =
+    `/app/uploads/cc_gen_good.pdf`，**平台 uploads 里没有这个文件**（只有 `cc_good.pdf`）。
+    装载期形状闸只判键可达性（`check_input_wiring`），**不判文件在不在** ⇒ 坏路径被原样
+    收下、建单；直到 run 期 `multipart_files` 打开文件才 `FileNotFoundError`，该 case 记
+    `na` + `contract_error`——**而装载期一声不吭**。同 suite 的另 6 条因文件恰好存在而全 pass，
+    构成组内对照（唯一变量 = 文件在不在）。
+
+    判据**复用探测期同一条**（`core/probe.py:validate_probe_input`：逃逸白名单 + isfile），
+    不新增私有实现——两处必须同源，否则「探测拦、装载放」就是 R-27 那类分叉的翻版。
+
+    **驳回码为何是 `offline_cap_gap` 而非 `content_gap`**：文件在**离线侧**的 uploads 里，
+    online admin 补不了。落 `online_content_gap` 意味着 `_needs_reprocess` 对它「任意
+    ack_status 都重处理」⇒ 每轮重拉、每轮同一原因驳回，**无限循环**。见
+    `test_missing_sample_file_does_not_loop_after_ack`。
+    """
+
+    # cc 真实形态（真库读得）：占位只在 prepare 的 upload 步骤里，`request` 无 body。
+    _CC_CFG = {
+        "prepare": [{"name": "upload", "files": {"file": "{case.input.file_path}"}}],
+        "request": {"path": "/api/tasks/{prepare.upload.task_id}/result", "method": "GET"},
+    }
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.uploads = os.path.realpath(self._tmp.name)
+        # `_assert_inside_uploads` 读的是 `base` 模块内的全局；`probe` 另持一份仅用于
+        # 报错消息 ⇒ 两处都要 patch，否则出现「判据用新目录、消息里报旧目录」的分叉。
+        self._p1 = mock.patch.object(base_mod, "_UPLOADS_DIR", self.uploads)
+        self._p2 = mock.patch.object(probe_mod, "_UPLOADS_DIR", self.uploads)
+        self._p1.start()
+        self._p2.start()
+
+    def tearDown(self) -> None:
+        self._p1.stop()
+        self._p2.stop()
+        self._tmp.cleanup()
+
+    def _put(self, name: str) -> str:
+        path = os.path.join(self.uploads, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        return path
+
+    def _run(self, adapter_config, input_value):
+        env = {
+            "payload_id": "p-batch-a",
+            "source": {"agent": "contract-check", "interface": "result"},
+            "evidence": {"input": input_value},
+            "no_fallback_config": {"words": ["抱歉"]},
+        }
+        activated: list = []
+        rejected: list = []
+
+        async def _fake_reject(_db, _env, _pid, code, detail):
+            rejected.append((code, detail))
+            return "rejected"
+
+        async def _fake_activate(*a, **_kw):
+            activated.append(a)
+            return mock.Mock(id=4242)
+
+        agent = mock.Mock(adapter_config=adapter_config)
+        with mock.patch.object(pl, "SessionLocal", _FakeScopedFull()), \
+                mock.patch.object(pl, "validate_envelope", lambda _e: (True, [], "")), \
+                mock.patch.object(pl, "resolve_agent", lambda *_a: _async(agent)), \
+                mock.patch.object(pl, "resolve_interface", lambda *_a: _async(mock.Mock())), \
+                mock.patch.object(pl, "sanitize_words", lambda _w: ["抱歉"]), \
+                mock.patch.object(pl, "_reject", _fake_reject), \
+                mock.patch.object(pl, "_activate", _fake_activate), \
+                mock.patch.object(pl, "_ack_active", lambda *_a, **_kw: _async(None)):
+            outcome = asyncio.run(pl._process_envelope(env))
+        return outcome, activated, rejected
+
+    # ---- 正 / 负 ----
+
+    def test_missing_file_is_rejected_before_creating_case(self) -> None:
+        """文件不存在 ⇒ 驳回，且 `_activate` 一次都没被调用（不得留孤儿 case）。"""
+        ghost = os.path.join(self.uploads, "cc_gen_good.pdf")  # 故意不创建
+        outcome, activated, rejected = self._run(
+            self._CC_CFG, {"task_id": 668, "file_path": ghost}
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(activated, [])
+        self.assertEqual(rejected[0][0], pl.REJECT_MISSING_SAMPLE)
+        self.assertIn("样例文件不存在", rejected[0][1])
+
+    def test_existing_file_activates(self) -> None:
+        """**反向对照（不可省）**：同结构、同输入键，只因文件真在 ⇒ 必须走激活。
+
+        无此对照，「驳回」可能只是闸门把一切都拒了——那样其余断言全是假的。
+        """
+        outcome, activated, rejected = self._run(
+            self._CC_CFG, {"task_id": 669, "file_path": self._put("cc_good.pdf")}
+        )
+        self.assertEqual(outcome, "activated")
+        self.assertEqual(rejected, [])
+        self.assertEqual(len(activated), 1)
+
+    def test_non_file_input_is_unaffected(self) -> None:
+        """**防误伤的关键负例**：cs/gq/sp 的输入无 `file_path` 键 ⇒ 本闸必须完全不介入。
+
+        `validate_probe_input` 对无 `file_path` 的输入返回 None（「非文件型」），这是
+        本闸不波及另三家的**唯一依据**——若哪天有人把它改成「无 file_path 即报错」，
+        本用例是唯一会红的判据。
+        """
+        cfg = {"request": {"body": {"content": "{case.input.content}"}}}
+        outcome, activated, rejected = self._run(cfg, {"content": "你好"})
+        self.assertEqual(outcome, "activated")
+        self.assertEqual(rejected, [])
+
+    def test_escape_outside_uploads_is_rejected(self) -> None:
+        """越界路径同样驳回（复用 `_assert_inside_uploads` 的逃逸闸，非新写）。"""
+        outcome, _activated, rejected = self._run(
+            self._CC_CFG, {"file_path": os.path.join(self._tmp.name, "..", "evil.pdf")}
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(rejected[0][0], pl.REJECT_MISSING_SAMPLE)
+
+    # ---- 顺序：形状闸在前 ----
+
+    def test_wiring_gate_runs_first(self) -> None:
+        """`file_path` 未被模板引用时它是**无关字段**，不得因它不存在而驳回。
+
+        顺序反了会把「输入压根不进请求」误报成「样例文件不存在」，把结构问题指成数据问题。
+        """
+        cfg = {"request": {"body": {"content": "{case.input.content}"}}}
+        outcome, _activated, rejected = self._run(
+            cfg, {"file_path": os.path.join(self.uploads, "nope.pdf")}
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(rejected[0][0], pl.REJECT_CONTENT_GAP)  # 形状闸的码，不是存在闸的
+        self.assertNotIn("样例文件不存在", rejected[0][1])
+
+    # ---- 驳回码的落库与「不循环」语义 ----
+
+    def test_reject_code_maps_to_cap_gap(self) -> None:
+        """内部细码映射到 `offline_cap_gap`（R2 自愈例外判的就是该列严格等值）。"""
+        self.assertEqual(
+            pl._ONLINE_REASON[pl.REJECT_MISSING_SAMPLE], "offline_cap_gap"
+        )
+        self.assertIn(pl._ONLINE_REASON[pl.REJECT_MISSING_SAMPLE], _ONLINE_VOCAB)
+
+    def test_missing_sample_file_does_not_loop_after_ack(self) -> None:
+        """**本批的核心不变量**：已 acked 的 `missing_sample_file` 行**不得**被反复重处理。
+
+        若误落 `content_gap`（online_content_gap），`_needs_reprocess` 对它是「任意
+        ack_status 都 True」⇒ admin 在 online 侧无论怎么 requeue，文件都不会自己出现，
+        于是每轮重拉、每轮同一原因驳回，**无限循环**。落 `offline_cap_gap` 则只在
+        `ack_status∈{none,pending}` 复位。
+        """
+        row = _InboxRow("rejected", "acked",
+                        reject_code=pl._ONLINE_REASON[pl.REJECT_MISSING_SAMPLE])
+        self.assertFalse(pl._needs_reprocess(row))
+
+        # 反向钉住：同一行若是「未 ack」则**必须**复位（首次驳回/对账未闭环要能重放）
+        row_pending = _InboxRow("rejected", "pending",
+                                reject_code=pl._ONLINE_REASON[pl.REJECT_MISSING_SAMPLE])
+        self.assertTrue(pl._needs_reprocess(row_pending))
+
+    def test_content_gap_would_have_looped(self) -> None:
+        """对照：证明上面那条**不是自动成立的**——同样的行落到 content_gap 就会循环。"""
+        row = _InboxRow("rejected", "acked", reject_code="online_content_gap")
+        self.assertTrue(pl._needs_reprocess(row))
+
+
+class TestTransientSet(unittest.TestCase):
+    """瞬态集的值域 —— **只列有实测支撑的类型**，且必须与「禁止纳入」严格分开。
+
+    划界判据 = 「错误的成因是否可能由输入内容决定」。名单内的实测依据：
+      llm_timeout    ← 簇 3861 同输入「4 fail → 2 pass」（2026-09-16）
+      llm_connection ← 14 条簇全部用原输入跑通（S1 前无替换通道）
+    这两条覆盖全库 18 条簇的 100%（2026-09-21 实测）。
+    """
+
+    def test_exact_membership(self) -> None:
+        """**逐字钉死**：放宽哪怕一项，产生的是**静默假绿**（换了输入 ⇒ pass ⇒ 判「已修复」，
+        而真实用户的文件仍会让它挂）——不可见、无人会红。故用相等而非包含。"""
+        self.assertEqual(pl.TRANSIENT_ERROR_TYPES, frozenset({"llm_connection"}))
+
+    def test_llm_timeout_is_excluded(self) -> None:
+        """`llm_timeout` **刻意排除**，尽管它看起来是最典型的瞬态错。
+
+        排除的依据不是「判据不成立」（对文件型 agent，超时**可能由文件大小/复杂度驱动**：
+        大 PDF ⇒ LLM 调用过长 ⇒ 换小样例跑通 ≠ 原场景修好），更要命的是**证据够不到本分支**：
+        当初据以纳入的簇 3861 是 customer-service —— 输入是自包含的 `content`、**没有
+        `file_path`，永远进不了这条分支**（全库 llm_timeout 簇 7 条全在 cs/gq，cc 零条）。
+        用够不到本分支的群体的实测，去为该分支内的一个类型背书 = measurement-scope 跑偏。
+        """
+        self.assertNotIn("llm_timeout", pl.TRANSIENT_ERROR_TYPES)
+
+    def test_content_related_types_are_excluded(self) -> None:
+        """内容相关 / 兜底值域**必须**在名单外（纳错方向不可见，代价不对称）。"""
+        for t in ("llm_context_exceeded", "llm_interface_business", "external_non_llm",
+                  "llm_other", "llm_empty_response", "llm_parse_error"):
+            self.assertNotIn(t, pl.TRANSIENT_ERROR_TYPES, t)
+
+    def test_zero_observation_types_not_yet_included(self) -> None:
+        """零发生的三个**刻意未纳入**（不是「已排除」）——将来纳入时本条会红，提醒补实测依据。
+
+        它们与外层「禁止纳入」的区别：判据（成因与输入无关）成立，只是**全库零簇**、
+        无证据可依。真出现时：加进集合 + 更新本条 + **补一条够得到本分支的**实测记录。
+        """
+        for t in ("llm_rate_limit", "db_error", "redis_error"):
+            self.assertNotIn(t, pl.TRANSIENT_ERROR_TYPES, t)
+
+
+class TestInputSubstitution(unittest.TestCase):
+    """S1 分流：文件缺失时，**瞬态类**错误换平台样例继续回归；其余干净驳回。
+
+    对照实验（2026-09-21 真机）：cc 同一 suite 的 6 条 case 用 `/app/uploads/b1_missing_date.pdf`
+    （平台**有**）全 pass，第 7 条用 `cc_gen_good.pdf`（平台**没有**）记 `na`——唯一变量是
+    文件在不在，**与错误类型无关**。故本批要修的不是「怎么让 cc 通过」，而是
+    「文件不在时怎么办」：瞬态类换样例是**有效回归**，内容相关类换样例是**掩盖真问题**。
+    """
+
+    _CC_CFG = {
+        "prepare": [{"name": "upload", "files": {"file": "{case.input.file_path}"}}],
+        "request": {"path": "/api/tasks/{prepare.upload.task_id}/result", "method": "GET"},
+    }
+    _SAMPLE = "/app/uploads/cc_b1_missing_date.pdf"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.uploads = os.path.realpath(self._tmp.name)
+        self._p1 = mock.patch.object(base_mod, "_UPLOADS_DIR", self.uploads)
+        self._p2 = mock.patch.object(probe_mod, "_UPLOADS_DIR", self.uploads)
+        self._p1.start()
+        self._p2.start()
+
+    def tearDown(self) -> None:
+        self._p1.stop()
+        self._p2.stop()
+        self._tmp.cleanup()
+
+    def _run(self, *, input_value, error_type="llm_connection", sample=_SAMPLE):
+        env = {
+            "payload_id": "p-batch-b",
+            "source": {"agent": "contract-check", "interface": "result"},
+            "evidence": {"input": input_value},
+            "no_fallback_config": {"words": ["抱歉"]},
+        }
+        if error_type is not None:
+            env["source"]["error_type"] = error_type
+
+        activated: list = []
+        rejected: list = []
+
+        async def _fake_reject(_db, _env, _pid, code, detail):
+            rejected.append((code, detail))
+            return "rejected"
+
+        async def _fake_activate(_db, _env, _pid, _agent, _iface, _words, inp):
+            activated.append(inp)
+            return mock.Mock(id=4242)
+
+        async def _fake_sample(_db, _agent):
+            return sample
+
+        with mock.patch.object(pl, "SessionLocal", _FakeScopedFull()), \
+                mock.patch.object(pl, "validate_envelope", lambda _e: (True, [], "")), \
+                mock.patch.object(pl, "resolve_agent",
+                                  lambda *_a: _async(mock.Mock(adapter_config=self._CC_CFG))), \
+                mock.patch.object(pl, "resolve_interface", lambda *_a: _async(mock.Mock())), \
+                mock.patch.object(pl, "sanitize_words", lambda _w: ["抱歉"]), \
+                mock.patch.object(pl, "_resolve_sample_file", _fake_sample), \
+                mock.patch.object(pl, "_reject", _fake_reject), \
+                mock.patch.object(pl, "_activate", _fake_activate), \
+                mock.patch.object(pl, "_ack_active", lambda *_a, **_kw: _async(None)):
+            outcome = asyncio.run(pl._process_envelope(env))
+        return outcome, activated, rejected
+
+    def _ghost(self):
+        return os.path.join(self.uploads, "cc_gen_good.pdf")   # 故意不创建
+
+    # ---- 正路径 ----
+
+    def test_transient_error_gets_sample_substituted(self) -> None:
+        """瞬态类 + 文件缺失 ⇒ 建单，且落库 input 是**样例路径** + 显式降级凭据。"""
+        outcome, activated, rejected = self._run(
+            input_value={"task_id": 668, "file_path": self._ghost()}
+        )
+        self.assertEqual(outcome, "activated")
+        self.assertEqual(rejected, [])
+        self.assertEqual(activated[0]["file_path"], self._SAMPLE)
+        self.assertEqual(activated[0]["_substituted_from"], self._ghost())
+        self.assertEqual(activated[0]["task_id"], 668)   # 其余键原样保留
+
+    def test_content_related_error_is_rejected(self) -> None:
+        """内容相关类 ⇒ **不替换**，干净驳回（换样例只会掩盖真问题）。"""
+        outcome, activated, rejected = self._run(
+            input_value={"task_id": 668, "file_path": self._ghost()},
+            error_type="llm_context_exceeded",
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(activated, [])
+        self.assertEqual(rejected[0][0], pl.REJECT_MISSING_SAMPLE)
+
+    def test_llm_timeout_is_rejected_at_the_gate(self) -> None:
+        """端到端确认这条排除真的生效：`llm_timeout` + 文件缺失 ⇒ **驳回**，不换样例。
+
+        `TestTransientSet` 钉的是常量取值，本条钉的是**它被这条闸真的读到**——
+        常量对了但闸没接上的话，前者照绿。
+        """
+        outcome, activated, rejected = self._run(
+            input_value={"task_id": 668, "file_path": self._ghost()},
+            error_type="llm_timeout",
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(activated, [])
+        self.assertEqual(rejected[0][0], pl.REJECT_MISSING_SAMPLE)
+
+    def test_llm_other_is_rejected(self) -> None:
+        """**兜底值域必须驳回** —— 纳入它等于把未知成因一律当瞬态，静默假绿。"""
+        outcome, _activated, rejected = self._run(
+            input_value={"task_id": 668, "file_path": self._ghost()},
+            error_type="llm_other",
+        )
+        self.assertEqual(outcome, "rejected")
+
+    def test_legacy_envelope_without_error_type_is_rejected(self) -> None:
+        """旧信封（S1 前组装、无 `error_type`）⇒ 按「不可替换」处理，**不崩**。
+
+        这是向后兼容的判据：online 必须先用上新信封，替换才生效。
+        """
+        outcome, activated, rejected = self._run(
+            input_value={"task_id": 668, "file_path": self._ghost()},
+            error_type=None,
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(activated, [])
+        self.assertEqual(rejected[0][0], pl.REJECT_MISSING_SAMPLE)
+
+    def test_no_sample_available_is_rejected(self) -> None:
+        """取不到可用样例 ⇒ fail-closed 驳回，**不得**假装替换成功。
+
+        若这里放行，坏路径会原样落库 ⇒ 退化成批 A 之前那个静默 `na`。
+        """
+        outcome, activated, rejected = self._run(
+            input_value={"task_id": 668, "file_path": self._ghost()},
+            sample=None,
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(activated, [])
+        self.assertIn("无可用样例文件可替换", rejected[0][1])
+
+    # ---- 双向钉住：不能「一律替换」 ----
+
+    def test_existing_file_is_not_substituted(self) -> None:
+        """文件**在**时不得替换 —— 否则每次回流都换成样例，「用现场输入回归」直接失效。"""
+        real = os.path.join(self.uploads, "cc_good.pdf")
+        with open(real, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        outcome, activated, rejected = self._run(input_value={"file_path": real})
+        self.assertEqual(outcome, "activated")
+        self.assertEqual(rejected, [])
+        self.assertEqual(activated[0]["file_path"], real)
+        self.assertNotIn("_substituted_from", activated[0])
+
+    # ---- 分叉点护栏（本批最关键的一条）----
+
+    def test_activate_receives_substituted_input(self) -> None:
+        """**`_activate` 收到的必须是替换后的输入**，而不是信封里的原值。
+
+        `evidence.input` 在装载链里被读两次（`_self_check` 校验 / `_activate` 建单）。
+        只在自检里替换、`_activate` 仍重读信封 ⇒ **替换生效在错的地方**：落库的还是坏路径，
+        run 期照旧 `na`，**而没有任何判据会红**。故替换值随 `ctx` 走，本条钉住它。
+        """
+        outcome, activated, _rejected = self._run(
+            input_value={"task_id": 668, "file_path": self._ghost()}
+        )
+        self.assertEqual(outcome, "activated")
+        self.assertNotEqual(activated[0]["file_path"], self._ghost(),
+                            "_activate 拿到了原（坏）路径 —— 替换没生效在落库的那个值上")
+
+
+class TestActivatePersistsGivenInput(unittest.TestCase):
+    """**真跑 `_activate`**（不打桩），断言它建出的 case 落的是**给它的那个** input。
+
+    为什么必须真跑：本文件其余用例都把 `_activate` 打桩，只断言「它**收到**了替换后的
+    input」。而「收到」与「落库」之间还有一次赋值（`input=input_value`）—— 打桩把这段
+    整个跳过了，属于 [[mock-boundary-hides-wiring-break]]：mock 掉哪层就验不到那层之后。
+    本批整个 S1 的价值就落在这一次赋值上（落错 ⇒ 跑的还是坏路径 ⇒ 静默 `na`），
+    而它在打桩的单测里**永远不会红**。
+
+    真机取证（2026-09-21）已证 `_self_check` 在真库真数据上返回替换值；本条补上后半截。
+    """
+
+    _SAMPLE = "/app/uploads/cc_b1_missing_date.pdf"
+    _GHOST = "/app/uploads/cc_gen_good.pdf"
+
+    def test_real_activate_persists_the_substituted_input(self) -> None:
+        added: list = []
+        substituted = {"task_id": 668, "file_path": self._SAMPLE,
+                       "_substituted_from": self._GHOST}
+
+        class _Scalars:
+            def first(self):
+                return mock.Mock(id=77)      # 已有 error suite ⇒ 不走建 suite 分支
+
+        class _Result:
+            def scalars(self):
+                return _Scalars()
+
+        class _Db:
+            async def execute(self, *_a, **_k):
+                return _Result()
+
+            def add(self, obj):
+                added.append(obj)
+
+            async def flush(self):
+                for o in added:
+                    if getattr(o, "id", None) is None:
+                        o.id = 9001        # 冒充 DB 回填主键
+
+        envelope = {"schema_version": "1.0", "case_type": "regression_error",
+                    "evidence": {"input": {"task_id": 668, "file_path": self._GHOST}}}
+        with mock.patch.object(pl, "_inbox_put",
+                               lambda *_a, **_kw: _async(None)):
+            case = asyncio.run(pl._activate(
+                _Db(), envelope, "p-seam", mock.Mock(id=1, name="contract-check"),
+                mock.Mock(id=5), ["抱歉"], substituted,
+            ))
+
+        self.assertEqual(case.input, substituted)
+        # 留档必须保持**原文**：它是出站⑤环 trigger_signal_id 的唯一取值来源，不得被替换污染
+        self.assertEqual(case.backflow_envelope, envelope)
+        self.assertEqual(
+            case.backflow_envelope["evidence"]["input"]["file_path"], self._GHOST,
+            "backflow_envelope 被替换污染 ⇒ ⑤环 trigger_signal_id 会取到平台样例路径")
+
+
+class TestResolveSampleFile(unittest.TestCase):
+    """样例来源：该 agent **非 error suite** 的、文件**实存**的首条文件型用例。
+
+    两条约束各自对应一个真实的失败模式，故都钉住：
+      排除 error suite —— 那些 case 的 file_path 正是要替换掉的坏路径，纳入即循环论证；
+      逐个验到存在为止 —— 样例文件被删时不得沿用，否则替换后的路径依旧不存在。
+    """
+
+    _SAMPLE = "/app/uploads/ok.pdf"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.uploads = os.path.realpath(self._tmp.name)
+        self._p1 = mock.patch.object(base_mod, "_UPLOADS_DIR", self.uploads)
+        self._p2 = mock.patch.object(probe_mod, "_UPLOADS_DIR", self.uploads)
+        self._p1.start()
+        self._p2.start()
+        self.sample = os.path.join(self.uploads, "ok.pdf")
+        with open(self.sample, "w", encoding="utf-8") as fh:
+            fh.write("x")
+
+    def tearDown(self) -> None:
+        self._p1.stop()
+        self._p2.stop()
+        self._tmp.cleanup()
+
+    def _resolve(self, inputs):
+        """inputs = 候选用例的 input 列表（按 id 升序）→ 解析结果。
+
+        `_resolve_sample_file` 收 `db` 直接调用（不经 `SessionLocal`），故此处只需一个
+        `.execute(...).scalars().all()` 可用的假 session。
+        """
+        cases = [mock.Mock(input=i, input_type="file", status="active") for i in inputs]
+
+        class _ScalarsAll:
+            def all(self):
+                return cases
+
+        class _ResultAll:
+            def scalars(self):
+                return _ScalarsAll()
+
+        class _Db:
+            async def execute(self, *_a, **_k):
+                return _ResultAll()
+
+        return asyncio.run(pl._resolve_sample_file(_Db(), mock.Mock(id=1)))
+
+    def test_returns_first_existing(self) -> None:
+        got = self._resolve([{"file_path": self.sample}])
+        self.assertEqual(got, self.sample)
+
+    def test_skips_non_file_and_missing_then_finds_one(self) -> None:
+        """非文件型（无 file_path）与不存在的**都要跳过**，不能取首条就返回。"""
+        gone = os.path.join(self.uploads, "gone.pdf")
+        got = self._resolve([{"content": "你好"}, {"file_path": gone},
+                             {"file_path": self.sample}])
+        self.assertEqual(got, self.sample)
+
+    def test_returns_none_when_all_missing(self) -> None:
+        """全部不可用 ⇒ None（调用方据此 fail-closed 驳回）。"""
+        gone = os.path.join(self.uploads, "gone.pdf")
+        self.assertIsNone(self._resolve([{"file_path": gone}, {"content": "x"}]))
+
+    def test_deleted_sample_file_makes_it_none(self) -> None:
+        """往返：样例文件删掉后必须解析为 None —— 防「假装替换成功」。"""
+        self.assertEqual(self._resolve([{"file_path": self.sample}]), self.sample)
+        os.remove(self.sample)
+        self.assertIsNone(self._resolve([{"file_path": self.sample}]))
 
 
 def _async(value):
