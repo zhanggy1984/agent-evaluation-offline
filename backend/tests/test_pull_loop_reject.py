@@ -800,6 +800,63 @@ class TestInputSubstitution(unittest.TestCase):
                             "_activate 拿到了原（坏）路径 —— 替换没生效在落库的那个值上")
 
 
+class TestActivatePersistsGivenInput(unittest.TestCase):
+    """**真跑 `_activate`**（不打桩），断言它建出的 case 落的是**给它的那个** input。
+
+    为什么必须真跑：本文件其余用例都把 `_activate` 打桩，只断言「它**收到**了替换后的
+    input」。而「收到」与「落库」之间还有一次赋值（`input=input_value`）—— 打桩把这段
+    整个跳过了，属于 [[mock-boundary-hides-wiring-break]]：mock 掉哪层就验不到那层之后。
+    本批整个 S1 的价值就落在这一次赋值上（落错 ⇒ 跑的还是坏路径 ⇒ 静默 `na`），
+    而它在打桩的单测里**永远不会红**。
+
+    真机取证（2026-09-21）已证 `_self_check` 在真库真数据上返回替换值；本条补上后半截。
+    """
+
+    _SAMPLE = "/app/uploads/cc_b1_missing_date.pdf"
+    _GHOST = "/app/uploads/cc_gen_good.pdf"
+
+    def test_real_activate_persists_the_substituted_input(self) -> None:
+        added: list = []
+        substituted = {"task_id": 668, "file_path": self._SAMPLE,
+                       "_substituted_from": self._GHOST}
+
+        class _Scalars:
+            def first(self):
+                return mock.Mock(id=77)      # 已有 error suite ⇒ 不走建 suite 分支
+
+        class _Result:
+            def scalars(self):
+                return _Scalars()
+
+        class _Db:
+            async def execute(self, *_a, **_k):
+                return _Result()
+
+            def add(self, obj):
+                added.append(obj)
+
+            async def flush(self):
+                for o in added:
+                    if getattr(o, "id", None) is None:
+                        o.id = 9001        # 冒充 DB 回填主键
+
+        envelope = {"schema_version": "1.0", "case_type": "regression_error",
+                    "evidence": {"input": {"task_id": 668, "file_path": self._GHOST}}}
+        with mock.patch.object(pl, "_inbox_put",
+                               lambda *_a, **_kw: _async(None)):
+            case = asyncio.run(pl._activate(
+                _Db(), envelope, "p-seam", mock.Mock(id=1, name="contract-check"),
+                mock.Mock(id=5), ["抱歉"], substituted,
+            ))
+
+        self.assertEqual(case.input, substituted)
+        # 留档必须保持**原文**：它是出站⑤环 trigger_signal_id 的唯一取值来源，不得被替换污染
+        self.assertEqual(case.backflow_envelope, envelope)
+        self.assertEqual(
+            case.backflow_envelope["evidence"]["input"]["file_path"], self._GHOST,
+            "backflow_envelope 被替换污染 ⇒ ⑤环 trigger_signal_id 会取到平台样例路径")
+
+
 class TestResolveSampleFile(unittest.TestCase):
     """样例来源：该 agent **非 error suite** 的、文件**实存**的首条文件型用例。
 
