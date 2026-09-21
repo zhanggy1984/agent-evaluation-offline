@@ -114,13 +114,23 @@ class TestProbeOnce(unittest.TestCase):
         self.assertEqual(row.status, "rejected")
 
     def test_healed_activates_once(self) -> None:
-        """补齐 → 建 case + **单次** active ack。"""
+        """补齐 → 建 case + **单次** active ack。
+
+        `ctx` 是四元组（agent, interface, words, **input_value**）：第四元是**该建单用的
+        输入**，S1 分流可能已把它换成平台样例。此处一并断言它被**原样转发**给 `_activate`
+        —— 探测态与拉取路径共用同一个 `_activate`，转发断了本路径就会用错输入建单，
+        而单测之外没有任何判据会红。
+        """
         row = _Row(payload_id="p-9")
+        substituted = {"file_path": "/app/uploads/cc_b1_missing_date.pdf",
+                       "_substituted_from": "/app/uploads/cc_gen_good.pdf"}
         stat, ack, activate, session = _run_probe_once(
-            [row], (None, "", (mock.Mock(), mock.Mock(), ["兜底话术"]))
+            [row], (None, "", (mock.Mock(), mock.Mock(), ["兜底话术"], substituted))
         )
         self.assertEqual(stat, {"scanned": 1, "activated": 1, "still_missing": 0})
         activate.assert_awaited_once()
+        self.assertEqual(activate.await_args.args[-1], substituted,
+                         "ctx 第四元必须原样传给 _activate")
         ack.assert_awaited_once_with("p-9", 4076)
         self.assertEqual(session.committed, 1)
 
@@ -129,7 +139,7 @@ class TestProbeOnce(unittest.TestCase):
         故零重复建 case、零重复 ack —— 真机探针那条「必须连跑两遍」的教训在单测层的代理。
         """
         row = _Row(payload_id="p-9")
-        ctx = (mock.Mock(), mock.Mock(), ["兜底话术"])
+        ctx = (mock.Mock(), mock.Mock(), ["兜底话术"], {"content": "x"})
         stat1, ack1, act1, _ = _run_probe_once([row], (None, "", ctx))
         stat2, ack2, act2, _ = _run_probe_once([], (None, "", ctx))   # 第二轮：谓词不再命中
         self.assertEqual(stat1["activated"], 1)

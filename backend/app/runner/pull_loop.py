@@ -25,6 +25,7 @@ from app.core.error_payload import (
     sanitize_words,
     validate_envelope,
 )
+from app.core.probe import validate_probe_input
 from app.models.agent import Agent
 from app.models.case import TestCase, TestSuite
 from app.models.error_backflow_inbox import ErrorBackflowInbox
@@ -40,6 +41,12 @@ REJECT_CONTENT_GAP = "content_gap"
 REJECT_VERSION_DRIFT = "version_drift"
 REJECT_CAP_GAP = "offline_cap_gap"
 REJECT_EMPTY_WORDS = "empty_words"
+# 批 A：evidence.input 引用的样例文件在平台 uploads 内不存在。**必须映射到
+# `offline_cap_gap` 而非 `online_content_gap`**——文件在**离线侧**的 uploads 里，
+# online admin 补不了；若落 `online_content_gap`，`_needs_reprocess` 对
+# `online_content_gap` 是「任意 ack_status 都重处理」⇒ 每轮重拉、每轮同一原因驳回，
+# **无限循环**。落 `offline_cap_gap` 则只在 ack_status∈{none,pending} 复位，不循环。
+REJECT_MISSING_SAMPLE = "missing_sample_file"
 
 # 内部码 → online `ack.invalidate_reason` 值域（online 只有 3 个粗码，本仓内部 4 个细码）。
 # online 侧校验是**严格相等**且原样落库，故只能发纯码；细粒度靠本仓 inbox.reject_detail 承载。
@@ -63,6 +70,9 @@ _ONLINE_REASON = {
     REJECT_EMPTY_WORDS: "online_content_gap",
     REJECT_VERSION_DRIFT: "online_content_gap",
     REJECT_CAP_GAP: "offline_cap_gap",
+    # 与 cap_gap 同粗码、靠 detail 前置的内部细码区分——沿用 content_gap/empty_words/
+    # version_drift 三码共用 online_content_gap 的既有做法（见上方细码表注释）。
+    REJECT_MISSING_SAMPLE: "offline_cap_gap",
 }
 
 
@@ -142,9 +152,9 @@ async def _process_envelope(envelope: dict) -> str:
         verdict, detail, ctx = await _self_check(db, envelope)
         if verdict is not None:
             return await _reject(db, envelope, payload_id, verdict, detail)
-        agent, interface, words = ctx
+        agent, interface, words, input_value = ctx
 
-        case = await _activate(db, envelope, payload_id, agent, interface, words)
+        case = await _activate(db, envelope, payload_id, agent, interface, words, input_value)
         await db.commit()
         db.expunge(case)
 
@@ -153,11 +163,77 @@ async def _process_envelope(envelope: dict) -> str:
     return "activated"
 
 
+# S1（批 B）：**允许换用平台样例文件继续回归**的错误类型。
+#
+# 划界判据 = 「错误的成因是否可能由输入内容决定」。名单内 = 成因在基础设施层，
+# 输入换不换都不改变它发生的概率 ⇒ 用同形状的样例回放是**有效的回归**。
+#
+# ⚠️ **只列有实测支撑的类型，不许凭推理扩表**：
+#   llm_timeout     ← 簇 3861 同输入「4 fail → 2 pass」（2026-09-16，成因确不在输入）
+#   llm_connection  ← 14 条簇全部用**原输入**跑通（S1 前无替换通道，输入==现场输入）
+# 这两个覆盖了全库 18 条簇的 100%（实测）。
+#
+# **未纳入**（零发生，待观测后再议，不是「已排除」）：
+#   llm_rate_limit / db_error / redis_error ← 成因同样在基础设施层，但**全库零簇**，
+#                                             纳入与否当下效果等价 ⇒ 不预支。
+#                                             将来真出现：加一项 + 加一条测试即可。
+# **禁止纳入**（纳错的方向是**静默假绿**，不可见）：
+#   llm_context_exceeded   ← 输入太长，换样例反而掩盖真问题
+#   llm_interface_business / external_non_llm ← 业务/外部依赖语义失败，与输入强相关
+#   llm_empty_response / llm_parse_error      ← 边界（多为瞬态但可能被内容触发），代价不对称
+#   llm_other                                 ← **兜底值域**，纳入即静默假绿
+TRANSIENT_ERROR_TYPES = frozenset({"llm_timeout", "llm_connection"})
+
+
+async def _resolve_sample_file(db, agent: Agent) -> str | None:
+    """取该 agent 的「平台自有且实存」的样例文件路径；取不到返回 None（fail-closed）。
+
+    来源 = 该 agent **非 error suite** 中首条满足「`input_type == "file"` ∧ `input.file_path`
+    非空 ∧ 该文件真在 uploads 内」的用例的 `file_path`（按 id 升序，确定性）。
+
+    两条约束各有理由：
+
+    1. **必须排除 error suite**：那些 case 的 `file_path` 正是**本次要替换掉的那条坏路径**
+       （error case 的 input 就是从信封原样搬来的），纳入即循环论证——用坏路径替换坏路径。
+    2. **必须逐个试到「存在」为止，不是取首条就完**：样例文件可能被人删掉。取首条不验，
+       一旦它被删，替换后的路径依旧不存在 ⇒ run 期照样 `FileNotFoundError` ⇒ **又回到
+       静默 `na`**，而装载期这次会「以为已经修好了」。逐个验则退化为 None → 干净驳回。
+
+    ⚠️ 判据复用探测期同一条 `validate_probe_input`（逃逸白名单 + isfile）。
+    """
+    rows = (await db.execute(
+        select(TestCase)
+        .join(TestSuite, TestCase.suite_id == TestSuite.id)
+        .where(
+            TestSuite.agent_id == agent.id,
+            TestSuite.is_error_suite.is_(False),
+            TestCase.input_type == "file",
+            TestCase.status == "active",
+        )
+        .order_by(TestCase.id)
+    )).scalars().all()
+
+    for case in rows:
+        inp = case.input
+        if not isinstance(inp, dict) or not inp.get("file_path"):
+            continue
+        if validate_probe_input(inp) is None:      # 逃逸 + 存在 一起过，才算可用
+            return str(inp["file_path"])
+    return None
+
+
 async def _self_check(db, envelope: dict):
     """结构自检 + 能力解析（登记 / 词表 / 装载闸）。
 
-    返回 `(verdict, detail, ctx)`：`verdict is None` = 通过，`ctx = (agent, interface, words)`；
-    否则 `ctx is None`、`verdict` 为内部细码、`detail` 为可读原因（只落 `reject_detail`）。
+    返回 `(verdict, detail, ctx)`：`verdict is None` = 通过，
+    `ctx = (agent, interface, words, input_value)`；否则 `ctx is None`、`verdict` 为内部细码、
+    `detail` 为可读原因（只落 `reject_detail`）。
+
+    ⚠️ **`ctx` 里的 `input_value` 才是该建单用的输入**，**不是** `envelope.evidence.input`——
+    S1 分流可能已把它换成平台样例（见下）。调用方**不得**自行重读信封：`evidence.input`
+    被读两次（此处校验 / `_activate` 建单）而替换只发生在其中一处时，**替换会生效在错的地方**
+    ——落库的仍是坏路径，且没有任何判据会红（`branch-outputs-fragmented-across-clauses` 同型）。
+    故 `ctx` 携带它、`_activate` 消费它，是本设计的**关键约束而非风格偏好**。
 
     **两处消费方共用**（拉取路径 `_process_envelope` 与 R-8 探测态 `cap_gap_probe`）——
     判据必须**同源**：分开写必然分叉，而在探测态上分叉的后果是「拉取时驳回、探测时放行」，
@@ -183,13 +259,48 @@ async def _self_check(db, envelope: dict):
     # R-27 装载闸：evidence.input 的形状必须能喂进该 agent 的 adapter 模板。不可达时
     # 渲染侧会**静默**原样发出占位符（`render_template._sub`），被测 agent 回兜底话术 ⇒
     # 断言恒 pass ⇒ 假绿写入 online。故在此 fail-closed 驳回，与「词表净化后为空」同型论证。
-    problems = check_input_wiring(
-        agent.adapter_config, (envelope.get("evidence") or {}).get("input")
-    )
+    input_value = (envelope.get("evidence") or {}).get("input")
+    problems = check_input_wiring(agent.adapter_config, input_value)
     if problems:
         return REJECT_CONTENT_GAP, "；".join(problems), None
 
-    return None, "", (agent, interface, words)
+    # 样例文件存在闸（批 A）：形状可达 ≠ 文件在。装载期不拦，坏路径会被**原样收下**，
+    # 直到 run 期 `multipart_files` 打开文件才 FileNotFoundError ⇒ 该 case 记
+    # `na` + `contract_error`，**而装载期一声不吭**（2026-09-21 实证：cc case 4085
+    # 用的 /app/uploads/cc_gen_good.pdf 平台没有，静默卡死在 ④ 之前）。
+    #
+    # 顺序在形状闸**之后**：`file_path` 未被模板引用时它是无关字段，不该因它驳回；
+    # 只有确认它会被渲染进请求（形状闸通过）才谈得上「引用不存在的文件」。
+    #
+    # 判据复用探测期同一条（`core/probe.py`）：逃逸白名单 + isfile + 可读消息。
+    # 非文件型输入（无 `file_path` 键，如 cs/gq/sp 的 `{"content": ...}`）返回 None，
+    # 完全不受此闸影响 —— 这道闸是 cc 一家的问题，不是四家的。
+    file_err = validate_probe_input(input_value)
+    if file_err:
+        # S1（批 B）分流：瞬态类错误的成因与**输入内容**无关（实测依据见
+        # TRANSIENT_ERROR_TYPES），故换平台样例文件继续回归是**有效回归**；
+        # 内容相关类换样例只会掩盖真问题 ⇒ 一律干净驳回。
+        if (src.get("error_type") or "") not in TRANSIENT_ERROR_TYPES:
+            return REJECT_MISSING_SAMPLE, file_err, None
+        sample = await _resolve_sample_file(db, agent)
+        if sample is None:
+            # fail-closed：取不到可用样例就不能「假装替换成功」——那会让坏路径原样落库，
+            # 退化成批 A 之前那个静默 `na`。宁可干净驳回（可见、可补救）。
+            return REJECT_MISSING_SAMPLE, f"{file_err}；且无可用样例文件可替换", None
+        # `_substituted_from` = 显式降级凭据：落库的 input 与信封原文因此必然不同，
+        # 差异本身就是「这条用的是替身输入」的证据（零新列，DB 与 API 都看得到）。
+        input_value = {
+            **input_value,
+            "file_path": sample,
+            "_substituted_from": input_value.get("file_path"),
+        }
+        logger.warning(
+            "回放输入已降级为平台样例：payload_id=%s agent=%s error_type=%s %s -> %s",
+            envelope.get("payload_id"), src.get("agent"), src.get("error_type"),
+            input_value.get("_substituted_from"), sample,
+        )
+
+    return None, "", (agent, interface, words, input_value)
 
 
 def _needs_reprocess(row: ErrorBackflowInbox) -> bool:
@@ -266,8 +377,15 @@ async def _ack_active(payload_id: str, case_id: int | None) -> None:
         await db.commit()
 
 
-async def _activate(db, envelope: dict, payload_id: str, agent: Agent, interface, words: list[str]) -> TestCase:
-    """upsert error suite → 建 error case → 记 inbox（同事务，commit 由调用方做）。"""
+async def _activate(db, envelope: dict, payload_id: str, agent: Agent, interface,
+                    words: list[str], input_value) -> TestCase:
+    """upsert error suite → 建 error case → 记 inbox（同事务，commit 由调用方做）。
+
+    `input_value` 由 `_self_check` 的 `ctx` 传入，**不在此重读 `envelope.evidence.input`**：
+    S1 分流可能已在自检里把它换成平台样例，重读会让替换失效（见 `_self_check` docstring 的
+    警告）。`envelope` 仍原样留档进 `backflow_envelope`——**留档必须保持原文**，它是出站
+    ⑤环 `trigger_signal_id` 的唯一取值来源，不得被替换污染。
+    """
     suite = (await db.execute(
         select(TestSuite).where(
             TestSuite.agent_id == agent.id, TestSuite.is_error_suite.is_(True)
@@ -283,7 +401,7 @@ async def _activate(db, envelope: dict, payload_id: str, agent: Agent, interface
         interface_id=interface.id,
         name=f"backflow:{payload_id}",
         input_type="text",
-        input=(envelope.get("evidence") or {}).get("input"),
+        input=input_value,
         case_type="regression_error",
         payload_id=payload_id,
         backflow_envelope=envelope,   # 原文留档：出站 trigger_signal_id 的唯一取值来源

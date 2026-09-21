@@ -75,8 +75,9 @@ async def probe_once() -> dict:
                              payload_id, verdict, detail)
                 continue
 
-            agent, interface, words = ctx
-            case = await _activate(db, envelope, payload_id, agent, interface, words)
+            agent, interface, words, input_value = ctx
+            case = await _activate(db, envelope, payload_id, agent, interface, words,
+                                   input_value)
             case_id = case.id          # commit 后属性过期，先取值（会话内同步 refresh 会炸）
             await db.commit()
             await _ack_active(payload_id, case_id)     # 铁律：commit 之后才 ack
