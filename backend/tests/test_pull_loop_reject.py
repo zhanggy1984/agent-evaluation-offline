@@ -628,7 +628,18 @@ class TestTransientSet(unittest.TestCase):
     def test_exact_membership(self) -> None:
         """**逐字钉死**：放宽哪怕一项，产生的是**静默假绿**（换了输入 ⇒ pass ⇒ 判「已修复」，
         而真实用户的文件仍会让它挂）——不可见、无人会红。故用相等而非包含。"""
-        self.assertEqual(pl.TRANSIENT_ERROR_TYPES, frozenset({"llm_timeout", "llm_connection"}))
+        self.assertEqual(pl.TRANSIENT_ERROR_TYPES, frozenset({"llm_connection"}))
+
+    def test_llm_timeout_is_excluded(self) -> None:
+        """`llm_timeout` **刻意排除**，尽管它看起来是最典型的瞬态错。
+
+        排除的依据不是「判据不成立」（对文件型 agent，超时**可能由文件大小/复杂度驱动**：
+        大 PDF ⇒ LLM 调用过长 ⇒ 换小样例跑通 ≠ 原场景修好），更要命的是**证据够不到本分支**：
+        当初据以纳入的簇 3861 是 customer-service —— 输入是自包含的 `content`、**没有
+        `file_path`，永远进不了这条分支**（全库 llm_timeout 簇 7 条全在 cs/gq，cc 零条）。
+        用够不到本分支的群体的实测，去为该分支内的一个类型背书 = measurement-scope 跑偏。
+        """
+        self.assertNotIn("llm_timeout", pl.TRANSIENT_ERROR_TYPES)
 
     def test_content_related_types_are_excluded(self) -> None:
         """内容相关 / 兜底值域**必须**在名单外（纳错方向不可见，代价不对称）。"""
@@ -639,7 +650,8 @@ class TestTransientSet(unittest.TestCase):
     def test_zero_observation_types_not_yet_included(self) -> None:
         """零发生的三个**刻意未纳入**（不是「已排除」）——将来纳入时本条会红，提醒补实测依据。
 
-        若哪天它们真产生了簇，处置 = 加进集合 + 更新本条 + 补一条实测记录。
+        它们与外层「禁止纳入」的区别：判据（成因与输入无关）成立，只是**全库零簇**、
+        无证据可依。真出现时：加进集合 + 更新本条 + **补一条够得到本分支的**实测记录。
         """
         for t in ("llm_rate_limit", "db_error", "redis_error"):
             self.assertNotIn(t, pl.TRANSIENT_ERROR_TYPES, t)
@@ -731,6 +743,20 @@ class TestInputSubstitution(unittest.TestCase):
         outcome, activated, rejected = self._run(
             input_value={"task_id": 668, "file_path": self._ghost()},
             error_type="llm_context_exceeded",
+        )
+        self.assertEqual(outcome, "rejected")
+        self.assertEqual(activated, [])
+        self.assertEqual(rejected[0][0], pl.REJECT_MISSING_SAMPLE)
+
+    def test_llm_timeout_is_rejected_at_the_gate(self) -> None:
+        """端到端确认这条排除真的生效：`llm_timeout` + 文件缺失 ⇒ **驳回**，不换样例。
+
+        `TestTransientSet` 钉的是常量取值，本条钉的是**它被这条闸真的读到**——
+        常量对了但闸没接上的话，前者照绿。
+        """
+        outcome, activated, rejected = self._run(
+            input_value={"task_id": 668, "file_path": self._ghost()},
+            error_type="llm_timeout",
         )
         self.assertEqual(outcome, "rejected")
         self.assertEqual(activated, [])

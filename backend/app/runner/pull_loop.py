@@ -168,21 +168,34 @@ async def _process_envelope(envelope: dict) -> str:
 # 划界判据 = 「错误的成因是否可能由输入内容决定」。名单内 = 成因在基础设施层，
 # 输入换不换都不改变它发生的概率 ⇒ 用同形状的样例回放是**有效的回归**。
 #
-# ⚠️ **只列有实测支撑的类型，不许凭推理扩表**：
-#   llm_timeout     ← 簇 3861 同输入「4 fail → 2 pass」（2026-09-16，成因确不在输入）
-#   llm_connection  ← 14 条簇全部用**原输入**跑通（S1 前无替换通道，输入==现场输入）
-# 这两个覆盖了全库 18 条簇的 100%（实测）。
+# ⚠️ **只列「实测支撑且够得到本分支」的类型**，不许凭推理扩表。
 #
-# **未纳入**（零发生，待观测后再议，不是「已排除」）：
-#   llm_rate_limit / db_error / redis_error ← 成因同样在基础设施层，但**全库零簇**，
-#                                             纳入与否当下效果等价 ⇒ 不预支。
-#                                             将来真出现：加一项 + 加一条测试即可。
+# ⚠️⚠️ **两条独立的准入条件，缺一不可**（本条是踩过坑才写下的）：
+#   (a) **判据**：成因在原理上与输入内容无关 ⇒ 换样例仍是有效回归；
+#   (b) **证据的适用范围**：支撑它的实测必须来自**会进入本分支的群体**（有 file_path 的
+#       文件型 agent）。用够不到本分支的 agent（cs/gq/sp 的输入自包含）的实测来背书
+#       一个文件型专属分支的类型，是 `measurement-scope-is-not-claim-scope` 的原型。
+#
+# 名单内：
+#   llm_connection ← ① 判据成立：「连不上」与文件内容无关；② 证据够得到：cc 的 7 条簇
+#                    **全部**是 llm_connection，且全部用**原输入**跑通（S1 前无替换通道，
+#                    输入==现场输入 ⇒ 纯观测）。
+#
+# **刻意未纳入**（不是「已排除」；将来纳入须先补够得到本分支的证据）：
+#   llm_timeout ← **(a) 都不一定成立**：对文件型 agent，超时**可能由文件大小/复杂度驱动**
+#                 （大 PDF ⇒ LLM 调用过长）⇒ 换小样例跑通 ≠ 原场景修好，而它会计进 K、
+#                 可能把簇判成 fixed ⇒ 正是要避免的静默假绿。
+#                 ⚠️ 曾据簇 3861「同输入 4 fail→2 pass」把它纳入，**已撤回**：3861 是
+#                 customer-service，输入是自包含的 content、**没有 file_path，永远进不了
+#                 本分支**（全库 llm_timeout 簇 7 条全在 cs/gq，cc 零条）。
+#   llm_rate_limit / db_error / redis_error ← 判据(a)成立，但**全库零簇** ⇒ 无证据可依，
+#                 纳入与否当下效果等价 ⇒ 不预支。真出现时：加一项 + 补一条够得到本分支的实测。
 # **禁止纳入**（纳错的方向是**静默假绿**，不可见）：
 #   llm_context_exceeded   ← 输入太长，换样例反而掩盖真问题
 #   llm_interface_business / external_non_llm ← 业务/外部依赖语义失败，与输入强相关
 #   llm_empty_response / llm_parse_error      ← 边界（多为瞬态但可能被内容触发），代价不对称
 #   llm_other                                 ← **兜底值域**，纳入即静默假绿
-TRANSIENT_ERROR_TYPES = frozenset({"llm_timeout", "llm_connection"})
+TRANSIENT_ERROR_TYPES = frozenset({"llm_connection"})
 
 
 async def _resolve_sample_file(db, agent: Agent) -> str | None:
