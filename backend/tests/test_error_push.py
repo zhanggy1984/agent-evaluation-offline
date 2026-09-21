@@ -10,9 +10,9 @@ from app.core.backflow_client import BackflowClientError
 from app.runner import error_push as ep
 
 
-def _case(cid, cluster_id, case_type="regression_error"):
+def _case(cid, cluster_id, case_type="regression_error", input=None):
     env = {"source": {"agent": "cs-agent", "cluster_id": cluster_id}} if cluster_id else {"source": {}}
-    return SimpleNamespace(id=cid, case_type=case_type, backflow_envelope=env)
+    return SimpleNamespace(id=cid, case_type=case_type, backflow_envelope=env, input=input)
 
 
 def _result(case_id, pf, error_type=None, detail=None):
@@ -42,6 +42,35 @@ class TestCasesOfCluster:
     def test_missing_result_row_defaults_to_na(self):
         out = ep._cases_of_cluster([_case(1, 100)], {})
         assert out[100][0]["pass_fail"] == "na"
+
+    def test_substituted_input_is_flagged(self):
+        """批 54：替换凭据必须**外发**。
+
+        不外发时，online 侧一次「样例跑通的 pass」与「原场景真修好了」**逐字同形**——
+        用户看到 pass、无从知道它跑的是替身输入 ⇒ 假绿，且两侧测试全绿、没有任何判据会红。
+        """
+        c = _case(1, 100, input={"file_path": "/app/uploads/s.pdf",
+                                 "_substituted_from": "/app/uploads/ghost.pdf"})
+        out = ep._cases_of_cluster([c], {1: _result(1, "pass")})
+        assert out[100][0]["input_substituted"] is True
+
+    def test_unsubstituted_input_carries_no_flag(self):
+        """反方向钉住：没替换过就**不落键**（与本函数 error_type/error_detail 同写法）。
+
+        为什么不落 `False`：载荷形状对每一行都变，且 online 侧再也分不出「没替换」与
+        「旧 offline 不发该字段」——而这两种在 online 的语义恰好相同，落 False 只是白白
+        让旧行与新行的 raw_json 长得不一样，回查时徒增噪音。
+        """
+        for inp in ({"file_path": "/app/uploads/s.pdf"}, None, "明文 input"):
+            out = ep._cases_of_cluster([_case(1, 100, input=inp)], {1: _result(1, "pass")})
+            assert "input_substituted" not in out[100][0], inp
+
+    def test_non_dict_input_does_not_raise(self):
+        """`input` 非 dict（纯文本 input 的 case 落库为 str）时不许炸——推送是 run 收尾路径，
+        这里抛异常会让整个簇的结果推不出去，代价远大于少一个标记。"""
+        out = ep._cases_of_cluster([_case(1, 100, input="帮我查一下XX政策")],
+                                   {1: _result(1, "pass")})
+        assert out[100][0]["pass_fail"] == "pass"
 
 
 class TestAssemblePayload:
