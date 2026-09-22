@@ -97,6 +97,10 @@ def static_check(agent_url: str) -> int:
 
 # ---------------- 平台冒烟（复用平台 probe） ----------------
 def _auth(c: httpx.Client, platform_url: str, admin_pwd: str) -> dict:
+    if not admin_pwd:
+        # 空密码会打一次注定失败的重试，而平台对连续失败会锁定账号（技能里记过这个坑），
+        # 所以缺凭据必须在发请求之前断掉，不能让它走到平台侧。
+        raise SystemExit("平台 admin 密码为空：请设置环境变量 ADMIN_PASSWORD，或传 --admin-pwd")
     r = c.post(f"{platform_url}/auth/login",
                json={"username": "admin", "password": admin_pwd})
     r.raise_for_status()
@@ -216,7 +220,9 @@ def main() -> None:
     ap.add_argument("--agent-url", required=True, help="agent 地址（含 /api/contracts）")
     ap.add_argument("--platform-url", default="",
                     help="平台 API 根（如 http://localhost:8180/api），提供则做平台冒烟")
-    ap.add_argument("--admin-pwd", default="Eval#Admin2026", help="平台 admin 密码")
+    # 凭据 env-only：不硬编码、不回显、不入库。默认取环境变量 ADMIN_PASSWORD。
+    ap.add_argument("--admin-pwd", default=os.environ.get("ADMIN_PASSWORD", ""),
+                    help="平台 admin 密码（默认取环境变量 ADMIN_PASSWORD）")
     ap.add_argument("--name", default="", help="agent 注册名（默认自动生成防撞）")
     ap.add_argument("--input", default="", help="显式探测输入 JSON（如 '{\"content\":\"你好\"}'）")
     ap.add_argument("--secrets", default="", help="凭证 JSON（{{auth.*}} 域）")
